@@ -1,0 +1,229 @@
+//! Responses to restored data requests and recovery assets.
+use super::data_type::DataType;
+use super::file_data::{FileDataWriter, send_file_data};
+use super::images::{boot_object_path, bootability, image_data, nor_data, serve_asr};
+use super::{RestoreContext, RestoreSession};
+use crate::{
+    ipsw::{Identity, Ipsw},
+    mux::{MuxStream, Session},
+    net, tss, wire,
+};
+use anyhow::{Context, Result, ensure};
+use plist::{Dictionary, Value};
+use std::time::Duration;
+
+impl RestoreSession {
+    pub fn serve(
+        &mut self,
+        session: &Session,
+        main: &mut MuxStream,
+        message: &Value,
+    ) -> Result<()> {
+        let kind = wire::data_type(message)?;
+        let data_type = DataType::parse(kind)?;
+        let arguments = [
+            "ImageName",
+            "ImageType",
+            "UpdaterName",
+            "MessageArgUpdaterName",
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            wire::string(message, &["Arguments", key])
+                .ok()
+                .map(|value| format!("{key}={value}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+        crate::log!(Debug, "restored:data", "{kind}: {arguments}");
+        let port = data_type.data_port(message, false)?;
+        if port != 0 {
+            let mut service = session.connect_retry(port, Duration::from_secs(60))?;
+            self.context
+                .serve_on(&mut self.ipsw, session, &mut service, message, data_type)
+        } else {
+            self.context
+                .serve_on(&mut self.ipsw, session, main, message, data_type)
+        }
+    }
+}
+
+impl RestoreContext {
+    pub(super) fn serve_on(
+        &self,
+        ipsw: &mut Ipsw,
+        session: &Session,
+        out: &mut MuxStream,
+        message: &Value,
+        data_type: DataType,
+    ) -> Result<()> {
+        let kind = wire::data_type(message)?;
+        // Resolve firmware identity only for handlers that consume it. Network,
+        // preflight and optional RecoveryOS probes do not depend on an identity.
+        let restore = &self.restore.identity;
+        let recovery = self.recovery.as_ref();
+        let identity = || -> Result<&Identity> {
+            let is_recovery =
+                wire::optional_boolean(message, &["Arguments", "IsRecoveryOS"])?.unwrap_or(false);
+            if data_type == DataType::RecoveryAsr || is_recovery {
+                Ok(&recovery
+                    .context("device requested a recoveryOS identity absent from this IPSW")?
+                    .identity)
+            } else {
+                Ok(restore)
+            }
+        };
+        // Generic boot objects use the restore ticket even for MacOSVariant
+        // paths. Dedicated RecoveryOS* requests use the recovery signature instead.
+        let response = match data_type {
+            DataType::Asr | DataType::RecoveryAsr => {
+                return serve_asr(ipsw, identity()?, out);
+            }
+            DataType::BuildIdentity => wire::dict([
+                ("BuildIdentityDict", identity()?.value.clone()),
+                (
+                    "Variant",
+                    match wire::optional(message, &["Arguments", "Variant"])? {
+                        Some(value) => value
+                            .as_string()
+                            .filter(|value| !value.is_empty())
+                            .context("invalid Arguments.Variant")?
+                            .into(),
+                        None => identity()?.behavior()?.name().into(),
+                    },
+                ),
+            ]),
+            DataType::ReceiptManifest => wire::dict([(
+                "ReceiptManifest",
+                Value::Dictionary(identity()?.manifest()?.clone()),
+            )]),
+            DataType::RootTicket => wire::dict([(
+                "RootTicketData",
+                Value::Data(tss::ticket(&self.restore.ticket)?.to_vec()),
+            )]),
+            DataType::RecoveryRootTicket => {
+                let recovery = self
+                    .recovery
+                    .as_ref()
+                    .context("missing recoveryOS identity")?;
+                wire::dict([(
+                    "RootTicketData",
+                    Value::Data(tss::ticket(&recovery.ticket)?.to_vec()),
+                )])
+            }
+            DataType::Empty => Value::Dictionary(Dictionary::new()),
+            DataType::Component(tag) => {
+                let component = identity()?.require_component_type(tag)?;
+                let bytes = ipsw.personalized(identity()?, component, &self.restore.ticket)?;
+                wire::dict([(format!("{kind}File"), Value::Data(bytes))])
+            }
+            DataType::PersonalizedBootObject | DataType::SourceBootObject => {
+                let id = identity()?;
+                let name = wire::string(message, &["Arguments", "ImageName"])?;
+                let global_optional = if name == "__GlobalManifest__" {
+                    wire::optional_boolean(message, &["Arguments", "GlobalManifestOptional"])?
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                let path = boot_object_path(id, name, message)?;
+                if data_type == DataType::SourceBootObject
+                    && name == "__GlobalManifest__"
+                    && !ipsw.contains(&path)
+                {
+                    ensure!(
+                        wire::optional(&id.value, &["Info", "VariantSupportsGlobalSigning"])?
+                            .is_none()
+                            || global_optional,
+                        "IPSW is missing required global manifest {path}"
+                    );
+                    crate::log!(Debug, "restored:data", "GlobalManifest missing: {path}");
+                    wire::send(out, &wire::dict([("FileDataDone", true.into())]))?;
+                    return Ok(());
+                }
+                if data_type == DataType::PersonalizedBootObject && !name.starts_with("__") {
+                    let bytes = ipsw.personalized(id, name, &self.restore.ticket)?;
+                    send_file_data(out, session, &self.assets, name, &bytes)?;
+                } else {
+                    self.stream_file(ipsw, out, session, name, &path)?;
+                }
+                return Ok(());
+            }
+            DataType::RecoveryImage => {
+                let path = self
+                    .recovery
+                    .as_ref()
+                    .context("missing recovery identity")?
+                    .identity
+                    .path("OS")?;
+                return self.stream_file(ipsw, out, session, "RecoveryOS", path);
+            }
+            DataType::RecoveryVersion => self.recovery_version()?,
+            DataType::RecoveryAsset => {
+                let key = wire::string(message, &["Arguments", "FWOverrideKey"])?;
+                if let Some(name) = key.strip_prefix("RecoveryOS") {
+                    self.recovery_assets(ipsw, Some(name))?
+                } else {
+                    wire::dict([("RecoveryOSNoAssetFound", true.into())])
+                }
+            }
+            DataType::RecoveryFirmware => self.recovery_assets(ipsw, None)?,
+            DataType::RecoveryLocalPolicy => self.recovery_local_policy(message)?,
+            DataType::Images => image_data(ipsw, identity()?, &self.restore.ticket, kind, message)?,
+            DataType::Nor => nor_data(ipsw, identity()?, &self.restore.ticket, message)?,
+            DataType::Bootability => {
+                bootability(ipsw, out)?;
+                return Ok(());
+            }
+            DataType::Asset => return serve_asset(&self.assets, out, message),
+            DataType::Firmware => {
+                let args = wire::get(message, &["Arguments"])?;
+                let response = if let Some(response) = crate::firmware::canary_response(args)? {
+                    response
+                } else {
+                    let update = crate::firmware::prepare(ipsw, identity()?, &self.device, args)?;
+                    let response = tss::send_raw(update.request())?;
+                    update.finish(response)?
+                };
+                return crate::firmware::send_response(out, response, args);
+            }
+        };
+        let _trace = matches!(
+            data_type,
+            DataType::Component(_)
+                | DataType::RecoveryAsset
+                | DataType::RecoveryFirmware
+                | DataType::RecoveryLocalPolicy
+                | DataType::Images
+                | DataType::Nor
+        )
+        .then(crate::logging::firmware_transfer);
+        wire::send(out, &response).with_context(|| format!("sending restored response {kind}"))?;
+        crate::log!(Debug, "restored:data", "{kind}: response sent");
+        Ok(())
+    }
+
+    fn stream_file(
+        &self,
+        ipsw: &mut Ipsw,
+        out: &mut MuxStream,
+        session: &Session,
+        name: &str,
+        path: &str,
+    ) -> Result<()> {
+        let size = ipsw.size(path)?;
+        let mut writer = FileDataWriter::new(out, session, &self.assets, name, Some(size));
+        ipsw.stream(path, &mut writer)?;
+        writer.finish()
+    }
+}
+
+pub(super) fn serve_asset(
+    assets: &net::AssetClient,
+    out: &mut impl std::io::Write,
+    message: &Value,
+) -> Result<()> {
+    let response = assets.response(message)?;
+    let _trace = crate::logging::firmware_transfer();
+    wire::send_binary(out, &response)
+}

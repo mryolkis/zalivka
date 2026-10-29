@@ -1,0 +1,143 @@
+//! Shared GUI widgets and display formatting.
+use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
+use zalivka::localization::{format as trf, text as tr};
+
+pub(super) fn caption(ui: &mut egui::Ui, text: impl AsRef<str>) -> egui::Response {
+    ui.label(
+        RichText::new(tr(text))
+            .small()
+            .color(ui.visuals().weak_text_color()),
+    )
+}
+
+pub(super) fn path_picker(ui: &mut egui::Ui, value: &mut String, hint: &str, button: &str) -> bool {
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), 34.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let clicked = ui.button(tr(button)).clicked();
+            ui.add_sized(
+                Vec2::new(ui.available_width(), 34.0),
+                egui::TextEdit::singleline(value).hint_text(tr(hint)),
+            );
+            clicked
+        },
+    )
+    .inner
+}
+
+pub(super) fn card(ctx: &egui::Context) -> egui::Frame {
+    let style = ctx.global_style();
+    egui::Frame::new()
+        .fill(style.visuals.window_fill)
+        .stroke(style.visuals.widgets.noninteractive.bg_stroke)
+        .corner_radius(14)
+        .inner_margin(16)
+}
+pub(super) fn section(ui: &mut egui::Ui, number: &str, title: &str) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), 18.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            caption(ui, number);
+            ui.label(RichText::new(tr(title)).strong());
+        },
+    );
+    ui.add_space(6.0);
+}
+pub(super) fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
+    let galley = ui.painter().layout_no_wrap(
+        zalivka::localization::text(text),
+        egui::FontId::proportional(12.0),
+        color,
+    );
+    let (rect, _) =
+        ui.allocate_exact_size(galley.size() + Vec2::new(20.0, 10.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 12, tint(color, ui.visuals().window_fill));
+    ui.painter()
+        .galley(rect.center() - galley.size() * 0.5, galley, color);
+}
+pub(super) fn tint(color: Color32, background: Color32) -> Color32 {
+    let channel = |c: u8, base: u8| ((u16::from(c) * 8 + u16::from(base) * 92) / 100) as u8;
+    Color32::from_rgb(
+        channel(color.r(), background.r()),
+        channel(color.g(), background.g()),
+        channel(color.b(), background.b()),
+    )
+}
+pub(super) fn metric(ui: &mut egui::Ui, label: &str, value: &str) {
+    caption(ui, label);
+    ui.label(RichText::new(tr(value)).size(20.0).strong());
+}
+pub(super) fn progress_bar(ui: &mut egui::Ui, fraction: Option<f32>) {
+    let bar = egui::ProgressBar::new(fraction.unwrap_or_default())
+        .fill(super::theme::BLUE)
+        .desired_height(10.0);
+    ui.add(bar);
+    if let Some(value) = fraction {
+        ui.label(
+            RichText::new(trf("{:.0}%", &[&format!("{:.0}", value * 100.0)]))
+                .small()
+                .strong(),
+        );
+    } else {
+        caption(ui, "Percentage unavailable");
+    }
+}
+
+pub(super) fn laptop(ui: &mut egui::Ui, connected: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(62.0, 54.0), egui::Sense::hover());
+    let color = if connected {
+        ui.visuals().hyperlink_color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let screen = egui::Rect::from_min_size(rect.min + Vec2::new(9.0, 6.0), Vec2::new(43.0, 30.0));
+    ui.painter()
+        .rect_filled(screen, 4, tint(color, ui.visuals().window_fill));
+    ui.painter().rect_stroke(
+        screen,
+        4,
+        Stroke::new(1.8_f32, color),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().line_segment(
+        [
+            rect.min + Vec2::new(4.0, 40.0),
+            rect.min + Vec2::new(58.0, 40.0),
+        ],
+        Stroke::new(2.0_f32, color),
+    );
+}
+pub(super) fn human_bytes(bytes: u64) -> String {
+    let value = zalivka::progress::human_bytes(bytes);
+    let (number, unit) = value.split_once(' ').unwrap();
+    let template = match unit {
+        "GiB" => "{:.2} GiB",
+        "MiB" => "{:.1} MiB",
+        "KiB" => "{:.1} KiB",
+        _ => "{bytes} B",
+    };
+    trf(template, &[number])
+}
+
+pub(super) fn transfer_stage(stage: &str) -> String {
+    for (prefix, template) in [
+        ("Verifying ", "Verifying {name}"),
+        ("Transferring ", "Transferring {name}"),
+    ] {
+        if let Some(name) = stage.strip_prefix(prefix) {
+            return trf(template, &[name]);
+        }
+    }
+    tr(stage)
+}
+pub(super) fn elapsed_text(seconds: u64) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
+}
