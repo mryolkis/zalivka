@@ -17,6 +17,7 @@ use x509_parser::{oid_registry::Oid, prelude::X509Certificate};
 const SYSTEM_ROOT: &[u8] = include_bytes!("../../certs/baa-system-root.cer");
 const USER_ROOT: &[u8] = include_bytes!("../../certs/baa-user-root.cer");
 const DEVICE_IDENTIFIERS: &str = "1.2.840.113635.100.8.3";
+const MAX_CERTIFICATE: usize = 16_384;
 
 #[derive(Debug, PartialEq)]
 enum Phase {
@@ -40,10 +41,10 @@ impl Attestation {
             .transpose()?
             .unwrap_or(0);
         ensure!(mode <= 8, "unsupported RestoreAttestationMode {mode}");
-        let enabled = mode != 0 && id.behavior()? == Behavior::Erase;
         // Apple's legacy levels 1..4 correspond to levels 5..8 during
         // authentication. Levels 6+ also require an ibss measurement tag;
         // level 8 requires the LocalBoot bit to be both measured and clear.
+        let enabled = mode != 0 && id.behavior()? == Behavior::Erase;
         let level = if !enabled {
             0
         } else if mode < 5 {
@@ -80,28 +81,15 @@ impl Attestation {
                     self.phase == Phase::Requested,
                     "unsolicited or repeated attestation certificate"
                 );
-                let certificates = wire::get(message, &["Certificates"])?
-                    .as_array()
-                    .context("invalid restore attestation Certificates")?;
-                ensure!(
-                    certificates.len() == 2,
-                    "restore attestation requires a leaf and one intermediate certificate"
-                );
-                let cert = |index: usize| -> Result<&[u8]> {
-                    certificates[index]
-                        .as_data()
-                        .filter(|v| !v.is_empty() && v.len() <= 16384)
-                        .context("invalid or oversized attestation certificate")
-                };
+                let (leaf, intermediate) = certificates(message)?;
                 let use_scrt = wire::dictionary(message)?
                     .get("AttestationUseSCRT")
-                    .map(|v| v.as_boolean().context("invalid AttestationUseSCRT"))
+                    .map(|value| value.as_boolean().context("invalid AttestationUseSCRT"))
                     .transpose()?
                     .unwrap_or(false);
-                let leaf = cert(0)?;
                 verify_chain(
                     leaf,
-                    cert(1)?,
+                    intermediate,
                     if use_scrt { SYSTEM_ROOT } else { USER_ROOT },
                     UnixTime::now(),
                 )?;
@@ -134,8 +122,7 @@ impl Attestation {
     }
 
     fn verify_properties(&self, leaf: &[u8]) -> Result<()> {
-        let properties = device_identifiers(leaf)?;
-        self.verify_identifiers(&properties)
+        self.verify_identifiers(&device_identifiers(leaf)?)
     }
 
     fn verify_identifiers(&self, properties: &HashMap<u32, &[u8]>) -> Result<()> {
@@ -152,7 +139,7 @@ impl Attestation {
         let mut number = || -> Result<u64> {
             let field = fields.next().context("incomplete BAA device identity")?;
             ensure!(
-                !field.is_empty() && field.bytes().all(|c| c.is_ascii_hexdigit()),
+                !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_hexdigit()),
                 "invalid BAA identity field"
             );
             Ok(u64::from_str_radix(field, 16)?)
@@ -201,9 +188,28 @@ impl Attestation {
     }
 }
 
+/// The leaf and its single intermediate from an AttestationIssued message.
+fn certificates(message: &Value) -> Result<(&[u8], &[u8])> {
+    let certificates = wire::get(message, &["Certificates"])?
+        .as_array()
+        .context("invalid restore attestation Certificates")?;
+    ensure!(
+        certificates.len() == 2,
+        "restore attestation requires a leaf and one intermediate certificate"
+    );
+    let certificate = |index: usize| -> Result<&[u8]> {
+        certificates[index]
+            .as_data()
+            .filter(|value| !value.is_empty() && value.len() <= MAX_CERTIFICATE)
+            .context("invalid or oversized attestation certificate")
+    };
+    Ok((certificate(0)?, certificate(1)?))
+}
+
 // BAA uses Apple's Basic X.509 policy, not a TLS server/client EKU. Its purpose
 // is fixed by the pinned BAA root. Still reject malformed EKU encodings.
 struct BaaUsage;
+
 impl webpki::ExtendedKeyUsageValidator for BaaUsage {
     fn validate(&self, mut iter: webpki::KeyPurposeIdIter<'_, '_>) -> Result<(), webpki::Error> {
         iter.try_for_each(|oid| oid.map(|_| ()))
@@ -253,7 +259,7 @@ fn verify_chain(leaf: &[u8], intermediate: &[u8], root: &[u8], now: UnixTime) ->
 
 fn certificate_from_der(bytes: &[u8]) -> Result<X509Certificate<'_>> {
     let (rest, certificate) = X509Certificate::from_der(bytes)
-        .map_err(|e| anyhow::anyhow!("invalid X.509 certificate: {e}"))?;
+        .map_err(|error| anyhow::anyhow!("invalid X.509 certificate: {error}"))?;
     ensure!(rest.is_empty(), "trailing data after X.509 certificate");
     certificate
         .extensions_map()
@@ -280,7 +286,7 @@ fn parse_identifiers(bytes: &[u8]) -> Result<HashMap<u32, &[u8]>> {
     let mut properties = HashMap::new();
     while !fields.is_empty() {
         let (rest, field) =
-            Any::from_der(fields).map_err(|e| anyhow::anyhow!("invalid BAA field: {e}"))?;
+            Any::from_der(fields).map_err(|error| anyhow::anyhow!("invalid BAA field: {error}"))?;
         ensure!(
             field.class() == Class::ContextSpecific && field.header.constructed(),
             "invalid BAA property tag"
