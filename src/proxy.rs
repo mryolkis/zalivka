@@ -1,4 +1,8 @@
 //! Shared proxy policy for HTTP requests and the opaque restoreOS FDR tunnel.
+//!
+//! One destination URI resolves to an ordered list of routes: direct or a
+//! concrete proxy. Failover is allowed only when a connection failed before any
+//! request bytes reached the destination; a sent POST is never replayed.
 use anyhow::{Context, Result, ensure};
 use ureq::unversioned::transport::{
     ConnectionDetails, Connector, DefaultConnector, RustlsConnector, SocksConnector, TcpConnector,
@@ -17,6 +21,9 @@ mod macos;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod negotiate;
 
+#[cfg(any(target_os = "linux", test))]
+const MAX_ROUTES: usize = 32;
+
 pub(crate) fn for_url(uri: &Uri) -> Result<Vec<Option<Proxy>>> {
     crate::progress::check_cancelled()?;
     #[cfg(windows)]
@@ -27,7 +34,7 @@ pub(crate) fn for_url(uri: &Uri) -> Result<Vec<Option<Proxy>>> {
     // NO_PROXY is an explicit DIRECT decision, not an absent configuration.
     if proxy_variables(uri)
         .iter()
-        .any(|name| std::env::var(name).is_ok_and(|v| !v.trim().is_empty()))
+        .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
     {
         return Ok(vec![environment_proxy(uri, |name| {
             std::env::var(name).ok()
@@ -53,11 +60,13 @@ fn proxy_variables(uri: &Uri) -> [&'static str; 4] {
 /// PAC failover must never replay a partially sent POST or response.
 #[derive(Debug)]
 pub(crate) struct ConnectFailure(pub(crate) anyhow::Error);
+
 impl std::fmt::Display for ConnectFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("connecting proxy route")
     }
 }
+
 impl std::error::Error for ConnectFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.0.as_ref())
@@ -78,7 +87,8 @@ pub(crate) fn try_routes<T>(
         match connect(proxy) {
             Ok(value) => return Ok(value),
             Err(error)
-                if routes.peek().is_some() && error.chain().any(|e| e.is::<ConnectFailure>()) =>
+                if routes.peek().is_some()
+                    && error.chain().any(|error| error.is::<ConnectFailure>()) =>
             {
                 crate::log!(
                     Warning,
@@ -95,7 +105,7 @@ pub(crate) fn try_routes<T>(
 #[cfg(any(target_os = "linux", test))]
 fn routes_from_strings(values: Vec<String>) -> Result<Vec<Option<Proxy>>> {
     ensure!(
-        !values.is_empty() && values.len() <= 32,
+        !values.is_empty() && values.len() <= MAX_ROUTES,
         "invalid system proxy route list; direct fallback is disabled"
     );
     let mut routes = Vec::new();
@@ -124,7 +134,7 @@ fn environment_proxy(uri: &Uri, read: impl Fn(&str) -> Option<String>) -> Result
     let names = proxy_variables(uri);
     let Some((name, address)) = names.iter().find_map(|name| {
         read(name)
-            .filter(|v| !v.trim().is_empty())
+            .filter(|value| !value.trim().is_empty())
             .map(|value| (name, value))
     }) else {
         return Ok(None);
@@ -232,9 +242,7 @@ impl HttpConnector {
             .connect(details, Some(transport))?
             .map(Transport::boxed))
     }
-}
 
-impl HttpConnector {
     fn connect_http(
         &self,
         details: &ConnectionDetails,
@@ -293,7 +301,7 @@ impl HttpConnector {
 }
 
 impl<T: Transport> connect::Connection for ureq::unversioned::transport::TransportAdapter<T> {
-    fn timeout(&mut self, remaining: std::time::Duration) -> anyhow::Result<()> {
+    fn timeout(&mut self, remaining: std::time::Duration) -> Result<()> {
         self.set_timeout(ureq::unversioned::transport::NextTimeout {
             after: remaining.into(),
             reason: ureq::Timeout::Connect,
@@ -305,10 +313,12 @@ impl<T: Transport> connect::Connection for ureq::unversioned::transport::Transpo
 
 #[derive(Debug)]
 struct TunnelTransport(Box<dyn Transport>);
+
 impl Transport for TunnelTransport {
     fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
         self.0.buffers()
     }
+
     fn transmit_output(
         &mut self,
         amount: usize,
@@ -316,15 +326,18 @@ impl Transport for TunnelTransport {
     ) -> Result<(), ureq::Error> {
         self.0.transmit_output(amount, timeout)
     }
+
     fn await_input(
         &mut self,
         timeout: ureq::unversioned::transport::NextTimeout,
     ) -> Result<bool, ureq::Error> {
         self.0.await_input(timeout)
     }
+
     fn is_open(&mut self) -> bool {
         self.0.is_open()
     }
+
     // TLS, if any, currently terminates at the proxy rather than the target.
     fn is_tls(&self) -> bool {
         false
@@ -450,6 +463,7 @@ fn windows_bypass(uri: &Uri, bypass: &str) -> bool {
         })
 }
 
+/// Glob matching for Windows proxy bypass patterns: `*` and `?`.
 #[cfg(any(windows, test))]
 fn wildcard(pattern: &[u8], text: &[u8]) -> bool {
     let (mut p, mut t, mut star) = (0, 0, None);
@@ -468,7 +482,7 @@ fn wildcard(pattern: &[u8], text: &[u8]) -> bool {
             return false;
         }
     }
-    pattern[p..].iter().all(|b| *b == b'*')
+    pattern[p..].iter().all(|byte| *byte == b'*')
 }
 
 #[cfg(test)]
