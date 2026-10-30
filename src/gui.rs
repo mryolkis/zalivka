@@ -34,9 +34,12 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 // at the display's refresh rate; egui still repaints immediately for user input.
 const UI_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const NOTICE_LIFETIME: Duration = Duration::from_secs(5);
+const MAX_LOGS: usize = 4000;
+const WINDOW_SIZE: [f32; 2] = [1280.0, 900.0];
+const MIN_WINDOW_SIZE: [f32; 2] = [480.0, 360.0];
 
 fn trim_logs(records: &mut VecDeque<Record>) {
-    if records.len() > 4000 {
+    if records.len() > MAX_LOGS {
         // Byte dumps must not evict the visible operation history.
         let index = records
             .iter()
@@ -57,8 +60,8 @@ pub fn run() -> Result<()> {
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!(
                 "../assets/window-icon.png"
             ))?)
-            .with_inner_size([1280.0, 900.0])
-            .with_min_inner_size([480.0, 360.0]),
+            .with_inner_size(WINDOW_SIZE)
+            .with_min_inner_size(MIN_WINDOW_SIZE),
         ..Default::default()
     };
     eframe::run_native(
@@ -80,6 +83,7 @@ enum Picker {
     Connect,
     Log,
 }
+
 enum Event {
     Scan {
         devices: std::result::Result<Vec<DeviceInfo>, String>,
@@ -98,6 +102,7 @@ struct Notice {
     tone: Tone,
     expires_at: Option<Instant>,
 }
+
 struct Confirmation {
     action: Action,
     ecid: u64,
@@ -176,10 +181,12 @@ impl App {
             confirmation: None,
         }
     }
+
     fn target(&self) -> Option<&DeviceInfo> {
         let ecid = parse_ecid(self.setup.ecid.trim()).ok()?;
-        self.devices.iter().find(|d| d.ecid == ecid)
+        self.devices.iter().find(|device| device.ecid == ecid)
     }
+
     fn blocked_reason(&self) -> Option<&'static str> {
         if self.windows_reboot_required {
             return Some("Restart Windows after installing the driver");
@@ -202,7 +209,7 @@ impl App {
                     "Select a Mac"
                 });
             }
-            Some(d) if !d.mode.can_restore() => return Some("Put the Mac in DFU mode"),
+            Some(device) if !device.mode.can_restore() => return Some("Put the Mac in DFU mode"),
             _ => {}
         }
         if !self.setup.automatic && self.setup.local_file().is_err() {
@@ -210,6 +217,7 @@ impl App {
         }
         None
     }
+
     fn error(&mut self, title: impl Into<String>, error: impl std::fmt::Display) {
         self.notice = Some(Notice {
             title: title.into(),
@@ -219,6 +227,7 @@ impl App {
             expires_at: None,
         });
     }
+
     fn journal_text(&self, details: bool) -> String {
         self.logs
             .iter()
@@ -227,6 +236,7 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
     fn journal_error(&mut self, error: Option<&str>) {
         if self.log_path.is_some()
             && let Some(error) = error
@@ -239,10 +249,12 @@ impl App {
             self.journal_open = true;
         }
     }
+
     fn journal_line(&mut self, line: Record) {
         self.logs.push_back(line);
         trim_logs(&mut self.logs);
     }
+
     fn background(
         &self,
         ctx: &egui::Context,
@@ -259,30 +271,32 @@ impl App {
             })
             .map(|_| ())
     }
+
     fn detect(&mut self, ctx: &egui::Context) {
         if self.scanning || self.job.is_some() {
             return;
         }
         self.scanning = true;
         self.last_scan = Instant::now();
-        if let Err(e) = self.background(ctx, "detect", || Event::Scan {
-            devices: usb::detect().map_err(|e| format!("{e:#}")),
+        if let Err(error) = self.background(ctx, "detect", || Event::Scan {
+            devices: usb::detect().map_err(|error| format!("{error:#}")),
         }) {
             self.scanning = false;
-            self.scan_error = Some(e.to_string());
+            self.scan_error = Some(error.to_string());
         }
         // DriverStore enumeration can be slow. Publish USB results independently
         // and keep at most one readiness check in flight across repeated scans.
         if cfg!(windows) && !self.checking_host {
             self.checking_host = true;
             if let Err(error) = self.background(ctx, "host", || {
-                Event::Host(drivers::host_status().map_err(|e| format!("{e:#}")))
+                Event::Host(drivers::host_status().map_err(|error| format!("{error:#}")))
             }) {
                 self.checking_host = false;
                 self.host = Err(error.to_string());
             }
         }
     }
+
     fn refresh_firmware(&mut self, ctx: &egui::Context, retry: bool) {
         let Some(device) = self.target().cloned() else {
             self.firmware = None;
@@ -306,12 +320,14 @@ impl App {
         if let Err(error) = self.background(ctx, "firmware", move || {
             Event::Firmware(
                 request,
-                catalog::latest(&device).map_err(|e| format!("{e:#}")),
+                catalog::latest(&device).map_err(|error| format!("{error:#}")),
             )
         }) {
-            self.firmware.as_mut().unwrap().release = Some(Err(error.to_string()));
+            self.firmware.as_mut().expect("selection created").release =
+                Some(Err(error.to_string()));
         }
     }
+
     fn pick(&mut self, picker: Picker, ctx: &egui::Context) {
         if self.picking {
             return;
@@ -324,7 +340,7 @@ impl App {
             Picker::Connect => "DAWTKN file",
             Picker::Log => "Save journal",
         });
-        if let Err(e) = self.background(ctx, "file", move || {
+        if let Err(error) = self.background(ctx, "file", move || {
             let dialog = rfd::FileDialog::new();
             let path = match picker {
                 Picker::Firmware => dialog
@@ -345,9 +361,10 @@ impl App {
             Event::Picked(picker, path)
         }) {
             self.picking = false;
-            self.error("Could not open the file picker", e);
+            self.error("Could not open the file picker", error);
         }
     }
+
     fn open_firmware_folder(&self) -> Result<()> {
         let directory = if self.setup.cache.trim().is_empty() {
             catalog::cache_directory()?
@@ -356,13 +373,7 @@ impl App {
         };
         std::fs::create_dir_all(&directory).context("creating firmware directory")?;
         let directory = std::path::absolute(directory).context("locating firmware directory")?;
-        #[cfg(windows)]
-        let opener = "explorer.exe";
-        #[cfg(target_os = "macos")]
-        let opener = "open";
-        #[cfg(not(any(windows, target_os = "macos")))]
-        let opener = "xdg-open";
-        let mut child = Command::new(opener)
+        let mut child = Command::new(folder_opener())
             .arg(directory)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -374,6 +385,7 @@ impl App {
         });
         Ok(())
     }
+
     fn start(&mut self, action: Action, ctx: &egui::Context) {
         if self.job.is_some() {
             return;
@@ -390,13 +402,7 @@ impl App {
         self.next_job += 1;
         let id = self.next_job;
         let mut setup = self.setup.clone();
-        setup.release = self.firmware.as_ref().and_then(|selection| {
-            self.target()
-                .filter(|device| selection.matches(device))
-                .and(selection.release.as_ref())
-                .and_then(|release| release.as_ref().ok())
-                .cloned()
-        });
+        setup.release = self.selected_release();
         let result = Job::spawn(
             id,
             action,
@@ -413,9 +419,34 @@ impl App {
                 self.job = Some(job);
                 self.collect_job_logs();
             }
-            Err(e) => self.error("Could not start the operation", format!("{e:#}")),
+            Err(error) => self.error("Could not start the operation", format!("{error:#}")),
         }
     }
+
+    /// The catalog release matching the currently selected device, if any.
+    fn selected_release(&self) -> Option<catalog::Release> {
+        let selection = self.firmware.as_ref()?;
+        let device = self.target()?;
+        if !selection.matches(device) {
+            return None;
+        }
+        selection.release.as_ref()?.as_ref().ok().cloned()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn folder_opener() -> &'static str {
+    "explorer.exe"
+}
+
+#[cfg(target_os = "macos")]
+fn folder_opener() -> &'static str {
+    "open"
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn folder_opener() -> &'static str {
+    "xdg-open"
 }
 
 #[cfg(test)]
