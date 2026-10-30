@@ -97,6 +97,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 13 | `host` (drivers/Windows/Linux) | done (drivers + linux + entire Windows tree rewritten) |
 | 14 | `app` (CLI + operations) | done |
 | 15 | `gui` (+ localization) | done (all gui modules and localization rewritten) |
+| — | cross-cutting `logging`/`progress` | done |
 | 16 | Cleanup: Cargo dependencies, dead cfg, docs, final full verification | pending |
 
 ## Progress log
@@ -160,6 +161,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `8564e31` | `gui/cards` + `gui/dialogs` rewrites | 552 tests, clippy clean |
 | `951bb92` | `gui/worker` rewrite | 552 tests, clippy clean |
 | `aca05a3` | `gui.rs` rewrite (GUI domain complete) | 552 tests, clippy clean |
+| `9bd9895` | `logging` + `progress` rewrites | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
