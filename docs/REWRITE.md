@@ -90,7 +90,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 6 | `firmware` (updater/containers/canary/request) | done (containers moved to ipsw; updater/canary/request rewritten) |
 | 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | done (usb.rs/backend/descriptors/KIS + dfu) |
 | 8 | `mux` (flatten packet/channel/stream) | done (packet/channel/stream/session) |
-| 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | `events` + `data_type` + `options` done; rest pending |
+| 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | `events`/`data_type`/`options`/`connection`/`session` done; rest pending |
 | 10 | `restored` services (data/images/keys/FDR/ASR) | FDR + ASR done; restored data services pending |
 | 11 | `net` (+ catalog; break proxy cycle) | catalog done; net pending |
 | 12 | `proxy` (one route model; unify framing) | pending |
@@ -128,6 +128,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `070df36` | `fdr` + `fdr/protocol` + `asr` rewrites | 552 tests, clippy clean |
 | `b7b0f66` | restore `events` + `data_type` rewrites | 552 tests, clippy clean |
 | `0b6a619` | restore `options` rewrite | 552 tests, clippy clean |
+| `47e9235` | restore `connection` + `session` rewrites | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
