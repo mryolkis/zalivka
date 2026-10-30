@@ -1,4 +1,9 @@
 //! Collect manifest requirements, stream ZIP entries and report verified digests.
+//!
+//! Verification never extracts the archive: each entry is read once with a
+//! bounded buffer while every declared digest input is hashed together. Nested
+//! container indexes are retained on disk so payload records can be hashed at
+//! their actual offsets; plist payload bundles stay in memory only when small.
 use super::{
     Ipsw, component_digest, component_path,
     containers::{
@@ -10,6 +15,7 @@ use super::{
 use crate::{checksum::hasher, img4, wire};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use sha2::digest::DynDigest;
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     io::{Read, Seek, SeekFrom, Write},
@@ -43,11 +49,14 @@ struct EntryVerification {
     aea_deferred: bool,
 }
 
+type Hash = Box<dyn DynDigest>;
+type Hashes = HashMap<(usize, DigestInput), Hash>;
+
 impl Ipsw {
     fn manifest_digests(&self) -> Result<HashMap<String, EntryDigests>> {
         let mut entries: HashMap<String, EntryDigests> = HashMap::new();
-        for (_, value) in self.identity_values() {
-            for (name, entry) in wire::dictionary(wire::get(value, &["Manifest"])?)? {
+        for (_, identity) in self.identity_values() {
+            for (name, entry) in wire::dictionary(wire::get(identity, &["Manifest"])?)? {
                 let tag = img4::component_tag(name, Some(entry))?;
                 let digest = component_digest(entry)
                     .with_context(|| format!("checking manifest component {name}"))?;
@@ -57,12 +66,15 @@ impl Ipsw {
                     continue;
                 };
                 ensure!(self.contains(path), "missing manifest component {path}");
-                let requirements = entries.entry(path.into()).or_default();
                 if let Some(digest) = digest {
-                    requirements.components.insert(ComponentDigest {
-                        tag,
-                        expected: digest.to_vec(),
-                    });
+                    entries
+                        .entry(path.into())
+                        .or_default()
+                        .components
+                        .insert(ComponentDigest {
+                            tag,
+                            expected: digest.to_vec(),
+                        });
                 }
             }
         }
@@ -114,6 +126,16 @@ impl Ipsw {
     }
 }
 
+/// Return the hash for `input`, creating it only on first use at this size.
+fn hash_for(hashes: &mut Hashes, length: usize, input: DigestInput) -> Result<&mut Hash> {
+    Ok(match hashes.entry((length, input)) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            entry.insert(hasher(length).context("unsupported manifest digest size")?)
+        }
+    })
+}
+
 impl EntryDigests {
     fn verify(
         &self,
@@ -124,17 +146,18 @@ impl EntryDigests {
     ) -> Result<EntryVerification> {
         let mut progress =
             crate::progress::Progress::new(format!("Verifying {name}"), Some(length), 0);
-        let mut n =
+        let mut read =
             read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
-        let aea = buffer[..n].starts_with(b"AEA1");
-        let mut bundle = (!self.components.is_empty() && plist_prefix(&buffer[..n])).then(Vec::new);
+        let aea = buffer[..read].starts_with(b"AEA1");
+        let mut bundle =
+            (!self.components.is_empty() && plist_prefix(&buffer[..read])).then(Vec::new);
         ensure!(
             bundle.is_none() || length <= MAX_PLIST_BUNDLE,
             "plist payload bundle exceeds memory limit: {name}"
         );
         // ZIP readers cannot seek into deflated entries. Retain only firmware
         // containers on disk so nested indexes can be read at any file offset.
-        let mut container = if container_prefix(&buffer[..n]) {
+        let mut container = if container_prefix(&buffer[..read]) {
             crate::storage::require(&std::env::temp_dir(), length)?;
             Some(tempfile::tempfile()?)
         } else {
@@ -146,61 +169,63 @@ impl EntryDigests {
             .components
             .iter()
             .filter(|_| !aea)
-            .map(|component| (component, DigestInput::retag(&buffer[..n], component.tag)))
+            .map(|component| {
+                (
+                    component,
+                    DigestInput::retag(&buffer[..read], component.tag),
+                )
+            })
             .collect::<Vec<_>>();
-        let mut hashes = HashMap::new();
+        let mut hashes = Hashes::new();
         for (component, tag) in &checks {
             for input in inputs.iter().copied().chain(*tag) {
-                if let Entry::Vacant(slot) = hashes.entry((component.expected.len(), input)) {
-                    slot.insert(
-                        hasher(component.expected.len())
-                            .context("unsupported manifest digest size")?,
-                    );
-                }
+                hash_for(&mut hashes, component.expected.len(), input)?;
             }
         }
         let mut verified = EntryVerification {
             aea_deferred: aea && !self.components.is_empty(),
             ..Default::default()
         };
-        while n != 0 {
+        while read != 0 {
             if let Some(file) = &mut container {
-                file.write_all(&buffer[..n])?;
+                file.write_all(&buffer[..read])?;
             }
             if let Some(bytes) = &mut bundle {
                 ensure!(
-                    bytes.len() as u64 + n as u64 <= MAX_PLIST_BUNDLE,
+                    bytes.len() as u64 + read as u64 <= MAX_PLIST_BUNDLE,
                     "plist payload bundle exceeds memory limit: {name}"
                 );
-                bytes.extend_from_slice(&buffer[..n]);
+                bytes.extend_from_slice(&buffer[..read]);
             }
             for ((_, input), hash) in &mut hashes {
-                input.update(hash.as_mut(), &buffer[..n], verified.bytes);
+                input.update(hash.as_mut(), &buffer[..read], verified.bytes);
             }
-            verified.bytes += n as u64;
-            progress.advance(n as u64);
-            n = read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
+            verified.bytes += read as u64;
+            progress.advance(read as u64);
+            read =
+                read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
         }
         ensure!(verified.bytes == length, "truncated ZIP entry {name}");
         if let Some(file) = &mut container {
+            let lengths = checks
+                .iter()
+                .map(|(component, _)| component.expected.len())
+                .collect::<HashSet<_>>();
             for range in payload_ranges_from(file, length)? {
                 let input = DigestInput::Payload(range.start, range.end);
                 inputs.push(input);
-                for (component, _) in &checks {
-                    if let Entry::Vacant(slot) = hashes.entry((component.expected.len(), input)) {
-                        let mut hash = hasher(component.expected.len())
-                            .context("unsupported manifest digest size")?;
-                        file.seek(SeekFrom::Start(range.start))?;
-                        let mut remaining = range.end - range.start;
-                        while remaining > 0 {
-                            let size = remaining.min(buffer.len() as u64) as usize;
-                            let n = read_chunk(file, &mut buffer[..size])?;
-                            ensure!(n != 0, "truncated firmware payload in {name}");
-                            hash.update(&buffer[..n]);
-                            remaining -= n as u64;
-                        }
-                        slot.insert(hash);
+                for length in &lengths {
+                    let mut hash = hasher(*length).context("unsupported manifest digest size")?;
+                    file.seek(SeekFrom::Start(range.start))?;
+                    let mut remaining = range.end - range.start;
+                    while remaining > 0 {
+                        let size = remaining.min(buffer.len() as u64) as usize;
+                        let read = read_chunk(file, &mut buffer[..size])?;
+                        ensure!(read != 0, "truncated firmware payload in {name}");
+                        hash.update(&buffer[..read]);
+                        remaining -= read as u64;
                     }
+                    hashes.insert((*length, input), hash);
                 }
             }
         }
