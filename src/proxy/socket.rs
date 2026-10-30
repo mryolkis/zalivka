@@ -131,7 +131,7 @@ fn proxy_stream(proxy: &Proxy, timeout: Duration) -> Result<Stream> {
     let tcp =
         tcp_connect(proxy.host(), proxy.port(), timeout).context("connecting configured proxy")?;
     if proxy.protocol() == ProxyProtocol::Https {
-        tls_transport(tcp, proxy.host(), crate::net::tls::config(None)?)
+        tls_transport(tcp, proxy.host(), crate::tls::config(None)?)
     } else {
         Ok(Stream::Tcp(tcp))
     }

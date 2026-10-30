@@ -18,6 +18,7 @@ pub mod progress;
 mod proxy;
 pub mod restore;
 pub mod storage;
+pub(crate) mod tls;
 pub mod tss;
 pub mod usb;
 #[cfg(windows)]

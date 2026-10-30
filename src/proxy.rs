@@ -225,7 +225,7 @@ impl HttpConnector {
         // Every route arrives here with a transport to the destination. TLS to
         // an HTTPS proxy belongs to the tunnel, not to the destination server.
         if self.tss && details.needs_tls() {
-            return crate::net::tls::connect_tss(details, transport).map(Some);
+            return crate::tls::connect_tss(details, transport).map(Some);
         }
         Ok(self
             .tls

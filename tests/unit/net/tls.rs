@@ -153,12 +153,12 @@ fn tss_tls_validates_apple_chain_hostname_signature_and_expiration() {
     // This extra root must never broaden the normal CDN/asset trust configuration.
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     assert!(matches!(
-        super::super::agent().config().tls_config().root_certs(),
+        crate::net::agent().config().tls_config().root_certs(),
         ureq::tls::RootCerts::WebPki
     ));
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     assert!(matches!(
-        super::super::agent().config().tls_config().root_certs(),
+        crate::net::agent().config().tls_config().root_certs(),
         ureq::tls::RootCerts::PlatformVerifier
     ));
 }

@@ -11,7 +11,7 @@ fn empty_tls_read_does_not_start_a_handshake_or_touch_the_socket() {
     let (mut peer, _) = listener.accept().unwrap();
     peer.set_nonblocking(true).unwrap();
     let connection = ClientConnection::new(
-        crate::net::tls::config(None).unwrap(),
+        crate::tls::config(None).unwrap(),
         ServerName::try_from("localhost").unwrap(),
     )
     .unwrap();
@@ -249,7 +249,7 @@ fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
     for (host, config, success) in [
         ("localhost", trusted.clone(), true),
         ("wrong.invalid", trusted, false),
-        ("localhost", crate::net::tls::config(None).unwrap(), false),
+        ("localhost", crate::tls::config(None).unwrap(), false),
     ] {
         let l = listener();
         let address = l.local_addr().unwrap();

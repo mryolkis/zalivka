@@ -1,7 +1,11 @@
+//! Apple HTTPS access: agent construction, URL policy and redirect handling.
+//!
+//! Only Apple's public HTTPS distribution hosts are accepted. Requests are
+//! routed through the proxy policy (`proxy::for_url`) and every redirect
+//! destination is validated before a second request is sent.
 mod assets;
 mod download;
 mod request;
-pub(crate) mod tls;
 pub use assets::AssetClient;
 pub(crate) use assets::wrapped_key_request;
 pub use download::{download, download_verified, verify_file};
@@ -10,8 +14,12 @@ use anyhow::{Context, Result, ensure};
 use std::{sync::Arc, time::Duration};
 use ureq::http::{Method, Request, Response, StatusCode, Uri};
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_REDIRECTS: u8 = 5;
+
 pub fn agent() -> ureq::Agent {
-    agent_with_body_timeout(Some(Duration::from_secs(120)))
+    agent_with_body_timeout(Some(TRANSFER_TIMEOUT))
 }
 
 pub(crate) fn public_roots() -> ureq::tls::RootCerts {
@@ -28,7 +36,7 @@ pub(crate) fn public_roots() -> ureq::tls::RootCerts {
 /// gs.apple.com uses Apple's private PKI, absent from Mozilla's public roots.
 /// Keep this additional trust anchor scoped to TSS, alongside system trust.
 pub(crate) fn tss_agent() -> ureq::Agent {
-    let config = agent_config(Some(Duration::from_secs(120)), public_roots());
+    let config = agent_config(Some(TRANSFER_TIMEOUT), public_roots());
     let connector = crate::proxy::HttpConnector::for_tss(config.clone());
     configured_agent(config, connector)
 }
@@ -46,7 +54,7 @@ fn agent_with_body_timeout(body_timeout: Option<Duration>) -> ureq::Agent {
     configured_agent(config, connector)
 }
 
-fn configured_agent(
+pub(crate) fn configured_agent(
     config: ureq::config::Config,
     connector: crate::proxy::HttpConnector,
 ) -> ureq::Agent {
@@ -67,11 +75,11 @@ fn agent_config(
     ureq::Agent::config_builder()
         .proxy(None)
         .tls_config(tls_config(roots))
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(120)))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_recv_response(Some(TRANSFER_TIMEOUT))
         .timeout_recv_body(body_timeout)
-        .timeout_per_read(Some(Duration::from_secs(120)))
-        .timeout_per_write(Some(Duration::from_secs(120)))
+        .timeout_per_read(Some(TRANSFER_TIMEOUT))
+        .timeout_per_write(Some(TRANSFER_TIMEOUT))
         .max_redirects(0)
         .user_agent(concat!("zalivka/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -115,20 +123,23 @@ pub(crate) fn validate_apple_uri(uri: &Uri) -> Result<()> {
         "URL host is not an Apple distribution host: {host}"
     );
     ensure!(
-        !uri.authority().is_some_and(|a| a.as_str().contains('@')),
+        !uri.authority()
+            .is_some_and(|authority| authority.as_str().contains('@')),
         "URL credentials are not allowed"
     );
     ensure!(
-        uri.authority().is_some_and(|a| {
-            a.as_str().eq_ignore_ascii_case(&host)
-                || a.as_str().eq_ignore_ascii_case(&format!("{host}:443"))
+        uri.authority().is_some_and(|authority| {
+            authority.as_str().eq_ignore_ascii_case(&host)
+                || authority
+                    .as_str()
+                    .eq_ignore_ascii_case(&format!("{host}:443"))
         }),
         "only HTTPS port 443 is accepted"
     );
     Ok(())
 }
 
-pub fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>> {
+pub fn get(url: &str) -> Result<Response<ureq::Body>> {
     let response = fetch(Request::get(url).body(Vec::new())?, &agent())?;
     ensure!(
         response.status().is_success(),
@@ -139,13 +150,13 @@ pub fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>> {
 }
 
 fn fetch(mut request: Request<Vec<u8>>, agent: &ureq::Agent) -> Result<Response<ureq::Body>> {
-    for redirects in 0..=5 {
+    for redirects in 0..=MAX_REDIRECTS {
         validate_apple_uri(request.uri())?;
         let response = send_http(agent, &request)?;
         if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
             return Ok(response);
         }
-        ensure!(redirects < 5, "too many Apple HTTP redirects");
+        ensure!(redirects < MAX_REDIRECTS, "too many Apple HTTP redirects");
         let location = response
             .headers()
             .get("location")
@@ -235,6 +246,7 @@ fn redirect_request(
             request.headers_mut().remove(name);
         }
     }
+    // A redirected POST becomes a bodyless GET, as browsers and ureq do.
     if status == StatusCode::SEE_OTHER
         || (request.method() == Method::POST && matches!(status.as_u16(), 301 | 302))
     {

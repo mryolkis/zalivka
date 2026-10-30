@@ -14,7 +14,7 @@ use ureq::unversioned::transport::{
     Buffers, ConnectionDetails, LazyBuffers, NextTimeout, Transport, TransportAdapter,
 };
 
-const TSS_EXTRA_ROOT: &[u8] = include_bytes!("../../certs/AppleIncRootCertificate.cer");
+const TSS_EXTRA_ROOT: &[u8] = include_bytes!("../certs/AppleIncRootCertificate.cer");
 
 fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(oxitls_rustcrypto_provider::provider())
@@ -123,5 +123,5 @@ impl Transport for TlsTransport {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/net/tls.rs"]
+#[path = "../tests/unit/net/tls.rs"]
 mod tests;
