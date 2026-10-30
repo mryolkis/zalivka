@@ -37,6 +37,9 @@ use windows_sys::Win32::{
 };
 
 const SERVICE: &str = "Apple Mobile Device Service";
+const SERVICE_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+const SERVICE_POLL: Duration = Duration::from_millis(200);
+const PROCESS_POLL_MS: u32 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -148,15 +151,21 @@ pub(crate) fn status() -> Result<HostStatus> {
         .as_ref()
         .map(service_state)
         .transpose()?
-        .is_some_and(|s| s != ServiceState::Stopped);
+        .is_some_and(|state| state != ServiceState::Stopped);
     // A working WinUSB binding remains supported even without Apple's package.
-    let compatible_usb_driver = nusb::list_devices().wait()?.any(|d| {
-        d.vendor_id() == APPLE_VENDOR
-            && (Mode::from_pid(d.product_id()).is_some()
-                || d.product_id() == 0x1881
-                || d.interfaces()
-                    .any(|i| (i.class(), i.subclass(), i.protocol()) == crate::usb::MUX_INTERFACE))
-            && d.driver()
+    let compatible_usb_driver = nusb::list_devices().wait()?.any(|device| {
+        device.vendor_id() == APPLE_VENDOR
+            && (Mode::from_pid(device.product_id()).is_some()
+                || device.product_id() == 0x1881
+                || device.interfaces().any(|interface| {
+                    (
+                        interface.class(),
+                        interface.subclass(),
+                        interface.protocol(),
+                    ) == crate::usb::MUX_INTERFACE
+                }))
+            && device
+                .driver()
                 .is_some_and(|name| name.eq_ignore_ascii_case("winusb"))
     });
     let installed = super::package::installed()?;
@@ -176,7 +185,7 @@ fn stop_service() -> Result<()> {
         crate::log!(Debug, "drivers:svc", "{SERVICE} not installed");
         return Ok(());
     };
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + SERVICE_STOP_TIMEOUT;
     let mut previous = None;
     loop {
         let state = service_state(&service)?;
@@ -202,12 +211,32 @@ fn stop_service() -> Result<()> {
                 Err(error) => return Err(error).context("Stopping Apple Mobile Device Service"),
             }
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(SERVICE_POLL);
     }
 }
 
 fn prepare_elevated(reboot: &mut bool) -> Result<()> {
     let started = Instant::now();
+    log_process_context()?;
+    ensure!(
+        unsafe { IsUserAnAdmin() } != 0,
+        "Windows setup requires administrator rights: IsUserAnAdmin=false. The process token has no active membership in the local Administrators group (S-1-5-32-544). UAC approval and a high integrity level alone do not guarantee membership. Run setup using a local administrator account on this computer."
+    );
+    let arch = architecture().context("Determining architecture before driver installation")?;
+    crate::log!(
+        Debug,
+        "drivers:host",
+        "{arch}; Windows={}",
+        windows_directory()?.display()
+    );
+    // Check the service first; don't replace the driver if stopping the conflict fails.
+    stop_service().context("Windows setup: stopping Apple service")?;
+    let installed = super::package::installed()?;
+    install_packages(arch, &installed, reboot)?;
+    verify_installation(started, *reboot)
+}
+
+fn log_process_context() -> Result<()> {
     let admin = unsafe { IsUserAnAdmin() } != 0;
     crate::log!(
         Trace,
@@ -225,20 +254,14 @@ fn prepare_elevated(reboot: &mut bool) -> Result<()> {
             "Could not read all token information: {error:#}"
         );
     }
-    ensure!(
-        admin,
-        "Windows setup requires administrator rights: IsUserAnAdmin=false. The process token has no active membership in the local Administrators group (S-1-5-32-544). UAC approval and a high integrity level alone do not guarantee membership. Run setup using a local administrator account on this computer."
-    );
-    let arch = architecture().context("Determining architecture before driver installation")?;
-    crate::log!(
-        Debug,
-        "drivers:host",
-        "{arch}; Windows={}",
-        windows_directory()?.display()
-    );
-    // Check the service first; don't replace the driver if stopping the conflict fails.
-    stop_service().context("Windows setup: stopping Apple service")?;
-    let installed = super::package::installed()?;
+    Ok(())
+}
+
+fn install_packages(
+    arch: &str,
+    installed: &std::collections::HashSet<Driver>,
+    reboot: &mut bool,
+) -> Result<()> {
     for driver in DRIVERS {
         if installed.contains(&driver) {
             crate::log!(
@@ -265,6 +288,10 @@ fn prepare_elevated(reboot: &mut bool) -> Result<()> {
         *reboot |=
             super::package::install(&inf).context("Windows setup: installing Apple driver")?;
     }
+    Ok(())
+}
+
+fn verify_installation(started: Instant, reboot: bool) -> Result<()> {
     crate::log!(Info, "drivers", "Checking installation");
     let host = status()?;
     crate::log!(
@@ -313,7 +340,6 @@ pub(crate) fn run(action: Action) -> Result<bool> {
             return Ok(false);
         }
     }
-
     let outcome = if admin {
         action.elevated()
     } else {
@@ -363,29 +389,29 @@ fn verify_device_access(devices: &[crate::drivers::UsbDiagnostic]) -> Result<()>
     }
     if devices.is_empty() {
         crate::log!(Info, "drivers:usb", "No Mac connected; access not checked");
-    } else {
-        let failures: Vec<_> = devices
-            .iter()
-            .filter(|device| !device.accessible)
-            .map(|device| {
-                format!(
-                    "{} (driver: {}): {}",
-                    device.instance_id,
-                    device.driver.as_deref().unwrap_or("not assigned"),
-                    device
-                        .error
-                        .as_deref()
-                        .unwrap_or("USB interface unavailable")
-                )
-            })
-            .collect();
-        ensure!(
-            failures.is_empty(),
-            "Package installed, but access to the connected device could not be confirmed. Reconnect the Mac; if the error persists, reset Apple USB drivers. {}",
-            failures.join("; ")
-        );
-        crate::log!(Info, "drivers:usb", "Access confirmed");
+        return Ok(());
     }
+    let failures: Vec<_> = devices
+        .iter()
+        .filter(|device| !device.accessible)
+        .map(|device| {
+            format!(
+                "{} (driver: {}): {}",
+                device.instance_id,
+                device.driver.as_deref().unwrap_or("not assigned"),
+                device
+                    .error
+                    .as_deref()
+                    .unwrap_or("USB interface unavailable")
+            )
+        })
+        .collect();
+    ensure!(
+        failures.is_empty(),
+        "Package installed, but access to the connected device could not be confirmed. Reconnect the Mac; if the error persists, reset Apple USB drivers. {}",
+        failures.join("; ")
+    );
+    crate::log!(Info, "drivers:usb", "Access confirmed");
     Ok(())
 }
 
@@ -411,41 +437,13 @@ pub(crate) fn open_installed_apps() -> Result<()> {
 /// Run a specific Zalivka helper through Windows UAC.
 fn run_elevated(action: Action) -> Result<u32> {
     let started = Instant::now();
-    let pipe = log::LogPipe::new()?;
-    let action = action.name();
-    let parameters = format!("--driver-helper {action} {}", pipe.id);
-    let mut pipe = Some(pipe);
-    crate::log!(
-        Debug,
-        "drivers:uac",
-        "Launching {}: {action}",
-        std::env::current_exe()?.display()
-    );
-    let executable = wide(std::env::current_exe()?);
-    let verb = wide("runas");
-    let arguments = wide(parameters);
-    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
-    info.cbSize = std::mem::size_of_val(&info) as u32;
-    info.fMask = SEE_MASK_NOCLOSEPROCESS;
-    info.lpVerb = verb.as_ptr();
-    info.lpFile = executable.as_ptr();
-    info.lpParameters = arguments.as_ptr();
-    info.nShow = SW_HIDE;
-    ensure!(
-        unsafe { ShellExecuteExW(&mut info) } != 0,
-        "Windows setup did not start (the administrator prompt may have been cancelled): {}",
-        std::io::Error::last_os_error()
-    );
-    ensure!(
-        !info.hProcess.is_null(),
-        "Windows did not return an installer process"
-    );
-    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+    let mut pipe = Some(log::LogPipe::new()?);
+    let process = launch_helper(action, pipe.as_ref().expect("log pipe created"))?;
     crate::log!(Debug, "drivers:uac", "PID={}", unsafe {
         GetProcessId(process.as_raw_handle())
     });
     loop {
-        let state = unsafe { WaitForSingleObject(process.as_raw_handle(), 100) };
+        let state = unsafe { WaitForSingleObject(process.as_raw_handle(), PROCESS_POLL_MS) };
         ensure!(
             state == WAIT_OBJECT_0 || state == WAIT_TIMEOUT,
             "Waiting for Windows setup: {}",
@@ -488,6 +486,38 @@ fn run_elevated(action: Action) -> Result<u32> {
         started.elapsed().as_secs_f64()
     );
     Ok(code)
+}
+
+fn launch_helper(action: Action, pipe: &log::LogPipe) -> Result<OwnedHandle> {
+    let name = action.name();
+    let parameters = format!("--driver-helper {name} {}", pipe.id);
+    crate::log!(
+        Debug,
+        "drivers:uac",
+        "Launching {}: {name}",
+        std::env::current_exe()?.display()
+    );
+    let executable = wide(std::env::current_exe()?);
+    let verb = wide("runas");
+    let arguments = wide(parameters);
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of_val(&info) as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = executable.as_ptr();
+    info.lpParameters = arguments.as_ptr();
+    info.nShow = SW_HIDE;
+    ensure!(
+        unsafe { ShellExecuteExW(&mut info) } != 0,
+        "Windows setup did not start (the administrator prompt may have been cancelled): {}",
+        std::io::Error::last_os_error()
+    );
+    ensure!(
+        !info.hProcess.is_null(),
+        "Windows did not return an installer process"
+    );
+    // SAFETY: ShellExecuteExW returned a fresh owned process handle.
+    Ok(unsafe { OwnedHandle::from_raw_handle(info.hProcess) })
 }
 
 /// Private UAC entry point, handled before CLI parsing. Only fixed driver
