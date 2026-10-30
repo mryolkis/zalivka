@@ -1,8 +1,30 @@
 //! Build device-bound signing requests for restore, recoveryOS and local policy.
+//!
+//! TSS signs a property list: device identity, nonces and one prepared entry per
+//! manifest component. Root parameters and component entries must never leak
+//! into each other, so components are built from the same immutable device
+//! parameters and only merged after every entry has been prepared.
 use crate::{device::DeviceInfo, img4, ipsw::Identity, wire};
 use anyhow::{Context, Result, ensure};
 use plist::{Dictionary, Value};
 use sha2::{Digest, Sha384};
+
+/// Firmware metadata copied verbatim from the selected identity.
+const IDENTITY_KEYS: [&str; 13] = [
+    "UniqueBuildID",
+    "Ap,OSLongVersion",
+    "Ap,OSReleaseType",
+    "Ap,ProductMarketingVersion",
+    "Ap,ProductType",
+    "Ap,SDKPlatform",
+    "Ap,Target",
+    "Ap,TargetType",
+    "Ap,Timestamp",
+    "PearlCertificationRootPub",
+    "NeRDEpoch",
+    "AllowNeRDBoot",
+    "PermitNeRDPivot",
+];
 
 pub(crate) fn host_fields() -> Dictionary {
     Dictionary::from_iter([
@@ -22,14 +44,14 @@ pub(crate) fn updater_fields(device: &DeviceInfo) -> Result<Dictionary> {
     let fuse = device
         .chip_fuse_mode
         .context("strict restore requires device CPFM")?;
-    let mut d = host_fields();
-    d.extend([
+    let mut fields = host_fields();
+    fields.extend([
         ("ApChipID".into(), u64::from(device.chip_id).into()),
         ("ApBoardID".into(), u64::from(device.board_id).into()),
         ("ApProductionMode".into(), (fuse & 2 != 0).into()),
         ("ApSecurityMode".into(), (fuse & 1 != 0).into()),
     ]);
-    Ok(d)
+    Ok(fields)
 }
 
 fn device_fields(device: &DeviceInfo) -> Result<Dictionary> {
@@ -40,56 +62,41 @@ fn device_fields(device: &DeviceInfo) -> Result<Dictionary> {
     let domain = device
         .security_domain
         .context("strict restore requires device SDOM")?;
-    let mut d = updater_fields(device)?;
-    d.extend([
+    let mut fields = updater_fields(device)?;
+    fields.extend([
         ("@ApImg4Ticket".into(), true.into()),
         ("ApECID".into(), device.ecid.into()),
         ("ApSecurityDomain".into(), u64::from(domain).into()),
         ("ApNonce".into(), Value::Data(device.ap_nonce.clone())),
     ]);
-    Ok(d)
+    Ok(fields)
 }
 
-fn base(device: &DeviceInfo, id: &Identity) -> Result<Dictionary> {
-    let device = id.device_parameters(device)?;
-    let mut d = device_fields(&device)?;
+fn base(device: &DeviceInfo, identity: &Identity) -> Result<Dictionary> {
+    let device = identity.device_parameters(device)?;
+    let mut fields = device_fields(&device)?;
     wire::copy_keys(
-        &mut d,
-        wire::dictionary(&id.value)?,
-        &[
-            "UniqueBuildID",
-            "Ap,OSLongVersion",
-            "Ap,OSReleaseType",
-            "Ap,ProductMarketingVersion",
-            "Ap,ProductType",
-            "Ap,SDKPlatform",
-            "Ap,Target",
-            "Ap,TargetType",
-            "Ap,Timestamp",
-            "PearlCertificationRootPub",
-            "NeRDEpoch",
-            "AllowNeRDBoot",
-            "PermitNeRDPivot",
-        ],
+        &mut fields,
+        wire::dictionary(&identity.value)?,
+        &IDENTITY_KEYS,
     );
-    if wire::flag(&id.value, &["Info", "RequiresUIDMode"])? {
-        // Use upstream's retail DFU compatibility defaults: UID mode off,
-        // Sika fuse zero. These are not measurements from the BuildManifest.
-        let uid = wire::flag(&id.value, &["UID_MODE"])?;
-        d.insert("UID_MODE".into(), uid.into());
-        d.insert(
-            "Ap,SikaFuse".into(),
-            wire::optional(&id.value, &["Ap,SikaFuse"])?
-                .map(wire::number)
-                .transpose()?
-                .unwrap_or(0)
-                .into(),
+    if wire::flag(&identity.value, &["Info", "RequiresUIDMode"])? {
+        // Upstream's retail DFU compatibility defaults: UID mode off, Sika fuse
+        // zero. These are not measurements from the BuildManifest.
+        fields.insert(
+            "UID_MODE".into(),
+            wire::flag(&identity.value, &["UID_MODE"])?.into(),
         );
+        let sika = wire::optional(&identity.value, &["Ap,SikaFuse"])?
+            .map(wire::number)
+            .transpose()?
+            .unwrap_or(0);
+        fields.insert("Ap,SikaFuse".into(), sika.into());
     }
     if !device.sep_nonce.is_empty() {
-        d.insert("SepNonce".into(), Value::Data(device.sep_nonce.clone()));
+        fields.insert("SepNonce".into(), Value::Data(device.sep_nonce.clone()));
     }
-    Ok(d)
+    Ok(fields)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -98,22 +105,22 @@ enum BootChain {
     Recovery,
 }
 
-pub fn request(device: &DeviceInfo, id: &Identity) -> Result<Value> {
-    firmware_request(device, id, BootChain::Restore)
+pub fn request(device: &DeviceInfo, identity: &Identity) -> Result<Value> {
+    firmware_request(device, identity, BootChain::Restore)
 }
 
-pub fn recovery_request(device: &DeviceInfo, id: &Identity) -> Result<Value> {
-    firmware_request(device, id, BootChain::Recovery)
+pub fn recovery_request(device: &DeviceInfo, identity: &Identity) -> Result<Value> {
+    firmware_request(device, identity, BootChain::Recovery)
 }
 
-fn firmware_request(device: &DeviceInfo, id: &Identity, chain: BootChain) -> Result<Value> {
-    let mut parameters = base(device, id)?;
+fn firmware_request(device: &DeviceInfo, identity: &Identity, chain: BootChain) -> Result<Value> {
+    let mut parameters = base(device, identity)?;
     if chain == BootChain::Recovery {
         // A rule parameter, excluded from the root request sent to Apple.
         parameters.insert("Ap,LocalBoot".into(), false.into());
     }
     let mut components = Dictionary::new();
-    for (name, value) in id.manifest()? {
+    for (name, value) in identity.manifest()? {
         let Some(entry) = component_request(value, &parameters)
             .with_context(|| format!("preparing signing component {name}"))?
         else {
@@ -125,8 +132,8 @@ fn firmware_request(device: &DeviceInfo, id: &Identity, chain: BootChain) -> Res
         );
         components.insert(name.clone(), Value::Dictionary(entry));
     }
-    // Every component sees the same device parameters. A previously prepared
-    // component must never become an input to another component's rules.
+    // Every component saw the same device parameters. A prepared component must
+    // never become an input to another component's rules.
     parameters.remove("Ap,LocalBoot");
     parameters.extend(components);
     Ok(Value::Dictionary(parameters))
@@ -136,20 +143,16 @@ fn firmware_request(device: &DeviceInfo, id: &Identity, chain: BootChain) -> Res
 fn component_request(value: &Value, parameters: &Dictionary) -> Result<Option<Dictionary>> {
     let fields = wire::dictionary(value)?;
     let info = fields.get("Info").map(wire::dictionary).transpose()?;
-    let trusted = fields
-        .get("Trusted")
-        .map(|value| value.as_boolean().context("invalid Trusted flag"))
-        .transpose()?
-        .unwrap_or(false);
+    let trusted_before_rules = boolean(fields.get("Trusted"), "Trusted flag")?.unwrap_or(false);
     let path = crate::ipsw::component_path(value)?;
-    let selected = info
+    let personalize = info
         .and_then(|info| info.get("Personalize"))
         .map(|value| value.as_boolean().context("invalid Info.Personalize"))
         .transpose()?;
     let rules = info.and_then(|info| info.get("RestoreRequestRules"));
     // Personalize controls file packaging. Trusted measurements and explicit
     // signing rules also belong in the ticket, even with Personalize=false.
-    if selected != Some(true) && !trusted && rules.is_none() {
+    if personalize != Some(true) && !trusted_before_rules && rules.is_none() {
         return Ok(None);
     }
     let mut entry = fields.clone();
@@ -157,15 +160,8 @@ fn component_request(value: &Value, parameters: &Dictionary) -> Result<Option<Di
     if let Some(rules) = rules {
         apply_rules(&mut entry, rules, parameters)?;
     }
-    let trusted = entry
-        .get("Trusted")
-        .map(|value| {
-            value
-                .as_boolean()
-                .context("invalid signing Trusted flag after rules")
-        })
-        .transpose()?
-        .unwrap_or(false);
+    let trusted =
+        boolean(entry.get("Trusted"), "signing Trusted flag after rules")?.unwrap_or(false);
     let digest = entry
         .get("Digest")
         .map(|value| value.as_data().context("invalid signing Digest"))
@@ -189,6 +185,16 @@ fn component_request(value: &Value, parameters: &Dictionary) -> Result<Option<Di
         entry.insert("Digest".into(), Value::Data(vec![]));
     }
     Ok(Some(entry))
+}
+
+fn boolean(value: Option<&Value>, what: &str) -> Result<Option<bool>> {
+    value
+        .map(|value| {
+            value
+                .as_boolean()
+                .with_context(|| format!("invalid {what}"))
+        })
+        .transpose()
 }
 
 pub fn apply_rules(entry: &mut Dictionary, rules: &Value, parameters: &Dictionary) -> Result<()> {
@@ -227,9 +233,9 @@ pub fn local_policy_request(
     args: Option<&Value>,
 ) -> Result<Value> {
     // LocalPolicy uses only device fields; firmware metadata makes Apple reject it.
-    let mut d = device_fields(device)?;
-    d.insert("Ap,LocalBoot".into(), args.is_some().into());
-    d.insert(
+    let mut fields = device_fields(device)?;
+    fields.insert("Ap,LocalBoot".into(), args.is_some().into());
+    fields.insert(
         "Ap,LocalPolicy".into(),
         wire::dict([
             (
@@ -239,26 +245,29 @@ pub fn local_policy_request(
             ("Trusted", true.into()),
         ]),
     );
-    if let Some(args) = args {
-        d.remove("ApNonce");
-        for key in ["Ap,NextStageIM4MHash", "Ap,RecoveryOSPolicyNonceHash"] {
-            let hash = wire::get(args, &[key])?
-                .as_data()
-                .filter(|hash| !hash.is_empty())
-                .with_context(|| format!("local policy requires nonempty data {key}"))?;
-            d.insert(key.into(), Value::Data(hash.to_vec()));
+    match args {
+        Some(args) => {
+            fields.remove("ApNonce");
+            for key in ["Ap,NextStageIM4MHash", "Ap,RecoveryOSPolicyNonceHash"] {
+                let hash = wire::get(args, &[key])?
+                    .as_data()
+                    .filter(|hash| !hash.is_empty())
+                    .with_context(|| format!("local policy requires nonempty data {key}"))?;
+                fields.insert(key.into(), Value::Data(hash.to_vec()));
+            }
+            let uuid = uuid::Uuid::parse_str(wire::string(args, &["Ap,VolumeUUID"])?)
+                .context("invalid local policy volume UUID")?;
+            fields.insert(
+                "Ap,VolumeUUID".into(),
+                Value::Data(uuid.as_bytes().to_vec()),
+            );
         }
-        let uuid = uuid::Uuid::parse_str(wire::string(args, &["Ap,VolumeUUID"])?)
-            .context("invalid local policy volume UUID")?;
-        d.insert(
-            "Ap,VolumeUUID".into(),
-            Value::Data(uuid.as_bytes().to_vec()),
-        );
-    } else {
-        d.insert(
-            "Ap,NextStageIM4MHash".into(),
-            Value::Data(Sha384::digest(next_ticket).to_vec()),
-        );
+        None => {
+            fields.insert(
+                "Ap,NextStageIM4MHash".into(),
+                Value::Data(Sha384::digest(next_ticket).to_vec()),
+            );
+        }
     }
-    Ok(Value::Dictionary(d))
+    Ok(Value::Dictionary(fields))
 }
