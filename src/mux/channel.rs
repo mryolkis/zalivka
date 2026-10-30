@@ -3,6 +3,10 @@ use super::{ACK, RECEIVE_WINDOW, RST, SYN, packet::TcpPacket};
 use anyhow::{Result, ensure};
 use std::collections::VecDeque;
 
+const FIN: u8 = 1;
+const HEADER_LENGTH: u8 = 5 << 4;
+const LOG_LIMIT: usize = 256;
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum State {
     Opening,
@@ -44,7 +48,7 @@ impl Channel {
         tcp[2..4].copy_from_slice(&self.destination.to_be_bytes());
         tcp[4..8].copy_from_slice(&self.seq.to_be_bytes());
         tcp[8..12].copy_from_slice(&self.ack.to_be_bytes());
-        tcp[12] = 5 << 4;
+        tcp[12] = HEADER_LENGTH;
         tcp[13] = flags;
         let window = ((RECEIVE_WINDOW - self.input.len()) >> 8) as u16;
         tcp[14..16].copy_from_slice(&window.to_be_bytes());
@@ -68,17 +72,7 @@ impl Channel {
         }
         self.window = window;
         if flags & RST != 0 {
-            crate::log!(
-                Debug,
-                "usbmux",
-                "RST {peer_port} -> {source}: {}",
-                String::from_utf8_lossy(&data[..data.len().min(256)])
-            );
-            crate::logging::bytes(
-                "usbmux:tcp",
-                format_args!("RST {peer_port} -> {source}"),
-                data,
-            );
+            log_reset(peer_port, source, data);
             self.state = State::Closed;
             return Ok(false);
         }
@@ -102,7 +96,7 @@ impl Channel {
             "invalid mux TCP acknowledgement"
         );
         self.peer_ack = ack;
-        let acknowledge = !data.is_empty() || flags & 1 != 0;
+        let acknowledge = !data.is_empty() || flags & FIN != 0;
         if acknowledge {
             ensure!(
                 seq == self.ack,
@@ -119,7 +113,7 @@ impl Channel {
             self.input.extend(data);
             self.ack = self.ack.wrapping_add(data.len() as u32);
         }
-        if flags & 1 != 0 {
+        if flags & FIN != 0 {
             crate::log!(
                 Debug,
                 "usbmux",
@@ -131,4 +125,18 @@ impl Channel {
         }
         Ok(acknowledge)
     }
+}
+
+fn log_reset(peer_port: u16, source: u16, data: &[u8]) {
+    crate::log!(
+        Debug,
+        "usbmux",
+        "RST {peer_port} -> {source}: {}",
+        String::from_utf8_lossy(&data[..data.len().min(LOG_LIMIT)])
+    );
+    crate::logging::bytes(
+        "usbmux:tcp",
+        format_args!("RST {peer_port} -> {source}"),
+        data,
+    );
 }
