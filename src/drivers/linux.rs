@@ -8,6 +8,21 @@ use std::{
     process::{Command, Stdio},
 };
 
+const RULE_PATH: &str = "/etc/udev/rules.d/70-zalivka.rules";
+
+/// Bundled rules from previous releases; only these may be upgraded in place.
+const PREVIOUS_RULES: &[&[u8]] = &[
+    b"# Apple DFU/recovery and restore interfaces. Access for the active local seat.\nSUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n",
+    concat!(
+        "# Apple DFU/recovery and restore interfaces. Access for the active local seat.\n",
+        "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n\n",
+        "# Mac restore mode is handled directly by Zalivka, not usbmuxd. Override the\n",
+        "# activation/ownership set by 39-usbmuxd.rules; keep access for the active seat.\n",
+        "SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{idVendor}==\"05ac\", ATTR{idProduct}==\"12ac\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", OWNER:=\"root\", GROUP:=\"root\", MODE:=\"0600\"\n",
+    )
+    .as_bytes(),
+];
+
 pub(super) fn prepare() -> Result<()> {
     let executable = std::env::current_exe().context("locating the Zalivka executable")?;
     run_setup(&mut elevation_command(&executable))
@@ -51,45 +66,22 @@ fn run_setup(command: &mut Command) -> Result<()> {
 
 pub(super) fn install() -> Result<()> {
     install_with(
-        Path::new("/etc/udev/rules.d/70-zalivka.rules"),
+        Path::new(RULE_PATH),
         Command::new("udevadm").args(["control", "--reload-rules"]),
     )
 }
 
 fn install_with(path: &Path, reload: &mut Command) -> Result<()> {
     // Upgrade only our previous bundled rule; preserve administrator changes.
-    const PREVIOUS: &[&[u8]] = &[
-        b"# Apple DFU/recovery and restore interfaces. Access for the active local seat.\nSUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n",
-        concat!(
-            "# Apple DFU/recovery and restore interfaces. Access for the active local seat.\n",
-            "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n\n",
-            "# Mac restore mode is handled directly by Zalivka, not usbmuxd. Override the\n",
-            "# activation/ownership set by 39-usbmuxd.rules; keep access for the active seat.\n",
-            "SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{idVendor}==\"05ac\", ATTR{idProduct}==\"12ac\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", OWNER:=\"root\", GROUP:=\"root\", MODE:=\"0600\"\n",
-        ).as_bytes(),
-    ];
     let replace = match std::fs::read(path) {
         Ok(existing) if existing == UDEV_RULES.as_bytes() => None,
-        Ok(existing) if PREVIOUS.contains(&existing.as_slice()) => Some(true),
+        Ok(existing) if PREVIOUS_RULES.contains(&existing.as_slice()) => Some(true),
         Ok(_) => bail!("different udev rule already exists; refusing to overwrite"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
         Err(error) => return Err(error).context("reading existing udev rule"),
     };
     if let Some(replace) = replace {
-        let directory = path.parent().context("udev rule path has no parent")?;
-        std::fs::create_dir_all(directory)
-            .context("creating udev rule directory (requires root)")?;
-        let mut file = tempfile::NamedTempFile::new_in(directory)
-            .context("writing udev rule (requires root)")?;
-        file.write_all(UDEV_RULES.as_bytes())?;
-        file.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o644))?;
-        if replace {
-            file.persist(path).context("upgrading bundled udev rule")?;
-        } else {
-            file.persist_noclobber(path)
-                .context("installing udev rule without overwriting existing files")?;
-        }
+        write_rule(path, replace)?;
     }
     let output = reload
         .output()
@@ -99,6 +91,23 @@ fn install_with(path: &Path, reload: &mut Command) -> Result<()> {
         "udevadm could not reload rules; rule file was saved: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
+    Ok(())
+}
+
+fn write_rule(path: &Path, replace: bool) -> Result<()> {
+    let directory = path.parent().context("udev rule path has no parent")?;
+    std::fs::create_dir_all(directory).context("creating udev rule directory (requires root)")?;
+    let mut file =
+        tempfile::NamedTempFile::new_in(directory).context("writing udev rule (requires root)")?;
+    file.write_all(UDEV_RULES.as_bytes())?;
+    file.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o644))?;
+    if replace {
+        file.persist(path).context("upgrading bundled udev rule")?;
+    } else {
+        file.persist_noclobber(path)
+            .context("installing udev rule without overwriting existing files")?;
+    }
     Ok(())
 }
 

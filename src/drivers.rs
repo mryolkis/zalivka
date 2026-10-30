@@ -9,6 +9,10 @@ use std::{fs::File, io::Write, path::Path};
 
 pub const UDEV_RULES: &str = include_str!("../packaging/70-zalivka.rules");
 
+const KIS_PRODUCT: u16 = 0x1881;
+const RESTORE_PRODUCT: u16 = 0x12ac;
+const DFU_GETSTATE: u8 = 5;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HostStatus {
     pub apple_service_installed: bool,
@@ -117,15 +121,24 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
         }
         let mode = Mode::from_pid(info.product_id());
         // Preparing a Mac must not probe an unrelated iPhone in normal mode.
-        if restore_only && mode.is_none() && ![0x12ac, 0x1881].contains(&info.product_id()) {
+        if restore_only
+            && mode.is_none()
+            && ![RESTORE_PRODUCT, KIS_PRODUCT].contains(&info.product_id())
+        {
             continue;
         }
         let mux: Vec<u8> = info
             .interfaces()
-            .filter(|i| (i.class(), i.subclass(), i.protocol()) == crate::usb::MUX_INTERFACE)
-            .map(|i| i.interface_number())
+            .filter(|interface| {
+                (
+                    interface.class(),
+                    interface.subclass(),
+                    interface.protocol(),
+                ) == crate::usb::MUX_INTERFACE
+            })
+            .map(|interface| interface.interface_number())
             .collect();
-        if mode.is_none() && mux.is_empty() && info.product_id() != 0x1881 {
+        if mode.is_none() && mux.is_empty() && info.product_id() != KIS_PRODUCT {
             continue;
         }
         let mut interfaces = if mux.is_empty() { vec![0] } else { mux };
@@ -133,7 +146,7 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
         #[cfg(windows)]
         let mut reset_error = None;
         let probe = (|| -> Result<String> {
-            if info.product_id() == 0x1881 {
+            if info.product_id() == KIS_PRODUCT {
                 let device = info.open().wait()?;
                 let mut kis = crate::usb::Kis::open(&device, &info)?;
                 kis.info()?;
@@ -160,7 +173,7 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
                         nusb::transfer::ControlIn {
                             control_type: nusb::transfer::ControlType::Class,
                             recipient: nusb::transfer::Recipient::Interface,
-                            request: 5,
+                            request: DFU_GETSTATE,
                             value: 0,
                             index: u16::from(number),
                             length: 1,
@@ -175,7 +188,7 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
                     reset_error = interface
                         .check_reset_access(&info)
                         .err()
-                        .map(|e| format!("{e:#}"));
+                        .map(|error| format!("{error:#}"));
                 }
             }
             Ok(interface.transport().into())
@@ -187,7 +200,7 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
             accessible: probe.is_ok(),
             transport: probe.as_ref().ok().cloned(),
             dfu_state,
-            error: probe.err().map(|e| format!("{e:#}")),
+            error: probe.err().map(|error| format!("{error:#}")),
             #[cfg(windows)]
             driver: info.driver().map(str::to_owned),
             #[cfg(windows)]
@@ -211,7 +224,7 @@ pub fn winusb_inf(pid: u16, interface: Option<u8>) -> Result<String> {
     let hardware = format!(
         "USB\\VID_05AC&PID_{pid:04X}{}",
         interface
-            .map(|i| format!("&MI_{i:02X}"))
+            .map(|interface| format!("&MI_{interface:02X}"))
             .unwrap_or_default()
     );
     Ok(format!(
