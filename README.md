@@ -250,13 +250,18 @@ settings, Kerberos configuration, or the user's credential cache.
 ## GitHub Actions and releases
 
 The [Check workflow](.github/workflows/check.yml) runs formatting, Clippy, and
-tests on Windows, Linux, and macOS for pushes and pull requests. Linux checks
-also exercise a disposable local Kerberos realm. macOS checks compile against
-the Apple SDK and exercise native CFNetwork PAC resolution.
+tests on Windows and Linux (x86_64 and ARM64) and on macOS (Apple Silicon and
+Intel) for pushes and pull requests. Linux checks also exercise a disposable
+local Kerberos realm. macOS checks compile against the Apple SDK and exercise
+native CFNetwork PAC resolution. Check jobs cache Cargo downloads and compiled
+dependencies between runs with
+[rust-cache](https://github.com/Swatinem/rust-cache); release builds run
+uncached so they do not compete for the repository cache budget.
 
 The [Build and release workflow](.github/workflows/release.yml) builds Windows
-x64 and Linux x64 packages after the same checks. Push a version tag on a commit
-containing the workflow to publish a GitHub Release:
+and Linux packages for x86_64 and ARM64, plus a universal macOS binary, after
+the same checks. Push a version tag on a commit containing the workflow to
+publish a GitHub Release:
 
 ```sh
 git tag v0.2.0

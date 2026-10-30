@@ -1,0 +1,75 @@
+name: Check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  check:
+    name: Check (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Native runners for every OS and architecture shipped by the release workflow.
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            libxkbcommon-dev libwayland-dev libproxy-dev libkrb5-dev \
+            libclang-dev gsettings-desktop-schemas libglib2.0-bin \
+            python3 krb5-kdc krb5-admin-server krb5-user
+
+      - name: Rust tools
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target ${{ matrix.target }}
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Clippy
+        run: cargo clippy --locked --target ${{ matrix.target }} --all-targets --all-features -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --target ${{ matrix.target }} --all-features
+
+      - name: Kerberos proxy tests
+        if: runner.os == 'Linux'
+        run: cargo test --locked --target ${{ matrix.target }} --all-features --lib kerberos_authenticates_http_and_fdr_tunnels -- --ignored
