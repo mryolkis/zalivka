@@ -1,4 +1,9 @@
 //! Direct USB multiplex transport. No usbmuxd daemon or MobileDevice library.
+//!
+//! A mux link carries one version handshake and then TCP-like channels. Every
+//! frame is assembled from USB packets; a channel owns its sequence space and a
+//! receive window. Any uncertain write or framing error retires the whole link
+//! instead of letting another service reuse an ambiguous sequence.
 mod channel;
 mod packet;
 mod stream;
@@ -27,6 +32,8 @@ const MTU: usize = 3 * 16384;
 pub(crate) const MAX_PAYLOAD: usize = MTU - 36 - 1;
 const WRITE_BATCH: usize = 256 * 1024;
 const RECEIVE_WINDOW: usize = 256 * 1024;
+const ASSEMBLY_LIMIT: usize = 2 * 65536;
+const MAX_CHANNELS: usize = 64;
 const SYN: u8 = 2;
 const RST: u8 = 4;
 const ACK: u8 = 16;
@@ -68,16 +75,20 @@ pub trait PacketTransport: Send {
         Ok(())
     }
 }
+
 impl PacketTransport for MuxUsb {
-    fn write_packet(&mut self, b: &[u8]) -> Result<()> {
-        self.write_packet(b)
+    fn write_packet(&mut self, bytes: &[u8]) -> Result<()> {
+        self.write_packet(bytes)
     }
+
     fn read_packet(&mut self) -> Result<Vec<u8>> {
         self.read_packet()
     }
+
     fn input_ready(&self) -> Option<InputReady> {
         self.input_ready()
     }
+
     fn write_packets(&mut self, packets: &[Vec<u8>], cancelled: &AtomicBool) -> Result<()> {
         self.write_packets(packets, cancelled)
     }
@@ -178,9 +189,9 @@ impl Session {
             match self.connect_until(destination, attempt) {
                 Ok(stream) => return Ok(stream),
                 Err(error)
-                    if error
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused) =>
+                    if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                        error.kind() == std::io::ErrorKind::ConnectionRefused
+                    }) =>
                 {
                     if Instant::now() >= deadline {
                         return Err(error);
@@ -200,14 +211,11 @@ impl Session {
         ensure!(!self.1.load(Ordering::Acquire), "USB mux session cancelled");
         let mut link = self.lock()?;
         ensure!(Instant::now() < deadline, "service connection timed out");
-        ensure!(link.channels.len() < 64, "too many mux connections");
-        let source = loop {
-            let p = link.next_port;
-            link.next_port = link.next_port.wrapping_add(1).max(1);
-            if !link.channels.contains_key(&p) {
-                break p;
-            }
-        };
+        ensure!(
+            link.channels.len() < MAX_CHANNELS,
+            "too many mux connections"
+        );
+        let source = link.allocate_port();
         link.channels.insert(source, Channel::new(destination));
         let sent = link.send_tcp(source, SYN, &[]);
         crate::log!(Trace, "usbmux:tcp", "{source} -> {destination}: SYN");
@@ -217,15 +225,15 @@ impl Session {
         loop {
             ensure!(!self.1.load(Ordering::Acquire), "USB mux session cancelled");
             let mut link = self.lock()?;
-            let c = &link.channels[&source];
-            if c.state == State::Closed {
+            let channel = &link.channels[&source];
+            if channel.state == State::Closed {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::ConnectionRefused,
                     format!("device refused service port {destination}"),
                 )
                 .into());
             }
-            if c.state == State::Open {
+            if channel.state == State::Open {
                 crate::log!(Trace, "usbmux:tcp", "{source} -> {destination}: connected");
                 return Ok(stream);
             }
@@ -244,14 +252,14 @@ impl Session {
     /// True only after the OS reported physical device removal, not a timeout,
     /// malformed plist, closed service, or firmware updater failure.
     pub fn disconnected(&self) -> bool {
-        self.lock().map(|l| l.disconnected).unwrap_or(false)
+        self.lock().map(|link| link.disconnected).unwrap_or(false)
     }
 }
 
 pub fn is_device_removal(error: &anyhow::Error) -> bool {
-    error.chain().any(|e| {
+    error.chain().any(|error| {
         #[cfg(windows)]
-        if e.downcast_ref::<std::io::Error>().is_some_and(|error| {
+        if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
             use windows_sys::Win32::Foundation::{
                 ERROR_DEV_NOT_EXIST, ERROR_DEVICE_NOT_CONNECTED, ERROR_NO_SUCH_DEVICE,
             };
@@ -266,10 +274,11 @@ pub fn is_device_removal(error: &anyhow::Error) -> bool {
         }) {
             return true;
         }
-        e.downcast_ref::<nusb::transfer::TransferError>()
+        error.downcast_ref::<nusb::transfer::TransferError>()
             == Some(&nusb::transfer::TransferError::Disconnected)
-            || e.downcast_ref::<nusb::Error>()
-                .is_some_and(|e| e.kind() == nusb::ErrorKind::Disconnected)
+            || error
+                .downcast_ref::<nusb::Error>()
+                .is_some_and(|error| error.kind() == nusb::ErrorKind::Disconnected)
     })
 }
 
@@ -287,14 +296,14 @@ impl Link {
         Ok(())
     }
 
-    fn send(&mut self, proto: u32, header: &[u8], data: &[u8]) -> Result<()> {
+    fn send(&mut self, protocol: u32, header: &[u8], data: &[u8]) -> Result<()> {
         ensure!(
             !self.cancelled.load(Ordering::Acquire),
             "USB mux session cancelled"
         );
         encode_header(
             &mut self.output,
-            proto,
+            protocol,
             self.version,
             self.tx,
             self.rx,
@@ -305,7 +314,7 @@ impl Link {
         crate::log!(
             Trace,
             "usbmux:packet",
-            "TX proto={proto}, tx={}, rx={}, bytes={}",
+            "TX proto={protocol}, tx={}, rx={}, bytes={}",
             self.tx,
             self.rx,
             self.output.len()
@@ -314,6 +323,7 @@ impl Link {
         let sent = self.usb.write_packet(&self.output);
         self.finish_write(sent, started, 1)
     }
+
     fn send_tcp(&mut self, source: u16, flags: u8, data: &[u8]) -> Result<()> {
         let tcp = self
             .channels
@@ -326,11 +336,11 @@ impl Link {
     fn send_data(&mut self, source: u16, data: &[u8]) -> Result<()> {
         if data.len() <= MAX_PAYLOAD {
             self.send_tcp(source, ACK, data)?;
-            let c = self
+            let channel = self
                 .channels
                 .get_mut(&source)
                 .context("closed mux connection")?;
-            c.seq = c.seq.wrapping_add(data.len() as u32);
+            channel.seq = channel.seq.wrapping_add(data.len() as u32);
             return Ok(());
         }
         ensure!(
@@ -383,6 +393,18 @@ impl Link {
             .seq = seq;
         Ok(())
     }
+
+    /// Allocate the next free channel port, wrapping at 1 instead of 0.
+    fn allocate_port(&mut self) -> u16 {
+        loop {
+            let port = self.next_port;
+            self.next_port = self.next_port.wrapping_add(1).max(1);
+            if !self.channels.contains_key(&port) {
+                return port;
+            }
+        }
+    }
+
     fn receive(&mut self) -> Result<Option<Bytes>> {
         loop {
             if self.buffer.len() >= 8 {
@@ -406,12 +428,13 @@ impl Link {
                 return Ok(None);
             }
             ensure!(
-                self.buffer.len() + incoming.len() <= 131072,
+                self.buffer.len() + incoming.len() <= ASSEMBLY_LIMIT,
                 "USB mux assembly buffer overflow"
             );
             self.buffer.extend_from_slice(&incoming);
         }
     }
+
     fn pump(&mut self) -> Result<bool> {
         let result = self.pump_packet();
         if result.is_err() {
