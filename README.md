@@ -247,6 +247,38 @@ HTTP and FDR authentication with actual tickets. The WPAD fixture maps `wpad`
 to loopback only in its child process. Neither changes system DNS, network
 settings, Kerberos configuration, or the user's credential cache.
 
+## Project layout and checks
+
+Production code is organized by protocol/domain rather than by historical
+feature. `src/lib.rs` is the complete map; the main modules are:
+
+| Module | Responsibility |
+| --- | --- |
+| `device`, `storage`, `logging`, `progress` | device identity, atomic files, structured records, cancellation/progress |
+| `wire`, `ipsw` | plist framing/digests, IPSW archive and verification |
+| `img4`, `aea` | image containers and encrypted firmware |
+| `tss`, `firmware` | signing requests and updater personalization |
+| `usb`, `mux`, `dfu` | USB transport, multiplex streams, DFU |
+| `restore` | restore orchestration, boot, Port DFU, attestation |
+| `fdr`, `asr` | device services and disk verification |
+| `net`, `tls`, `proxy` | HTTPS agents, TLS, OS proxy/PAC/WPAD resolution |
+| `catalog` | Apple firmware metadata and cache |
+| `drivers` (with platform submodules), `windows` | host readiness and Windows setup |
+| `cli`, `operations`, `gui`, `localization` | interfaces and translations |
+
+Platform-specific code stays behind `#[cfg]` inside its domain module. Unit
+tests are compiled with the library under `cfg(test)` and share the fixtures in
+`tests/support/`; protocol behavior lives in `tests/protocols/`.
+
+Run the checks used by CI:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo clippy --no-default-features --locked -- -D warnings
+cargo test --all-features --locked
+```
+
 ## GitHub Actions and releases
 
 The [Check workflow](.github/workflows/check.yml) runs formatting, Clippy, and
