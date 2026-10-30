@@ -1,7 +1,7 @@
 //! Apply background events and finish jobs only after their logs are drained.
 use super::theme::Tone;
 use super::worker::Output;
-use super::{App, Event, Notice, Picker, SCAN_INTERVAL, UI_REFRESH_INTERVAL, worker};
+use super::{App, Event, Notice, Picker, SCAN_INTERVAL, UI_REFRESH_INTERVAL, journal};
 use eframe::egui;
 use std::time::Instant;
 use zalivka::progress;
@@ -32,9 +32,12 @@ impl App {
                 ctx.request_repaint_after(UI_REFRESH_INTERVAL);
             }
             match event {
-                Event::Scan { devices, host } => {
-                    self.scanning = false;
+                Event::Host(host) => {
+                    self.checking_host = false;
                     self.host = host;
+                }
+                Event::Scan { devices } => {
+                    self.scanning = false;
                     match devices {
                         Ok(devices) => {
                             if self.setup.ecid.is_empty() && devices.len() == 1 {
@@ -91,20 +94,22 @@ impl App {
                                 let source = self.log_path.clone();
                                 let journal = self.job.as_ref().map(|job| job.journal.clone());
                                 let logs = self.job.as_ref().map(|job| job.context.clone());
-                                let mut text = self.journal_text(true);
-                                if source.is_none() {
-                                    text = format!(
-                                        "Incomplete journal: saved the last {} records from memory.\n{text}\n",
-                                        self.logs.len()
-                                    );
-                                }
+                                let text = if source.is_none() {
+                                    format!(
+                                        "Incomplete journal: saved the last {} records from memory.\n{}\n",
+                                        self.logs.len(),
+                                        self.journal_text(true)
+                                    )
+                                } else {
+                                    String::new()
+                                };
                                 let spawn = self.background(ctx, "save", move || {
                                     if let Some(logs) = logs
                                         && let Err(error) = logs.flush_logs()
                                     {
                                         return Event::Saved(Err(error.to_string()));
                                     }
-                                    let result = worker::save_log(
+                                    let result = journal::save_log(
                                         path,
                                         source.as_deref(),
                                         &text,

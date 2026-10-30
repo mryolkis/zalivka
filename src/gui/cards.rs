@@ -34,7 +34,9 @@ impl App {
                             trf("Mac (CPID {:04x})", &[&format!("{:04x}", device.chip_id)])
                         })
                         .unwrap_or_else(|| {
-                            if self.devices.is_empty() {
+                            if self.scan_error.is_some() {
+                                "Could not check USB"
+                            } else if self.devices.is_empty() {
                                 "No Mac connected"
                             } else {
                                 "Select a Mac"
@@ -49,7 +51,7 @@ impl App {
                                 .size(12.0)
                                 .color(ui.visuals().weak_text_color()),
                         );
-                    } else {
+                    } else if self.scan_error.is_none() {
                         ui.label(
                             RichText::new(tr("Connect your Mac with a USB-C cable"))
                                 .color(ui.visuals().weak_text_color()),
@@ -60,12 +62,12 @@ impl App {
             if let Some(d) = self.target() {
                 pill(
                     ui,
-                    if d.mode == Mode::Dfu {
-                        "DFU"
-                    } else {
-                        "Recovery"
+                    match d.mode {
+                        Mode::Dfu => "DFU",
+                        Mode::PortDfu => "Port DFU",
+                        Mode::Recovery => "Recovery",
                     },
-                    if d.mode == Mode::Dfu {
+                    if d.mode.can_restore() {
                         Tone::Success.color(ui.visuals())
                     } else {
                         ui.visuals().weak_text_color()
@@ -89,13 +91,18 @@ impl App {
                     }
                 });
         }
-        if self.scan_error.is_some() {
+        if let Some(error) = self.scan_error.clone() {
+            ui.label(
+                RichText::new(error)
+                    .small()
+                    .color(ui.visuals().error_fg_color),
+            );
             ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(tr("Could not check USB")).color(ui.visuals().error_fg_color),
-                );
                 if ui.link(tr("Diagnostics")).clicked() {
                     self.start(Action::Doctor, ctx);
+                }
+                if cfg!(target_os = "linux") && ui.link(tr("Install USB access rules")).clicked() {
+                    self.start(Action::InstallUdev, ctx);
                 }
             });
         }
@@ -300,14 +307,7 @@ impl App {
                 ui.label(RichText::new(tr(job.action.title())).size(21.0).strong());
             });
             ui.add_space(12.0);
-            ui.label(
-                RichText::new(
-                    job.phase
-                        .strip_prefix("Stage: ")
-                        .map_or_else(|| tr(&job.phase), |stage| trf("Stage: {}", &[stage])),
-                )
-                .size(16.0),
-            );
+            ui.label(RichText::new(job.phase()).size(16.0));
             if job.action.writes_device() {
                 progress_bar(ui, job.overall_fraction);
             } else if job.transfers.is_empty() {
@@ -435,9 +435,12 @@ impl App {
             if !host.apple_driver_installed {
                 ui.label(tr("The Apple USB driver is missing. Install the signed driver bundled with Zalivka; internet access and iTunes are not required."));
             }
+            if !host.apple_kis_driver_installed {
+                ui.label(tr("The Apple KIS recovery driver is missing. Install the signed driver bundled with Zalivka."));
+            }
             if host.needs_preparation() {
                 ui.add_space(6.0);
-                let label = if !host.apple_driver_installed {
+                let label = if !host.apple_driver_installed || !host.apple_kis_driver_installed {
                     "Install missing drivers"
                 } else if host.apple_service_running {
                     "Stop Apple service"

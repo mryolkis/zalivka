@@ -12,6 +12,7 @@ fn stored_filesystem_crc_is_checked_before_restore_and_after_validation_seeks() 
     std::fs::write(file.path(), bytes).unwrap();
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(ipsw.prepare_filesystem(&identity()).is_err());
+    assert!(ipsw.stream("Firmware/OS", &mut Vec::new()).is_err());
     let mut image = ipsw.image("Firmware/OS").unwrap();
     image.seek(SeekFrom::Start(10)).unwrap();
     image.read_exact(&mut [0; 4]).unwrap();
@@ -136,7 +137,7 @@ fn preflight_rejects_directory_components_and_empty_filesystems() {
         manifest_mut(&mut id).insert("OS".into(), component_entry(path, bytes));
         let file = fixture_files(Some(id.clone()), false, &[(path, bytes)]);
         let mut ipsw = Ipsw::open(file.path()).unwrap();
-        assert!(ipsw.preflight_recovery(&mut id).is_err());
+        assert!(ipsw.validate_identity(&mut id).is_err());
     }
 }
 
@@ -253,7 +254,7 @@ fn im4p_headers_resolve_boot_roles_and_stage_firmware_without_changing_the_manif
 }
 
 #[test]
-fn header_derived_nonce_slots_still_require_explicit_slot_ids() {
+fn header_derived_nonce_slots_accept_dfu_defaults_and_validate_overrides() {
     for (tag, key) in [(*b"illb", "ApNonceSlotID"), (*b"sepi", "SepNonceSlotID")] {
         let bytes = im4p(&tag);
         let mut id = identity();
@@ -269,13 +270,17 @@ fn header_derived_nonce_slots_still_require_explicit_slot_ids() {
             .insert("RequiresNonceSlot".into(), true.into());
         let file = fixture_files(Some(id.clone()), false, &[("Firmware/opaque-slot", &bytes)]);
         let mut ipsw = Ipsw::open(file.path()).unwrap();
-        let error = ipsw.preflight_recovery(&mut id).unwrap_err();
-        assert!(error.to_string().contains(key), "{error:#}");
+        ipsw.validate_identity(&mut id).unwrap();
+        id.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(key.into(), false.into());
+        assert!(ipsw.validate_identity(&mut id).is_err());
         id.value.as_dictionary_mut().unwrap()["Info"]
             .as_dictionary_mut()
             .unwrap()
             .insert(key.into(), 3u64.into());
-        ipsw.preflight_recovery(&mut id).unwrap();
+        ipsw.validate_identity(&mut id).unwrap();
     }
 }
 
@@ -301,7 +306,7 @@ fn header_types_do_not_override_explicit_manifest_types_on_shared_files() {
         &[("Firmware/shared-kernel", &bytes)],
     );
     let mut ipsw = Ipsw::open(file.path()).unwrap();
-    ipsw.preflight_recovery(&mut id).unwrap();
+    ipsw.validate_identity(&mut id).unwrap();
     assert_eq!(id.payload_type("OpaqueNormal").unwrap(), Some(*b"krnl"));
     assert_eq!(id.payload_type("OpaqueRetagged").unwrap(), Some(*b"nx26"));
     let signature = wire::dict([("ApImg4Ticket", Value::Data(ticket()))]);
@@ -427,8 +432,8 @@ fn preflight_rejects_malformed_optional_flags_and_partition_sizes() {
             .as_dictionary_mut()
             .unwrap()
             .insert(key.into(), "false".into());
-        assert!(ipsw.preflight(&mut id).is_err(), "{key}");
-        assert!(ipsw.preflight_recovery(&mut id).is_err(), "{key}");
+        assert!(restore::preflight(&mut ipsw, &mut id).is_err(), "{key}");
+        assert!(ipsw.validate_identity(&mut id).is_err(), "{key}");
     }
 }
 
@@ -451,6 +456,54 @@ fn restore_preflight_resolves_ambiguous_optional_boot_roles_before_upload() {
             "{tag}: {error:#}"
         );
     }
+}
+
+#[test]
+fn restore_preflight_reads_each_boot_component_once_across_roles_and_stages() {
+    let mut id = identity();
+    let sep = im4p(b"rsep");
+    manifest_mut(&mut id).insert(
+        "RestoreSEP".into(),
+        component_entry("Firmware/RestoreSEP", &sep),
+    );
+    declare_type(&mut id, "RestoreSEP", "rsep");
+    for (name, stage1) in [("iBSS", true), ("iBEC", false), ("RestoreSEP", false)] {
+        let info = manifest_mut(&mut id)[name].as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap();
+        info.insert("IsLoadedByiBoot".into(), true.into());
+        info.insert("IsLoadedByiBootStage1".into(), stage1.into());
+    }
+    let file = fixture_files(Some(id.clone()), false, &[("Firmware/RestoreSEP", &sep)]);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let output = reads.clone();
+    let stages = zalivka::progress::Context::new(move |event| {
+        if let zalivka::progress::Event::Log(record) = event
+            && record.source == "ipsw:read"
+            && !record.message.contains(':')
+        {
+            output.lock().unwrap().push(record.message);
+        }
+    })
+    .run(|| restore::preflight(&mut ipsw, &mut id))
+    .unwrap();
+    for (stage, name) in [(0, "iBSS"), (1, "iBEC"), (1, "RestoreSEP")] {
+        assert!(stages[stage].contains(&restore::IBootStep::Component(name.into())));
+    }
+    let mut reads = reads.lock().unwrap();
+    reads.sort();
+    assert_eq!(
+        *reads,
+        [
+            "Firmware/RestoreDeviceTree",
+            "Firmware/RestoreKernelCache",
+            "Firmware/RestoreRamDisk",
+            "Firmware/RestoreSEP",
+            "Firmware/iBEC",
+            "Firmware/iBSS",
+        ]
+    );
 }
 
 #[test]
@@ -517,13 +570,17 @@ fn recovery_nonce_slot_metadata_is_checked_before_boot_by_declared_role() {
             .as_dictionary_mut()
             .unwrap()
             .insert("RequiresNonceSlot".into(), true.into());
-        let error = ipsw.preflight_recovery(&mut id).unwrap_err();
-        assert!(error.to_string().contains(slot), "{error:#}");
+        ipsw.validate_identity(&mut id).unwrap();
+        id.value.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert(slot.into(), false.into());
+        assert!(ipsw.validate_identity(&mut id).is_err());
         id.value.as_dictionary_mut().unwrap()["Info"]
             .as_dictionary_mut()
             .unwrap()
             .insert(slot.into(), 3u64.into());
-        ipsw.preflight_recovery(&mut id).unwrap();
+        ipsw.validate_identity(&mut id).unwrap();
     }
 }
 
@@ -540,8 +597,8 @@ fn manifest_paths_are_checked_consistently_before_restore_and_full_verification(
         manifest_mut(&mut id).insert("Extra".into(), entry.clone());
         let file = fixture(Some(id.clone()), false);
         let mut ipsw = Ipsw::open(file.path()).unwrap();
-        assert!(ipsw.preflight(&mut id).is_err(), "{entry:?}");
-        assert!(ipsw.preflight_recovery(&mut id).is_err(), "{entry:?}");
+        assert!(restore::preflight(&mut ipsw, &mut id).is_err(), "{entry:?}");
+        assert!(ipsw.validate_identity(&mut id).is_err(), "{entry:?}");
         assert!(ipsw.verify_all().is_err(), "{entry:?}");
     }
     for entry in [
@@ -552,8 +609,8 @@ fn manifest_paths_are_checked_consistently_before_restore_and_full_verification(
         manifest_mut(&mut id).insert("SigningMetadata".into(), entry);
         let file = fixture(Some(id.clone()), false);
         let mut ipsw = Ipsw::open(file.path()).unwrap();
-        ipsw.preflight(&mut id).unwrap();
-        ipsw.preflight_recovery(&mut id).unwrap();
+        restore::preflight(&mut ipsw, &mut id).unwrap();
+        ipsw.validate_identity(&mut id).unwrap();
         ipsw.verify_all().unwrap();
     }
 }
@@ -563,15 +620,7 @@ fn oversized_components_are_rejected_from_zip_metadata_before_reading() {
     let file = fixture(None, false);
     let mut bytes = std::fs::read(file.path()).unwrap();
     let name = b"Firmware/iBSS";
-    let offset = bytes
-        .windows(4)
-        .enumerate()
-        .find_map(|(offset, signature)| {
-            (signature == b"PK\x01\x02"
-                && bytes.get(offset + 46..offset + 46 + name.len()) == Some(name))
-            .then_some(offset)
-        })
-        .unwrap();
+    let offset = crate::test_support::zip_entry_offset(&bytes, std::str::from_utf8(name).unwrap());
     let size = (zalivka::ipsw::MAX_COMPONENT + 1) as u32;
     bytes[offset + 24..offset + 28].copy_from_slice(&size.to_le_bytes());
     std::fs::write(file.path(), bytes).unwrap();
@@ -643,7 +692,7 @@ fn encrypted_aea_digests_are_explicitly_deferred_and_archive_hash_can_be_checked
     let report = Ipsw::open(file.path()).unwrap().verify_all().unwrap();
     assert_eq!(report.aea_content_digests_not_checked, ["image.dmg.aea"]);
     assert!(!report.archive_checksum_verified);
-    let checksum = device::encode_hex(&sha2::Sha256::digest(std::fs::read(file.path()).unwrap()));
+    let checksum = hex::encode(sha2::Sha256::digest(std::fs::read(file.path()).unwrap()));
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
         .arg("verify")
         .arg(file.path())
@@ -734,7 +783,7 @@ fn manifest_payload_types_drive_verification_and_personalization_for_new_compone
         let file = fixture_files(Some(id.clone()), false, &[("Firmware/new-engine", &raw)]);
         let original_archive = std::fs::read(file.path()).unwrap();
         let mut ipsw = Ipsw::open(file.path()).unwrap();
-        ipsw.preflight(&mut id).unwrap();
+        restore::preflight(&mut ipsw, &mut id).unwrap();
         assert_eq!(ipsw.component(&id, component).unwrap(), raw);
         ipsw.verify_all().unwrap();
         let tss = wire::dict([("ApImg4Ticket", Value::Data(ticket()))]);
@@ -823,8 +872,8 @@ fn malformed_manifest_payload_types_fail_before_restore_instead_of_using_legacy_
         let mut ipsw = Ipsw::open(file.path()).unwrap();
         let tss = wire::dict([("ApImg4Ticket", Value::Data(ticket()))]);
         for error in [
-            ipsw.preflight(&mut id).unwrap_err(),
-            ipsw.preflight_recovery(&mut id).unwrap_err(),
+            restore::preflight(&mut ipsw, &mut id).unwrap_err(),
+            ipsw.validate_identity(&mut id).unwrap_err(),
             ipsw.component(&id, "RestoreKernelCache").unwrap_err(),
             ipsw.personalized(&id, "RestoreKernelCache", &tss)
                 .unwrap_err(),
@@ -1081,6 +1130,10 @@ fn zip64_streams_five_gib_with_bounded_memory() {
     let mut bytes = [1; 16];
     image.read_exact(&mut bytes).unwrap();
     assert_eq!(bytes, [0; 16]);
+    assert_eq!(
+        ipsw.stream("large.dmg", &mut std::io::sink()).unwrap(),
+        size
+    );
     let report = ipsw.verify_all().unwrap();
     assert_eq!(report.entries, 2);
     assert!(report.uncompressed_bytes > size);
@@ -1093,7 +1146,7 @@ fn ipsw_identity_selection_and_stored_image_have_bounded_seeks() {
     let mut id = ipsw
         .select_behavior(&device_info(), None, Behavior::Erase)
         .unwrap();
-    ipsw.preflight(&mut id).unwrap();
+    restore::preflight(&mut ipsw, &mut id).unwrap();
     assert_eq!(ipsw.component(&id, "iBSS").unwrap(), im4p(b"test"));
     let mut image = ipsw.image(id.path("OS").unwrap()).unwrap();
     let mut data = vec![];
@@ -1130,7 +1183,7 @@ fn ipsw_ambiguity_mismatch_and_missing_component_are_errors() {
     );
     let file = fixture(None, true);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
-    assert!(ipsw.preflight(&mut identity()).is_err());
+    assert!(restore::preflight(&mut ipsw, &mut identity()).is_err());
 }
 
 #[test]
@@ -1374,14 +1427,14 @@ fn recovery_preflight_accepts_os_only_but_rejects_missing_or_invalid_paths() {
         .recovery_identity(&device_info(), &identity())
         .unwrap()
         .unwrap();
-    ipsw.preflight_recovery(&mut id).unwrap();
-    assert!(ipsw.preflight(&mut id).is_err());
+    ipsw.validate_identity(&mut id).unwrap();
+    assert!(restore::preflight(&mut ipsw, &mut id).is_err());
     for bad in ["Firmware/missing", "../OS"] {
         manifest_mut(&mut id).insert(
             "Other".into(),
             wire::dict([("Info", wire::dict([("Path", bad.into())]))]),
         );
-        assert!(ipsw.preflight_recovery(&mut id).is_err());
+        assert!(ipsw.validate_identity(&mut id).is_err());
     }
 }
 
@@ -1397,7 +1450,7 @@ fn preflight_rejects_corrupt_boot_components_and_invalid_digest_types() {
             .as_dictionary_mut()
             .unwrap()
             .insert("Digest".into(), digest);
-        assert!(ipsw.preflight(&mut id).is_err());
+        assert!(restore::preflight(&mut ipsw, &mut id).is_err());
     }
 }
 
@@ -1440,8 +1493,8 @@ fn trusted_files_and_fileless_signing_metadata_use_the_same_digest_validation() 
         manifest_mut(&mut id).insert(name.into(), bad);
         let file = fixture(Some(id.clone()), false);
         let mut ipsw = Ipsw::open(file.path()).unwrap();
-        assert!(ipsw.preflight(&mut id).is_err(), "{name}");
-        assert!(ipsw.preflight_recovery(&mut id).is_err(), "{name}");
+        assert!(restore::preflight(&mut ipsw, &mut id).is_err(), "{name}");
+        assert!(ipsw.validate_identity(&mut id).is_err(), "{name}");
         assert!(ipsw.verify_all().is_err(), "{name}");
     }
 }
@@ -1451,15 +1504,7 @@ fn direct_stored_images_reject_inconsistent_sizes_and_physical_truncation() {
     let file = fixture(None, false);
     let mut bytes = std::fs::read(file.path()).unwrap();
     let name = b"Firmware/OS";
-    let offset = bytes
-        .windows(4)
-        .enumerate()
-        .find_map(|(offset, signature)| {
-            (signature == b"PK\x01\x02"
-                && bytes.get(offset + 46..offset + 46 + name.len()) == Some(name))
-            .then_some(offset)
-        })
-        .unwrap();
+    let offset = crate::test_support::zip_entry_offset(&bytes, std::str::from_utf8(name).unwrap());
     let original_size = u32::from_le_bytes(bytes[offset + 24..offset + 28].try_into().unwrap());
     bytes[offset + 24..offset + 28].copy_from_slice(&(original_size + 1).to_le_bytes());
     std::fs::write(file.path(), &bytes).unwrap();

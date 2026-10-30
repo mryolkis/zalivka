@@ -3,12 +3,12 @@ use super::theme::{BLUE, RED};
 use super::widgets::{caption, card, path_picker};
 use super::{App, Confirmation, Picker, setup::Action, theme};
 use eframe::egui::{self, Color32, RichText};
-use zalivka::device::{DeviceInfo, Mode};
+use zalivka::device::DeviceInfo;
 use zalivka::localization::{format as trf, text as tr};
 
 impl Confirmation {
     pub(super) fn ready(&self, target: Option<&DeviceInfo>) -> bool {
-        self.accepted && target.is_some_and(|d| d.ecid == self.ecid && d.mode == Mode::Dfu)
+        self.accepted && target.is_some_and(|d| d.ecid == self.ecid && d.mode.can_restore())
     }
 }
 
@@ -61,7 +61,7 @@ impl App {
                                 "I agree to update firmware and recoveryOS"
                             }),
                         );
-                        if target.is_none_or(|d| d.ecid != pending.ecid || d.mode != Mode::Dfu) {
+                        if target.is_none_or(|d| d.ecid != pending.ecid || !d.mode.can_restore()) {
                             ui.label(
                                 RichText::new(tr("The selected Mac is unavailable in DFU mode"))
                                     .color(ui.visuals().error_fg_color),
@@ -198,6 +198,8 @@ impl App {
                             ui.label(
                                 RichText::new(tr(if cfg!(windows) {
                                     "USB and drivers"
+                                } else if cfg!(target_os = "linux") {
+                                    "USB access"
                                 } else {
                                     "Diagnostics"
                                 }))
@@ -230,6 +232,17 @@ impl App {
                                     self.start(Action::ResetDrivers, ctx);
                                 }
                                 caption(ui, "Remove DFU / Recovery / Restore device records, including disconnected devices, reinstall the Apple driver, and rescan devices. Reconnect the Mac and enter DFU mode after the reset.");
+                                ui.add_space(8.0);
+                            }
+                            if cfg!(target_os = "linux") {
+                                if ui.add_sized(
+                                    egui::vec2(ui.available_width(), 34.0),
+                                    egui::Button::new(tr("Install USB access rules")),
+                                ).clicked() {
+                                    close = true;
+                                    self.start(Action::InstallUdev, ctx);
+                                }
+                                caption(ui, "Allow your Linux user to access Apple USB devices. The system will request administrator access.");
                                 ui.add_space(8.0);
                             }
                             if ui

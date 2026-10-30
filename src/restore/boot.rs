@@ -88,6 +88,10 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>>
 pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde_json::Value> {
     let mut usb = RecoveryUsb::open(ecid)?;
     let original_mode = usb.info.mode;
+    ensure!(
+        original_mode != Mode::PortDfu,
+        "Port DFU requires controller recovery before an iBoot RAM probe; use restore or revive to prepare the controller"
+    );
     if original_mode == Mode::Dfu {
         ensure!(
             load_ibss,
@@ -96,6 +100,7 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         usb.check_reset_access()?;
         let mut ipsw = Ipsw::open(path)?;
         let mut identity = ipsw.select_behavior(&usb.info, None, Behavior::Update)?;
+        usb.info = identity.device_parameters(&usb.info)?;
         ensure!(
             identity.is_macos()?,
             "RAM boot-state probe supports Apple silicon Macs only"
@@ -106,15 +111,8 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         let ticket = tss::send(&tss::request(&usb.info, &identity)?)
             .context("personalizing diagnostic iBSS")?;
         let bytes = img4::personalize_with_metadata(name, &component, &ticket, &identity.value)?;
-        let original_device = usb.info.clone();
         crate::log!(Debug, "boot", "iBSS in RAM: {} B", bytes.len());
-        let upload = dfu::upload(&mut usb, Mode::Dfu, &bytes, true);
-        drop(usb);
-        usb = reconnect_after_ibss(upload, Some(Mode::Recovery), |mode| {
-            wait_recovery(ecid, mode)
-        })?;
-        validate_reconnected_device(&original_device, &usb.info)
-            .context("hardware identity changed after diagnostic iBSS")?;
+        usb = boot_ibss(usb, &bytes, Some(Mode::Recovery))?;
     }
     let mut variables = serde_json::Map::new();
     for name in [
@@ -200,7 +198,7 @@ impl SignedIdentity {
     pub(super) fn boot(
         &mut self,
         ipsw: &mut Ipsw,
-        mut usb: RecoveryUsb,
+        usb: RecoveryUsb,
         stages: &[Vec<IBootStep>; 2],
     ) -> Result<(DeviceInfo, Option<anyhow::Error>)> {
         let mut device = usb.info.clone();
@@ -208,12 +206,16 @@ impl SignedIdentity {
             usb.info.mode == Mode::Dfu,
             "restore must start in ROM DFU mode"
         );
-        let upload = self.send_boot_object(ipsw, &mut usb, b"ibss");
-        drop(usb);
-        let mode = self.identity.is_macos()?.then_some(Mode::Recovery);
-        let mut usb = reconnect_after_ibss(upload, mode, |mode| wait_recovery(device.ecid, mode))?;
-        validate_reconnected_device(&device, &usb.info)
-            .context("hardware identity changed after iBSS")?;
+        let mut usb = {
+            let name = self.identity.require_component_type(b"ibss")?;
+            let bytes = ipsw.personalized(&self.identity, name, &self.ticket)?;
+            crate::log!(Debug, "boot", "Sending {name}: {} B", bytes.len());
+            boot_ibss(
+                usb,
+                &bytes,
+                self.identity.is_macos()?.then_some(Mode::Recovery),
+            )?
+        };
         if usb.info.ap_nonce != device.ap_nonce || usb.info.sep_nonce != device.sep_nonce {
             crate::log!(Info, "boot", "Refreshing signatures after iBSS");
             device = usb.info.clone();
@@ -241,6 +243,7 @@ impl SignedIdentity {
         }
         drop(usb);
         let mut usb = wait_recovery(device.ecid, Some(Mode::Recovery))?;
+        usb.info = self.identity.device_parameters(&usb.info)?;
         validate_reconnected_device(&device, &usb.info)
             .context("hardware identity changed after iBEC")?;
         self.send_iboot_firmware(ipsw, &mut usb, false, &stages[1])?;
@@ -285,6 +288,19 @@ impl SignedIdentity {
     }
 }
 
+/// Both diagnostic and restore boots retire the DFU handle before reconnecting.
+/// A reset error alone never proves that the expected device reached iBSS.
+fn boot_ibss(mut usb: RecoveryUsb, bytes: &[u8], mode: Option<Mode>) -> Result<RecoveryUsb> {
+    let expected = usb.info.clone();
+    let upload = dfu::upload(&mut usb, Mode::Dfu, bytes, true).context("uploading iBSS");
+    drop(usb);
+    let mut usb = reconnect_after_ibss(upload, mode, |mode| wait_recovery(expected.ecid, mode))?;
+    validate_reconnected_device(&expected, &usb.info)
+        .context("hardware identity changed after iBSS")?;
+    usb.info.security_domain = usb.info.security_domain.or(expected.security_domain);
+    Ok(usb)
+}
+
 pub(super) fn validate_reconnected_device(
     expected: &DeviceInfo,
     actual: &DeviceInfo,
@@ -296,7 +312,10 @@ pub(super) fn validate_reconnected_device(
         "USB hardware identifiers do not match"
     );
     ensure!(
-        expected.security_domain == actual.security_domain
+        expected
+            .security_domain
+            .zip(actual.security_domain)
+            .is_none_or(|(expected, actual)| expected == actual)
             && expected.chip_fuse_mode == actual.chip_fuse_mode,
         "USB security domain or fuse mode changed"
     );

@@ -9,6 +9,7 @@ mod file_data;
 mod images;
 mod keys;
 mod options;
+mod port_dfu;
 mod recovery;
 mod requests;
 mod session;
@@ -59,7 +60,11 @@ pub struct RestoreSession {
 /// Validate the available IPSW metadata and build the exact iBoot firmware stages.
 /// This is shared by the offline plan and the restore path, before any upload.
 pub fn preflight(ipsw: &mut Ipsw, identity: &mut Identity) -> Result<[Vec<IBootStep>; 2]> {
-    ipsw.preflight(identity)?;
+    ipsw.validate_identity(identity)?;
+    let mut components = std::collections::BTreeSet::new();
+    for tag in [b"ibss", b"ibec", b"rdsk", b"rdtr", b"rkrn"] {
+        components.insert(identity.require_component_type(tag)?);
+    }
     options(identity)?;
     let stage1 = if identity.is_macos()? {
         boot::iboot_stage(identity, true)?
@@ -68,7 +73,6 @@ pub fn preflight(ipsw: &mut Ipsw, identity: &mut Identity) -> Result<[Vec<IBootS
     };
     let stage2 = boot::iboot_stage(identity, false)?;
     let stages = [stage1, stage2];
-    let mut components = std::collections::BTreeSet::new();
     for step in stages.iter().flatten() {
         if let IBootStep::Component(name) = step {
             components.insert(name.as_str());
@@ -93,8 +97,8 @@ pub(crate) fn run(
 ) -> Result<()> {
     // The catalog/download phase can outlive a change in host driver/service state.
     crate::drivers::check_host()?;
-    let usb = RecoveryUsb::open(ecid)?;
-    ensure!(usb.info.mode == Mode::Dfu, "enter DFU before restoring");
+    let mut usb = RecoveryUsb::open(ecid)?;
+    ensure!(usb.info.mode.can_restore(), "enter DFU before restoring");
     usb.check_reset_access()?;
     crate::log!(
         Info,
@@ -104,10 +108,17 @@ pub(crate) fn run(
     );
     let mut identity = ipsw.select_behavior(&usb.info, identity_index, behavior)?;
     let stages = preflight(&mut ipsw, &mut identity)?;
+    if usb.info.mode == Mode::PortDfu {
+        usb = port_dfu::boot(&mut ipsw, usb, &identity)?;
+        // SoC identity and ticket must use its own ECID, nonces and fuses.
+        usb.check_reset_access()?;
+    }
+    let ecid = usb.info.ecid;
+    usb.info = identity.device_parameters(&usb.info)?;
     let mut recovery = ipsw.recovery_identity(&usb.info, &identity)?;
     ipsw.prepare_filesystem(&identity)?;
     if let Some(id) = &mut recovery {
-        ipsw.preflight_recovery(id)?;
+        ipsw.validate_identity(id)?;
         if id.path("OS")? != identity.path("OS")? {
             ipsw.prepare_filesystem(id)?;
         }

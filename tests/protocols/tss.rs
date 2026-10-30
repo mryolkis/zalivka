@@ -59,6 +59,12 @@ fn signing_requires_device_security_metadata_and_never_defaults_to_production() 
     assert!(tss::request(&device, &identity()).is_err());
     device.chip_fuse_mode = Some(3);
     device.security_domain = None;
+    let request = tss::request(&device, &identity()).unwrap();
+    assert_eq!(
+        wire::number(wire::get(&request, &["ApSecurityDomain"]).unwrap()).unwrap(),
+        1
+    );
+    device.security_domain = Some(2);
     assert!(tss::request(&device, &identity()).is_err());
     let mut id = identity();
     manifest_mut(&mut id)
@@ -281,6 +287,7 @@ fn signing_rejects_malformed_metadata_instead_of_skipping_components() {
     for entry in [
         true.into(),
         wire::dict([("Info", "invalid".into())]),
+        wire::dict([("Info", wire::dict([("Personalize", "yes".into())]))]),
         wire::dict([
             ("Info", wire::dict([] as [(&str, Value); 0])),
             ("Trusted", "true".into()),

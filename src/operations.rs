@@ -1,23 +1,34 @@
 //! Native operations shared by the terminal and desktop interface.
 use crate::{
-    catalog,
-    device::Mode,
-    drivers,
+    catalog, drivers,
     ipsw::{Behavior, Ipsw, Verification},
     net, progress, restore, usb,
 };
 use anyhow::{Result, ensure};
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, clap::Args)]
+#[group(skip)]
 pub struct Restore {
+    /// Local IPSW; omitted to automatically download the current compatible image.
     pub ipsw: Option<PathBuf>,
+    /// Firmware cache for automatic downloads.
+    #[arg(long, conflicts_with = "ipsw")]
     pub firmware_dir: Option<PathBuf>,
+    #[arg(skip)]
     pub release: Option<catalog::Release>,
+    #[arg(long, value_parser = crate::device::parse_ecid)]
     pub ecid: u64,
+    #[arg(long)]
     pub identity: Option<usize>,
+    /// Record restored's plist messages as JSON lines (new file only).
+    #[arg(long)]
     pub transcript: Option<PathBuf>,
+    /// Apple host-to-bearer-token plist for WKMS authorization.
+    #[arg(long)]
     pub authorization_tokens: Option<PathBuf>,
+    /// Raw DAWTKN data obtained from an authorized AppleConnect session.
+    #[arg(long)]
     pub apple_connect_data: Option<PathBuf>,
 }
 
@@ -32,7 +43,7 @@ impl Restore {
             Ipsw::open(&path)?
         } else {
             let device = usb::RecoveryUsb::open(self.ecid)?.info;
-            ensure!(device.mode == Mode::Dfu, "enter DFU before restoring");
+            ensure!(device.mode.can_restore(), "enter DFU before restoring");
             let directory = self
                 .firmware_dir
                 .map_or_else(catalog::cache_directory, Ok)?;
@@ -104,8 +115,9 @@ pub fn doctor() -> Result<Vec<drivers::UsbDiagnostic>> {
         crate::log!(
             Info,
             "drivers",
-            "Apple driver: {}; Apple service running: {}",
+            "Apple USB driver: {}; Apple KIS/RSM drivers: {}; Apple service running: {}",
             host.apple_driver_installed,
+            host.apple_kis_driver_installed,
             host.apple_service_running
         );
         if let Some(reason) = host.blocking_reason() {
@@ -130,16 +142,4 @@ pub fn doctor() -> Result<Vec<drivers::UsbDiagnostic>> {
         }
     }
     Ok(devices)
-}
-
-pub fn prepare_windows() -> Result<()> {
-    let reboot = drivers::prepare_windows()?;
-    crate::log!(Info, "drivers", "Setup complete; reboot={reboot}");
-    Ok(())
-}
-
-pub fn reset_drivers() -> Result<()> {
-    let reboot = drivers::reset_windows()?;
-    crate::log!(Info, "drivers", "Reset complete; reboot={reboot}");
-    Ok(())
 }

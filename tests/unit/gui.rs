@@ -1,5 +1,6 @@
 use super::*;
 use std::{fs::File, path::Path};
+use zalivka::device::Mode;
 
 fn english_app() -> App {
     let mut app = App::new();
@@ -12,7 +13,9 @@ fn job(action: Action) -> Job {
         7,
         action,
         progress::Context::new(|_| {}),
-        tempfile::tempfile().unwrap(),
+        std::sync::Arc::new(std::sync::Mutex::new(journal::Journal::new(
+            tempfile::tempfile().unwrap(),
+        ))),
     )
 }
 
@@ -228,7 +231,10 @@ fn throttled_background_paints_do_not_delay_input_or_drop_worker_updates() {
         app.journal_open,
         "clicks must be applied in the input frame"
     );
-    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: writing filesystem");
+    assert_eq!(
+        app.job.as_ref().unwrap().phase(),
+        "Stage: writing filesystem"
+    );
 }
 
 fn worker_line(event: progress::Event) -> String {
@@ -239,15 +245,8 @@ fn send_worker(app: &mut App, event: progress::Event) {
     if let progress::Event::Log(record) = event {
         let job = app.job.as_ref().unwrap();
         let mut journal = job.journal.lock().unwrap();
-        let record = journal.write(record);
-        journal.push(record);
-        if let Some(error) = journal.flush() {
-            journal.push(Record::new(
-                Level::Warning,
-                "journal",
-                format!("Disk journal incomplete: {error}"),
-            ));
-        }
+        journal.record(record);
+        journal.flush();
     } else {
         app.tx.send(Event::Worker(7, Output::State(event))).unwrap();
     }
@@ -263,13 +262,14 @@ fn finished(success: bool) -> Output {
 
 fn connect_worker(app: &mut App) -> std::sync::Arc<std::sync::Mutex<worker::Completion>> {
     let job = app.job.as_mut().unwrap();
-    let (context, completion) = job
-        .worker_context(
-            &app.tx,
-            &egui::Context::default(),
-            app.windows_reboot_required,
-        )
-        .unwrap();
+    let (context, completion) = Job::worker_context(
+        job.id,
+        &job.journal,
+        &app.tx,
+        &egui::Context::default(),
+        app.windows_reboot_required,
+    )
+    .unwrap();
     if job.context.cancelled() {
         context.cancel();
     }
@@ -309,10 +309,10 @@ fn a_state_burst_leaves_time_for_rendering_without_losing_events() {
     }
     let ctx = egui::Context::default();
     app.poll(&ctx);
-    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: stage 255");
+    assert_eq!(app.job.as_ref().unwrap().phase(), "Stage: stage 255");
     app.poll(&ctx);
     app.poll(&ctx);
-    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: stage 599");
+    assert_eq!(app.job.as_ref().unwrap().phase(), "Stage: stage 599");
 }
 
 fn device(ecid: u64, mode: Mode) -> DeviceInfo {
@@ -338,6 +338,7 @@ fn erase_confirmation_is_bound_to_target_and_explicit_consent() {
     };
     assert!(!p.ready(Some(&device(42, Mode::Dfu))));
     p.accepted = true;
+    assert!(p.ready(Some(&device(42, Mode::PortDfu))));
     assert!(p.ready(Some(&device(42, Mode::Dfu))));
     assert!(!p.ready(Some(&device(43, Mode::Dfu))));
     assert!(!p.ready(Some(&device(42, Mode::Recovery))));
@@ -354,7 +355,7 @@ fn native_restore_options_preserve_authorization_and_transcript() {
         connect_data: "connect.data".into(),
         ..Setup::default()
     };
-    let options = setup.restore_options(Some(Path::new("run.jsonl"))).unwrap();
+    let options = setup.restore_options(Path::new("run.jsonl")).unwrap();
     assert!(options.ipsw.is_none());
     assert_eq!(options.ecid, 42);
     assert_eq!(options.firmware_dir.as_deref(), Some(Path::new("cache")));
@@ -367,7 +368,12 @@ fn native_restore_options_preserve_authorization_and_transcript() {
         options.apple_connect_data.as_deref(),
         Some(Path::new("connect.data"))
     );
-    for action in [Action::Doctor, Action::PrepareWindows, Action::ResetDrivers] {
+    for action in [
+        Action::Doctor,
+        Action::PrepareWindows,
+        Action::ResetDrivers,
+        Action::InstallUdev,
+    ] {
         Setup::default().validate(action).unwrap();
     }
     assert!(Setup::default().validate(Action::Download).is_err());
@@ -383,9 +389,78 @@ fn selected_release_is_carried_into_automatic_restore_but_not_local_restore() {
         ipsw: file.path().display().to_string(),
         ..Setup::default()
     };
-    assert_eq!(setup.restore_options(None).unwrap().release, Some(release));
+    assert_eq!(
+        setup
+            .restore_options(Path::new("run.jsonl"))
+            .unwrap()
+            .release,
+        Some(release)
+    );
     setup.automatic = false;
-    assert!(setup.restore_options(None).unwrap().release.is_none());
+    assert!(
+        setup
+            .restore_options(Path::new("run.jsonl"))
+            .unwrap()
+            .release
+            .is_none()
+    );
+}
+
+#[test]
+fn udev_setup_needs_no_mac_and_keeps_the_administrator_prompt_until_completion() {
+    let operation = job(Action::InstallUdev);
+    assert!(operation.action.requires_admin());
+    assert!(!operation.action.writes_device());
+    assert!(!operation.can_stop());
+    assert_eq!(operation.phase(), "Approve the Linux administrator prompt");
+    let completion = worker::Completion {
+        success: true,
+        ..Default::default()
+    };
+    let notice = completion.notice(Action::InstallUdev);
+    assert_eq!(notice.title, "USB access configured");
+    assert_eq!(
+        notice.detail,
+        "Reconnect the USB cable to apply the new access rules."
+    );
+    assert_eq!(notice.tone, Tone::Success);
+    assert!(notice.expires_at.is_some());
+}
+
+#[test]
+fn linux_settings_offer_usb_access_rules_without_a_connected_device() {
+    let ctx = egui::Context::default();
+    configure(&ctx);
+    let mut app = english_app();
+    app.settings_open = true;
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 1000.0));
+    let mut reached = false;
+    for _ in 0..20 {
+        let output = render_pass(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![
+                    egui::Event::PointerMoved(screen.center()),
+                    egui::Event::MouseWheel {
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -60.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ctx| app.settings(ctx),
+        );
+        if let Some(rect) = visible_text_rect(&output, "Install USB access rules") {
+            reached |= screen.contains_rect(rect);
+        }
+    }
+    assert_eq!(reached, cfg!(target_os = "linux"));
+    assert!(app.devices.is_empty());
+    assert!(app.job.is_none());
 }
 
 #[test]
@@ -396,8 +471,7 @@ fn completion_waits_for_pending_logs_without_blocking_the_gui() {
     app.job = Some(operation);
     {
         let mut journal = journal.lock().unwrap();
-        let record = journal.write(Record::new(Level::Error, "test", "last operation error"));
-        journal.push(record);
+        journal.record(Record::new(Level::Error, "test", "last operation error"));
     }
     record_completion(&mut app, false);
     let (ready, locked) = mpsc::channel();
@@ -435,7 +509,7 @@ fn local_firmware_is_required_and_has_no_cache_option() {
         cache: "cache".into(),
         ..Setup::default()
     };
-    let options = setup.restore_options(None).unwrap();
+    let options = setup.restore_options(Path::new("run.jsonl")).unwrap();
     assert_eq!(options.ipsw.as_deref(), Some(file.path()));
     assert!(options.firmware_dir.is_none());
     setup.ipsw = "missing.ipsw".into();
@@ -449,6 +523,7 @@ fn disconnected_or_recovery_target_blocks_a_write() {
         apple_service_installed: false,
         apple_service_running: false,
         apple_driver_installed: true,
+        apple_kis_driver_installed: true,
         compatible_usb_driver: false,
     }));
     app.setup.ecid = "2a".into();
@@ -469,6 +544,7 @@ fn windows_conflicts_and_failed_checks_block_restore_before_worker_start() {
         apple_service_installed: true,
         apple_service_running: true,
         apple_driver_installed: true,
+        apple_kis_driver_installed: true,
         compatible_usb_driver: false,
     };
     app.host = Ok(Some(host.clone()));
@@ -496,24 +572,38 @@ fn scan_results_keep_host_and_usb_failures_independent() {
     let mut app = english_app();
     let ctx = egui::Context::default();
     app.scanning = true;
+    app.checking_host = true;
     app.tx
         .send(Event::Scan {
             devices: Ok(vec![device(42, Mode::Dfu)]),
-            host: Err("service access denied".into()),
         })
         .unwrap();
     app.poll(&ctx);
     assert!(!app.scanning);
     assert_eq!(app.target().unwrap().ecid, 42);
     assert!(app.scan_error.is_none());
+    assert!(
+        app.checking_host,
+        "USB discovery must not wait for DriverStore"
+    );
+    app.tx
+        .send(Event::Host(Err("service access denied".into())))
+        .unwrap();
+    app.poll(&ctx);
+    assert!(!app.checking_host);
+    assert_eq!(app.target().unwrap().ecid, 42);
     assert_eq!(app.host.as_ref().unwrap_err(), "service access denied");
     assert!(app.blocked_reason().is_some());
 
     app.scanning = true;
+    app.checking_host = true;
+    app.tx.send(Event::Host(Ok(None))).unwrap();
+    app.poll(&ctx);
+    assert!(app.scanning, "readiness must not finish the USB scan");
+    assert!(!app.checking_host);
     app.tx
         .send(Event::Scan {
             devices: Err("USB access denied".into()),
-            host: Ok(None),
         })
         .unwrap();
     app.poll(&ctx);
@@ -521,6 +611,35 @@ fn scan_results_keep_host_and_usb_failures_independent() {
     assert!(app.devices.is_empty());
     assert_eq!(app.scan_error.as_deref(), Some("USB access denied"));
     assert!(matches!(app.host, Ok(None)));
+}
+
+#[test]
+fn unsupported_dfu_modes_show_the_actual_reason_in_the_device_card() {
+    for (mode, pid) in [("Port DFU", "05ac:f014"), ("KIS", "05ac:1881")] {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        let mut app = english_app();
+        app.scanning = true;
+        app.tx
+            .send(Event::Scan {
+                devices: Err(format!("{mode} ({pid}) detected; transport not supported")),
+            })
+            .unwrap();
+        app.poll(&ctx);
+        let output = render_pass(&ctx, egui::RawInput::default(), |ctx| {
+            ctx.root_ui(|ui| {
+                app.prepare_device_card(ui, ctx).end(ui);
+            });
+        });
+        assert!(output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains(pid))
+        }));
+        assert!(!output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "No Mac connected")
+        }));
+        assert!(app.blocked_reason().is_some());
+        assert!(app.devices.is_empty());
+    }
 }
 
 #[test]
@@ -1089,7 +1208,7 @@ fn worker_state_survives_journal_eviction_and_protects_restore_from_stopping() {
             complete: false,
         },
     );
-    assert_eq!(app.job.as_ref().unwrap().phase, "Stage: update firmware");
+    assert_eq!(app.job.as_ref().unwrap().phase(), "Stage: update firmware");
     send_worker(&mut app, progress::Event::RestoreCompleted);
     for index in 0..4001 {
         app.journal_line(Record::new(Level::Info, "test", format!("message {index}")));
@@ -1189,7 +1308,7 @@ fn transfer_events_preserve_phase_order_and_stderr_never_changes_progress() {
     );
     assert!(app.job.as_ref().unwrap().transfers.is_empty());
     assert!(!app.job.as_ref().unwrap().can_stop());
-    assert_eq!(app.job.as_ref().unwrap().phase, "Restore complete");
+    assert_eq!(app.job.as_ref().unwrap().phase(), "Restore complete");
     assert_eq!(app.logs.back().unwrap().message, line);
 }
 
@@ -1617,16 +1736,16 @@ fn saving_a_journal_preserves_full_log_and_does_not_overwrite_its_source() {
     let full = "complete log\n".repeat(5000);
     std::fs::write(&source, &full).unwrap();
     assert_eq!(
-        worker::save_log(source.clone(), Some(&source), "visible tail", None).unwrap(),
+        journal::save_log(source.clone(), Some(&source), "visible tail", None).unwrap(),
         source
     );
     assert_eq!(std::fs::read_to_string(&source).unwrap(), full);
-    worker::save_log(target.clone(), Some(&source), "visible tail", None).unwrap();
+    journal::save_log(target.clone(), Some(&source), "visible tail", None).unwrap();
     assert_eq!(std::fs::read_to_string(&target).unwrap(), full);
-    worker::save_log(target.clone(), None, "visible tail", None).unwrap();
+    journal::save_log(target.clone(), None, "visible tail", None).unwrap();
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "visible tail");
     assert!(
-        worker::save_log(
+        journal::save_log(
             target.clone(),
             Some(&directory.path().join("missing")),
             "tail",
@@ -1653,7 +1772,7 @@ fn saving_a_journal_through_a_hard_link_preserves_the_active_source() {
     active.write_all(b"complete log\n").unwrap();
     std::fs::hard_link(&source, &destination).unwrap();
 
-    worker::save_log(destination.clone(), Some(&source), "tail", None).unwrap();
+    journal::save_log(destination.clone(), Some(&source), "tail", None).unwrap();
     assert_eq!(
         std::fs::read_to_string(&destination).unwrap(),
         "complete log\n"
@@ -1946,6 +2065,7 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
             apple_service_installed: false,
             apple_service_running: false,
             apple_driver_installed: false,
+            apple_kis_driver_installed: false,
             compatible_usb_driver: false,
         }));
         for _ in 0..20 {
@@ -2248,7 +2368,6 @@ fn automatic_firmware_shows_selection_and_clears_it_after_disconnect() {
     app.tx
         .send(Event::Scan {
             devices: Ok(app.devices.clone()),
-            host: Ok(None),
         })
         .unwrap();
     app.poll(&ctx);
@@ -2258,7 +2377,6 @@ fn automatic_firmware_shows_selection_and_clears_it_after_disconnect() {
     app.tx
         .send(Event::Scan {
             devices: Ok(vec![]),
-            host: Ok(None),
         })
         .unwrap();
     app.poll(&ctx);
@@ -2309,4 +2427,27 @@ fn firmware_lookup_ignores_superseded_requests_and_surfaces_network_failure() {
         .unwrap();
     app.poll(&ctx);
     assert!(app.firmware.is_none());
+}
+
+#[test]
+fn phase_labels_follow_the_current_language_and_completion_is_terminal() {
+    let mut operation = job(Action::Restore);
+    operation.output(Output::State(progress::Event::Checkpoint {
+        name: "writing_filesystem".into(),
+        complete: false,
+    }));
+    assert_eq!(operation.phase(), "Stage: writing filesystem");
+    let mut localizer = zalivka::localization::Localizer::load();
+    localizer.select("ru");
+    {
+        let _language = localizer.enter();
+        assert_eq!(operation.phase(), "Этап: writing filesystem");
+        operation.output(Output::State(progress::Event::RestoreCompleted));
+        operation.output(Output::State(progress::Event::Checkpoint {
+            name: "late_checkpoint".into(),
+            complete: false,
+        }));
+        assert_eq!(operation.phase(), "Восстановление завершено");
+    }
+    assert_eq!(operation.phase(), "Restore complete");
 }

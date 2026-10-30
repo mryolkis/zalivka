@@ -9,21 +9,119 @@ use ureq::{Proxy, http::Uri};
 mod connect;
 pub(crate) mod socket;
 
-pub(crate) fn for_url(uri: &Uri) -> Result<Option<Proxy>> {
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod macos;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod negotiate;
+
+pub(crate) fn for_url(uri: &Uri) -> Result<Vec<Option<Proxy>>> {
+    crate::progress::check_cancelled()?;
     #[cfg(windows)]
     if let Some(proxy) = crate::windows::proxy::for_url(uri)? {
-        // An explicit DIRECT/PAC bypass must also bypass environment proxies.
-        return Ok(proxy);
+        return Ok(vec![proxy]);
     }
-    environment_proxy(uri, |name| std::env::var(name).ok())
+    // An explicitly configured environment proxy overrides desktop settings.
+    // NO_PROXY is an explicit DIRECT decision, not an absent configuration.
+    if proxy_variables(uri)
+        .iter()
+        .any(|name| std::env::var(name).is_ok_and(|v| !v.trim().is_empty()))
+    {
+        return Ok(vec![environment_proxy(uri, |name| {
+            std::env::var(name).ok()
+        })?]);
+    }
+    #[cfg(target_os = "linux")]
+    return linux::for_url(uri);
+    #[cfg(target_os = "macos")]
+    return macos::for_url(uri);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    Ok(vec![None])
 }
 
-fn environment_proxy(uri: &Uri, read: impl Fn(&str) -> Option<String>) -> Result<Option<Proxy>> {
-    let names = if uri.scheme_str() == Some("http") {
+fn proxy_variables(uri: &Uri) -> [&'static str; 4] {
+    if uri.scheme_str() == Some("http") {
         ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
     } else {
         ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
-    };
+    }
+}
+
+/// This marker is produced only before HTTP request bytes can reach a server.
+/// PAC failover must never replay a partially sent POST or response.
+#[derive(Debug)]
+pub(crate) struct ConnectFailure(pub(crate) anyhow::Error);
+impl std::fmt::Display for ConnectFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("connecting proxy route")
+    }
+}
+impl std::error::Error for ConnectFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+pub(crate) fn try_routes<T>(
+    routes: Vec<Option<Proxy>>,
+    mut connect: impl FnMut(Option<Proxy>) -> Result<T>,
+) -> Result<T> {
+    ensure!(
+        !routes.is_empty(),
+        "proxy resolver returned no routes; direct fallback is disabled"
+    );
+    let mut routes = routes.into_iter().peekable();
+    while let Some(proxy) = routes.next() {
+        crate::progress::check_cancelled()?;
+        match connect(proxy) {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if routes.peek().is_some() && error.chain().any(|e| e.is::<ConnectFailure>()) =>
+            {
+                crate::log!(
+                    Warning,
+                    "proxy",
+                    "Connection failed: {error:#}; trying the next configured proxy route"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn routes_from_strings(values: Vec<String>) -> Result<Vec<Option<Proxy>>> {
+    ensure!(
+        !values.is_empty() && values.len() <= 32,
+        "invalid system proxy route list; direct fallback is disabled"
+    );
+    let mut routes = Vec::new();
+    for value in values {
+        if value == "direct://" {
+            routes.push(None);
+        } else if let Some(address) = value.strip_prefix("socks://") {
+            // An unspecified SOCKS version means v5, then v4 (remote DNS).
+            for scheme in ["socks5h", "socks4a"] {
+                routes.push(Some(Proxy::new(&format!("{scheme}://{address}"))?));
+            }
+        } else if let Some(address) = value.strip_prefix("socks5://") {
+            // Native/PAC SOCKS5 routes resolve the destination at the proxy.
+            // Preserve that behavior; explicit env socks5:// still means local DNS.
+            routes.push(Some(Proxy::new(&format!("socks5h://{address}"))?));
+        } else {
+            routes.push(Some(
+                Proxy::new(&value).context("invalid system proxy URI")?,
+            ));
+        }
+    }
+    Ok(routes)
+}
+
+fn environment_proxy(uri: &Uri, read: impl Fn(&str) -> Option<String>) -> Result<Option<Proxy>> {
+    let names = proxy_variables(uri);
     let Some((name, address)) = names.iter().find_map(|name| {
         read(name)
             .filter(|v| !v.trim().is_empty())
@@ -64,8 +162,7 @@ fn environment_proxy(uri: &Uri, read: impl Fn(&str) -> Option<String>) -> Result
 pub(crate) struct HttpConnector {
     tls: RustlsConnector,
     proxy_config: ureq::config::Config,
-    #[cfg(windows)]
-    windows_tss: bool,
+    tss: bool,
 }
 
 impl HttpConnector {
@@ -73,15 +170,13 @@ impl HttpConnector {
         Self {
             tls: RustlsConnector::default(),
             proxy_config,
-            #[cfg(windows)]
-            windows_tss: false,
+            tss: false,
         }
     }
 
-    #[cfg(windows)]
     pub(crate) fn for_tss(proxy_config: ureq::config::Config) -> Self {
         Self {
-            windows_tss: true,
+            tss: true,
             ..Self::new(proxy_config)
         }
     }
@@ -95,6 +190,22 @@ impl Connector for HttpConnector {
         details: &ConnectionDetails,
         chained: Option<()>,
     ) -> Result<Option<Self::Out>, ureq::Error> {
+        self.connect_route(details, chained).map_err(|error| {
+            let error = match error {
+                ureq::Error::Other(error) => anyhow::Error::from_boxed(error),
+                error => error.into(),
+            };
+            ureq::Error::Other(ConnectFailure(error).into())
+        })
+    }
+}
+
+impl HttpConnector {
+    fn connect_route(
+        &self,
+        details: &ConnectionDetails,
+        chained: Option<()>,
+    ) -> Result<Option<Box<dyn Transport>>, ureq::Error> {
         let transport = if chained.is_none()
             && let Some(proxy) = details.config.proxy()
             && matches!(
@@ -113,9 +224,8 @@ impl Connector for HttpConnector {
         };
         // Every route arrives here with a transport to the destination. TLS to
         // an HTTPS proxy belongs to the tunnel, not to the destination server.
-        #[cfg(windows)]
-        if self.windows_tss && details.needs_tls() {
-            return crate::windows::tls::connect_tss(details, transport).map(Some);
+        if self.tss && details.needs_tls() {
+            return crate::net::tls::connect_tss(details, transport).map(Some);
         }
         Ok(self
             .tls
@@ -223,7 +333,7 @@ impl Transport for TunnelTransport {
 
 pub(crate) fn connect(host: &str, port: u16) -> Result<socket::Stream> {
     let uri = target_uri(host, port)?;
-    connect_via(&uri, for_url(&uri)?)
+    try_routes(for_url(&uri)?, |proxy| connect_via(&uri, proxy))
 }
 
 /// A tunnel exposes the destination port, but no HTTP path or target TLS session.
@@ -258,7 +368,7 @@ fn connect_via(uri: &Uri, proxy: Option<Proxy>) -> Result<socket::Stream> {
             443
         });
     // The destination's TLS remains opaque to the proxy tunnel.
-    socket::connect_blocking(host, port, proxy)
+    socket::connect_blocking(host, port, proxy).map_err(|error| ConnectFailure(error).into())
 }
 
 /// Windows proxy lists distinguish the destination scheme (https=) from the
@@ -268,27 +378,26 @@ pub(crate) fn from_windows_list(uri: &Uri, list: &str, bypass: &str) -> Result<O
     if windows_bypass(uri, bypass) {
         return Ok(None);
     }
-    let entries: Vec<_> = list
+    let entries = list
         .split(|c: char| c == ';' || c.is_whitespace())
-        .filter(|entry| !entry.is_empty())
-        .collect();
+        .filter(|entry| !entry.is_empty());
     let scheme = uri
         .scheme_str()
         .context("proxy destination has no scheme")?;
     let selected = entries
-        .iter()
+        .clone()
         .find_map(|entry| {
             let (key, value) = entry.split_once('=')?;
             key.eq_ignore_ascii_case(scheme).then_some((value, false))
         })
         .or_else(|| {
             entries
-                .iter()
+                .clone()
                 .find(|entry| !entry.contains('='))
-                .map(|entry| (*entry, false))
+                .map(|entry| (entry, false))
         })
         .or_else(|| {
-            entries.iter().find_map(|entry| {
+            entries.clone().find_map(|entry| {
                 let (key, value) = entry.split_once('=')?;
                 key.eq_ignore_ascii_case("socks").then_some((value, true))
             })
