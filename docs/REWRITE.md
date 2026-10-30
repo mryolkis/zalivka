@@ -93,7 +93,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | done (all 16 files rewritten) |
 | 10 | `restored` services (data/images/keys/FDR/ASR) | FDR + ASR done; restored data services pending |
 | 11 | `net` (+ catalog; break proxy cycle) | done (catalog/net/assets/download/request; TLS moved to crate root; cycle broken) |
-| 12 | `proxy` (one route model; unify framing) | `negotiate` + `linux` + `socket` + `connect` done; proxy/macos/windows pending |
+| 12 | `proxy` (one route model; unify framing) | core done (proxy/connect/socket/negotiate/linux); macos/windows proxy pending |
 | 13 | `host` (drivers/Windows/Linux) | pending |
 | 14 | `app` (CLI + operations) | pending |
 | 15 | `gui` (+ localization) | pending |
@@ -143,6 +143,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `2959e2e` | `proxy/negotiate` + `proxy/linux` rewrites | 552 tests, clippy clean |
 | `bb07ad3` | `proxy/socket` rewrite | 552 tests, clippy clean |
 | `f0bedeb` | `proxy/connect` rewrite | 552 tests, clippy clean |
+| `ada9032` | `proxy.rs` policy/connector rewrite | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
