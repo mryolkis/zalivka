@@ -11,6 +11,7 @@ use std::{
 };
 
 const MAX_WORKERS: usize = 16;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 type Completion = (u16, Result<()>);
 
 /// Asynchronous requests own their service ports and ZIP readers. Completion
@@ -63,7 +64,7 @@ impl AsyncRequests {
             .name(format!("zalivka-{kind}"))
             .spawn(crate::progress::inherit(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut stream = session.connect_retry(port, Duration::from_secs(60))?;
+                    let mut stream = session.connect_retry(port, CONNECT_TIMEOUT)?;
                     if let Some(ipsw) = &mut ipsw {
                         context.serve_on(ipsw, &session, &mut stream, &request, data_type)
                     } else {
@@ -96,6 +97,7 @@ impl AsyncRequests {
         Ok(())
     }
 
+    /// Wait for every outstanding worker, joining handles as results arrive.
     pub fn finish(&mut self) -> Result<()> {
         while !self.workers.is_empty() {
             let (port, result) = self.completed.recv().context("waiting for async workers")?;

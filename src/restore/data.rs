@@ -12,6 +12,8 @@ use anyhow::{Context, Result, ensure};
 use plist::{Dictionary, Value};
 use std::time::Duration;
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+
 impl RestoreSession {
     pub fn serve(
         &mut self,
@@ -21,24 +23,15 @@ impl RestoreSession {
     ) -> Result<()> {
         let kind = wire::data_type(message)?;
         let data_type = DataType::parse(kind)?;
-        let arguments = [
-            "ImageName",
-            "ImageType",
-            "UpdaterName",
-            "MessageArgUpdaterName",
-        ]
-        .into_iter()
-        .filter_map(|key| {
-            wire::string(message, &["Arguments", key])
-                .ok()
-                .map(|value| format!("{key}={value}"))
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-        crate::log!(Debug, "restored:data", "{kind}: {arguments}");
+        crate::log!(
+            Debug,
+            "restored:data",
+            "{kind}: {}",
+            argument_summary(message)
+        );
         let port = data_type.data_port(message, false)?;
         if port != 0 {
-            let mut service = session.connect_retry(port, Duration::from_secs(60))?;
+            let mut service = session.connect_retry(port, CONNECT_TIMEOUT)?;
             self.context
                 .serve_on(&mut self.ipsw, session, &mut service, message, data_type)
         } else {
@@ -48,7 +41,39 @@ impl RestoreSession {
     }
 }
 
+fn argument_summary(message: &Value) -> String {
+    [
+        "ImageName",
+        "ImageType",
+        "UpdaterName",
+        "MessageArgUpdaterName",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        wire::string(message, &["Arguments", key])
+            .ok()
+            .map(|value| format!("{key}={value}"))
+    })
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
 impl RestoreContext {
+    /// Resolve the identity a handler works on. Only RecoveryOS requests and
+    /// requests flagged as recovery use the companion identity.
+    fn identity(&self, message: &Value, data_type: DataType) -> Result<&Identity> {
+        let recovery_requested = wire::flag(message, &["Arguments", "IsRecoveryOS"])?;
+        if data_type == DataType::RecoveryAsr || recovery_requested {
+            Ok(&self
+                .recovery
+                .as_ref()
+                .context("device requested a recoveryOS identity absent from this IPSW")?
+                .identity)
+        } else {
+            Ok(&self.restore.identity)
+        }
+    }
+
     pub(super) fn serve_on(
         &self,
         ipsw: &mut Ipsw,
@@ -58,28 +83,14 @@ impl RestoreContext {
         data_type: DataType,
     ) -> Result<()> {
         let kind = wire::data_type(message)?;
-        // Resolve firmware identity only for handlers that consume it. Network,
-        // preflight and optional RecoveryOS probes do not depend on an identity.
-        let restore = &self.restore.identity;
-        let recovery = self.recovery.as_ref();
-        let identity = || -> Result<&Identity> {
-            let is_recovery = wire::flag(message, &["Arguments", "IsRecoveryOS"])?;
-            if data_type == DataType::RecoveryAsr || is_recovery {
-                Ok(&recovery
-                    .context("device requested a recoveryOS identity absent from this IPSW")?
-                    .identity)
-            } else {
-                Ok(restore)
-            }
-        };
         // Generic boot objects use the restore ticket even for MacOSVariant
         // paths. Dedicated RecoveryOS* requests use the recovery signature instead.
         let response = match data_type {
             DataType::Asr | DataType::RecoveryAsr => {
-                return serve_asr(ipsw, identity()?, out);
+                return serve_asr(ipsw, self.identity(message, data_type)?, out);
             }
             DataType::BuildIdentity => {
-                let id = identity()?;
+                let id = self.identity(message, data_type)?;
                 wire::dict([
                     ("BuildIdentityDict", id.value.clone()),
                     (
@@ -97,7 +108,7 @@ impl RestoreContext {
             }
             DataType::ReceiptManifest => wire::dict([(
                 "ReceiptManifest",
-                Value::Dictionary(identity()?.manifest()?.clone()),
+                Value::Dictionary(self.identity(message, data_type)?.manifest()?.clone()),
             )]),
             DataType::RootTicket => wire::dict([(
                 "RootTicketData",
@@ -115,13 +126,13 @@ impl RestoreContext {
             }
             DataType::Empty => Value::Dictionary(Dictionary::new()),
             DataType::Component(tag) => {
-                let id = identity()?;
+                let id = self.identity(message, data_type)?;
                 let component = id.require_component_type(tag)?;
                 let bytes = ipsw.personalized(id, component, &self.restore.ticket)?;
                 wire::dict([(format!("{kind}File"), Value::Data(bytes))])
             }
             DataType::PersonalizedBootObject | DataType::SourceBootObject => {
-                let id = identity()?;
+                let id = self.identity(message, data_type)?;
                 let name = wire::string(message, &["Arguments", "ImageName"])?;
                 let global_optional = if name == "__GlobalManifest__" {
                     wire::flag(message, &["Arguments", "GlobalManifestOptional"])?
@@ -171,8 +182,19 @@ impl RestoreContext {
             }
             DataType::RecoveryFirmware => self.recovery_assets(ipsw, None)?,
             DataType::RecoveryLocalPolicy => self.recovery_local_policy(message)?,
-            DataType::Images => image_data(ipsw, identity()?, &self.restore.ticket, kind, message)?,
-            DataType::Nor => nor_data(ipsw, identity()?, &self.restore.ticket, message)?,
+            DataType::Images => image_data(
+                ipsw,
+                self.identity(message, data_type)?,
+                &self.restore.ticket,
+                kind,
+                message,
+            )?,
+            DataType::Nor => nor_data(
+                ipsw,
+                self.identity(message, data_type)?,
+                &self.restore.ticket,
+                message,
+            )?,
             DataType::Bootability => {
                 bootability(ipsw, out)?;
                 return Ok(());
@@ -180,12 +202,18 @@ impl RestoreContext {
             DataType::Asset => return serve_asset(&self.assets, out, message),
             DataType::Firmware => {
                 let args = wire::get(message, &["Arguments"])?;
-                let response = if let Some(response) = crate::firmware::canary_response(args)? {
-                    response
-                } else {
-                    let update = crate::firmware::prepare(ipsw, identity()?, &self.device, args)?;
-                    let response = tss::send_raw(update.request())?;
-                    update.finish(response)?
+                let response = match crate::firmware::canary_response(args)? {
+                    Some(response) => response,
+                    None => {
+                        let update = crate::firmware::prepare(
+                            ipsw,
+                            self.identity(message, data_type)?,
+                            &self.device,
+                            args,
+                        )?;
+                        let response = tss::send_raw(update.request())?;
+                        update.finish(response)?
+                    }
                 };
                 return crate::firmware::send_response(out, response, args);
             }
