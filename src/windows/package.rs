@@ -34,6 +34,9 @@ pub(super) const FILES: [&str; 5] = [
     "AppleLowerFilter.sys",
 ];
 
+const MAX_PATH_BUFFER: usize = 260;
+const MAX_SETUPAPI_TAIL: u64 = 65_536;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Driver {
     Usb,
@@ -104,7 +107,7 @@ impl Driver {
 
 fn driver_store_inf(published: &Path) -> Result<Option<PathBuf>> {
     let published = super::wide(published);
-    let mut path = [0u16; 260];
+    let mut path = [0u16; MAX_PATH_BUFFER];
     // SAFETY: published is NUL terminated; path is a writable MAX_PATH buffer.
     let ok = unsafe {
         SetupGetInfDriverStoreLocationW(
@@ -128,7 +131,7 @@ fn driver_store_inf(published: &Path) -> Result<Option<PathBuf>> {
     }
     let end = path
         .iter()
-        .position(|c| *c == 0)
+        .position(|unit| *unit == 0)
         .context("INF path is not terminated")?;
     Ok(Some(OsString::from_wide(&path[..end]).into()))
 }
@@ -190,34 +193,7 @@ fn installed_for_class(class: &GUID, found: &mut HashSet<Driver>) -> Result<()> 
             }
             return Err(error).context("Reading USB driver list");
         }
-        let mut detail = SP_DRVINFO_DETAIL_DATA_W {
-            cbSize: size_of::<SP_DRVINFO_DETAIL_DATA_W>() as u32,
-            ..Default::default()
-        };
-        // Only the fixed fields are needed. SetupAPI fills them even when the
-        // trailing hardware ID list does not fit and reports INSUFFICIENT_BUFFER.
-        let ok = unsafe {
-            SetupDiGetDriverInfoDetailW(
-                set.0,
-                ptr::null(),
-                &driver,
-                &mut detail,
-                size_of::<SP_DRVINFO_DETAIL_DATA_W>() as u32,
-                ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
-                return Err(error).context("Reading USB driver INF");
-            }
-        }
-        let end = detail
-            .InfFileName
-            .iter()
-            .position(|c| *c == 0)
-            .context("INF name is not terminated")?;
-        let published = PathBuf::from(OsString::from_wide(&detail.InfFileName[..end]));
+        let published = published_inf(set.0, &driver)?;
         if !seen.insert(published.clone()) {
             continue;
         }
@@ -241,6 +217,40 @@ fn installed_for_class(class: &GUID, found: &mut HashSet<Driver>) -> Result<()> 
         "Apple driver packages found so far: {found:?}"
     );
     Ok(())
+}
+
+/// Read the published INF name from a driver info record.
+fn published_inf(set: HDEVINFO, driver: &SP_DRVINFO_DATA_V2_W) -> Result<PathBuf> {
+    let mut detail = SP_DRVINFO_DETAIL_DATA_W {
+        cbSize: size_of::<SP_DRVINFO_DETAIL_DATA_W>() as u32,
+        ..Default::default()
+    };
+    // Only the fixed fields are needed. SetupAPI fills them even when the
+    // trailing hardware ID list does not fit and reports INSUFFICIENT_BUFFER.
+    let ok = unsafe {
+        SetupDiGetDriverInfoDetailW(
+            set,
+            ptr::null(),
+            driver,
+            &mut detail,
+            size_of::<SP_DRVINFO_DETAIL_DATA_W>() as u32,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
+            return Err(error).context("Reading USB driver INF");
+        }
+    }
+    let end = detail
+        .InfFileName
+        .iter()
+        .position(|unit| *unit == 0)
+        .context("INF name is not terminated")?;
+    Ok(PathBuf::from(OsString::from_wide(
+        &detail.InfFileName[..end],
+    )))
 }
 
 fn unpack(directory: &Path, bytes: &[u8], expected: &str, files: &[&str]) -> Result<PathBuf> {
@@ -289,16 +299,13 @@ fn unpack(directory: &Path, bytes: &[u8], expected: &str, files: &[&str]) -> Res
 }
 
 pub(crate) fn install(inf: &Path) -> Result<bool> {
-    use std::{
-        io::{Read, Seek, SeekFrom},
-        time::Instant,
-    };
+    use std::time::Instant;
     let inf = inf
         .canonicalize()
         .with_context(|| format!("Opening INF: {}", inf.display()))?;
     ensure!(
         inf.extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("inf")),
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("inf")),
         "expected a signed driver package's .inf file"
     );
     let setupapi = super::windows_directory()?.join(r"INF\setupapi.dev.log");
@@ -330,50 +337,7 @@ pub(crate) fn install(inf: &Path) -> Result<bool> {
             "drivers:install",
             "DiInstallDriverW: 0x{code:08X}; {error}"
         );
-        let read_log = (|| -> Result<()> {
-            let mut file = File::open(&setupapi)?;
-            let end = file.metadata()?.len();
-            // Include only this attempt; bound memory if Windows logs heavily.
-            let start = if offset <= end { offset } else { 0 };
-            let bounded = start.max(end.saturating_sub(65536));
-            file.seek(SeekFrom::Start(bounded))?;
-            let mut bytes = Vec::new();
-            file.take(65536).read_to_end(&mut bytes)?;
-            if bytes.is_empty() {
-                crate::log!(
-                    Debug,
-                    "drivers:log",
-                    "No new records: {}",
-                    setupapi.display()
-                );
-            } else {
-                crate::log!(
-                    Trace,
-                    "drivers:log",
-                    "{bounded}..{end}: {}",
-                    setupapi.display()
-                );
-                // SetupAPI logs can be UTF-16LE; detect its BOM or ASCII NULs.
-                let text = if bytes.starts_with(&[0xff, 0xfe]) || bytes.get(1) == Some(&0) {
-                    let bytes = bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(&bytes);
-                    String::from_utf16_lossy(
-                        &bytes
-                            .as_chunks::<2>()
-                            .0
-                            .iter()
-                            .map(|b| u16::from_le_bytes(*b))
-                            .collect::<Vec<_>>(),
-                    )
-                } else {
-                    String::from_utf8_lossy(&bytes).into_owned()
-                };
-                for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                    crate::log!(Debug, "drivers:log", "{line}");
-                }
-            }
-            Ok(())
-        })();
-        if let Err(log_error) = read_log {
+        if let Err(log_error) = log_setupapi(&setupapi, offset) {
             crate::log!(
                 Warning,
                 "drivers:log",
@@ -391,6 +355,47 @@ pub(crate) fn install(inf: &Path) -> Result<bool> {
         reboot != 0
     );
     Ok(reboot != 0)
+}
+
+/// Emit only the log tail written during this attempt.
+fn log_setupapi(path: &Path, offset: u64) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = File::open(path)?;
+    let end = file.metadata()?.len();
+    let start = if offset <= end { offset } else { 0 };
+    let bounded = start.max(end.saturating_sub(MAX_SETUPAPI_TAIL));
+    file.seek(SeekFrom::Start(bounded))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SETUPAPI_TAIL).read_to_end(&mut bytes)?;
+    if bytes.is_empty() {
+        crate::log!(Debug, "drivers:log", "No new records: {}", path.display());
+        return Ok(());
+    }
+    crate::log!(Trace, "drivers:log", "{bounded}..{end}: {}", path.display());
+    for line in decode_setupapi(&bytes)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        crate::log!(Debug, "drivers:log", "{line}");
+    }
+    Ok(())
+}
+
+/// SetupAPI logs can be UTF-16LE; detect its BOM or ASCII NULs.
+fn decode_setupapi(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xff, 0xfe]) || bytes.get(1) == Some(&0) {
+        let bytes = bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(bytes);
+        String::from_utf16_lossy(
+            &bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
 
 #[cfg(test)]
