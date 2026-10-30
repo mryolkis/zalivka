@@ -23,12 +23,20 @@ impl Update {
     }
 
     pub fn finish(self, mut response: Value) -> Result<Value> {
+        let fields = wire::dictionary(&response).context("invalid updater response")?;
         for tag in &self.response_tags {
-            let value = wire::get(&response, &[tag])
-                .with_context(|| format!("Apple returned no requested firmware tag {tag}"))?;
-            if tag != "FirmwareData"
-                && wire::optional_boolean(&self.request, &[&format!("@{tag}")])? == Some(true)
+            let is_ticket = tag != "FirmwareData";
+            // ResponseTags can keep completed controllers across updater rounds.
+            // Only this request's @Tag=true asks Apple to return that ticket.
+            if is_ticket
+                && wire::optional_boolean(&self.request, &[&format!("@{tag}")])? != Some(true)
             {
+                continue;
+            }
+            let value = fields
+                .get(tag)
+                .with_context(|| format!("Apple returned no requested firmware tag {tag}"))?;
+            if is_ticket {
                 anyhow::ensure!(
                     value.as_data().is_some_and(|data| !data.is_empty()),
                     "Apple returned an invalid or empty firmware ticket {tag}"

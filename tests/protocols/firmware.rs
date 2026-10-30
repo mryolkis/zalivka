@@ -470,6 +470,101 @@ fn requested_tickets_require_nonempty_data_and_structured_firmware_is_preserved(
 }
 
 #[test]
+fn controller_retry_accepts_only_the_tickets_requested_in_the_current_round() {
+    let capture = Value::from_reader(Cursor::new(include_bytes!(
+        "../fixtures/firmware-controller-retry.plist"
+    )))
+    .unwrap();
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let id = Identity::new(0, wire::dict([] as [(&str, Value); 0]));
+    let device = DeviceInfo::parse("CPID:6030 BDID:04 ECID:1 CPFM:03", Mode::Dfu).unwrap();
+    let loops = wire::get(&capture, &["Loops"]).unwrap().as_array().unwrap();
+    for (round, value) in loops.iter().enumerate() {
+        let args = wire::get(value, &["Arguments"]).unwrap();
+        let response = wire::get(value, &["Response"]).unwrap();
+        let update = zalivka::firmware::prepare(&mut ipsw, &id, &device, args).unwrap();
+        for (key, value) in
+            wire::dictionary(wire::get(args, &["DeviceGeneratedRequest"]).unwrap()).unwrap()
+        {
+            assert_eq!(wire::get(update.request(), &[key]).unwrap(), value);
+        }
+        if round == 1 {
+            assert!(wire::get(update.request(), &["@USBPortController1,Ticket"]).is_err());
+        }
+        let response = update.finish(response.clone()).unwrap();
+        let mut bytes = Vec::new();
+        zalivka::firmware::send_response(&mut bytes, response.clone(), args).unwrap();
+        let mut input = Cursor::new(bytes);
+        let frame = wire::receive(&mut input).unwrap();
+        assert_eq!(
+            wire::get(&frame, &["FirmwareResponseData"]).unwrap(),
+            &response
+        );
+        assert_eq!(input.position(), input.get_ref().len() as u64);
+        let fields = wire::dictionary(&response).unwrap();
+        assert_eq!(fields.contains_key("USBPortController1,Ticket"), round == 0);
+        for controller in 2..=4 {
+            assert!(fields.contains_key(&format!("USBPortController{controller},Ticket")));
+        }
+    }
+}
+
+#[test]
+fn controller_retry_still_rejects_missing_or_invalid_active_tickets() {
+    let capture = Value::from_reader(Cursor::new(include_bytes!(
+        "../fixtures/firmware-controller-retry.plist"
+    )))
+    .unwrap();
+    let retry = &wire::get(&capture, &["Loops"]).unwrap().as_array().unwrap()[1];
+    let args = wire::get(retry, &["Arguments"]).unwrap();
+    let original = wire::get(retry, &["Response"]).unwrap();
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let id = Identity::new(0, wire::dict([] as [(&str, Value); 0]));
+    let device = DeviceInfo::parse("CPID:6030 BDID:04 ECID:1 CPFM:03", Mode::Dfu).unwrap();
+    for controller in 2..=4 {
+        let tag = format!("USBPortController{controller},Ticket");
+        for invalid in [
+            None,
+            Some(Value::Data(vec![])),
+            Some(false.into()),
+            Some("not a ticket".into()),
+        ] {
+            let mut response = original.clone();
+            let fields = response.as_dictionary_mut().unwrap();
+            if let Some(invalid) = invalid {
+                fields.insert(tag.clone(), invalid);
+            } else {
+                fields.remove(&tag);
+            }
+            let update = zalivka::firmware::prepare(&mut ipsw, &id, &device, args).unwrap();
+            let error = update.finish(response).unwrap_err();
+            assert!(format!("{error:#}").contains(&tag), "{error:#}");
+        }
+    }
+}
+
+#[test]
+fn inactive_ticket_flags_allow_omission_but_do_not_allow_invalid_response_envelopes() {
+    let mut args = modern_updater_args("FutureController");
+    args.as_dictionary_mut().unwrap()["DeviceGeneratedRequest"]
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("@Controller,Ticket".into(), false.into());
+    let file = fixture(None, false);
+    let mut ipsw = Ipsw::open(file.path()).unwrap();
+    let update = zalivka::firmware::prepare(&mut ipsw, &identity(), &device_info(), &args).unwrap();
+    let empty = wire::dict([] as [(&str, Value); 0]);
+    assert_eq!(update.finish(empty.clone()).unwrap(), empty);
+    for invalid in [false.into(), "invalid".into(), Value::Array(vec![])] {
+        let update =
+            zalivka::firmware::prepare(&mut ipsw, &identity(), &device_info(), &args).unwrap();
+        assert!(update.finish(invalid).is_err());
+    }
+}
+
+#[test]
 fn ftab_index_preserves_payload_ranges_and_rejects_bad_offsets() {
     use crate::test_support::Ftab;
     let mut header = [0; 48];
