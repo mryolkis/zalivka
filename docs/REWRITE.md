@@ -166,6 +166,8 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `7ba1945` | `proxy/macos` rewrite (all production files now rewritten) | 552 tests, clippy clean; macOS compile-only elsewhere |
 | `421a468` | cleanup: GUI journal-dir injection + `ureq` feature merge | 552 tests, clippy clean, `--no-default-features` clean |
 | `fe8db25` | `mux/channel` + `main` rewrites (every src file now differs from `pre-rewrite`) | 552 tests, clippy clean |
+| `ccc99a0` | README domain map + final verification evidence | clean-build verification recorded |
+| `499d203` | `build.rs` rewrite | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
@@ -205,9 +207,13 @@ integration tests, throughput (ignored). Clippy is also run with
 
 ## Final state and evidence
 
-- Every current `src/**/*.rs` file differs from `git tag pre-rewrite`
-  (`IDENTICAL: 0` by blob hash); `src/tls.rs` and `src/ipsw/containers.rs` are
-  new, `src/net/tls.rs` and `src/firmware/containers.rs` were removed.
+- Every current `src/**/*.rs` file and `build.rs` differ from `git tag
+  pre-rewrite` (`IDENTICAL: 0` by blob hash); `src/tls.rs` and
+  `src/ipsw/containers.rs` are new, `src/net/tls.rs` and
+  `src/firmware/containers.rs` were removed.
+- Scope note: `scripts/*.ps1`, `packaging/` and `certs/` are release tooling,
+  vendored signed binaries and root certificates, not application code; they are
+  intentionally unchanged.
 - The production tree is 85 modules in 15 domain groups (see `README.md`);
   domain boundaries, not raw file count, were the KISS/DRY target. Duplicated
   policy/parsing/polling code was consolidated, and the `net ↔ proxy` and
