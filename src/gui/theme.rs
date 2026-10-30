@@ -10,6 +10,15 @@ pub(super) const BLUE: Color32 = Color32::from_rgb(43, 103, 224);
 const GREEN: Color32 = Color32::from_rgb(24, 117, 88);
 pub(super) const RED: Color32 = Color32::from_rgb(193, 58, 68);
 
+const HOVER: Color32 = Color32::from_rgb(237, 242, 253);
+const PRESSED: Color32 = Color32::from_rgb(225, 234, 253);
+const DARK_BG: Color32 = Color32::from_rgb(16, 22, 31);
+const DARK_WINDOW: Color32 = Color32::from_rgb(24, 32, 44);
+const DARK_INK: Color32 = Color32::from_rgb(230, 236, 246);
+const DARK_MUTED: Color32 = Color32::from_rgb(166, 179, 199);
+const DARK_ERROR: Color32 = Color32::from_rgb(255, 136, 150);
+const DARK_LINK: Color32 = Color32::from_rgb(132, 179, 255);
+
 pub(super) fn configure(ctx: &egui::Context) {
     apply_preference(
         ctx,
@@ -28,22 +37,22 @@ pub(super) fn configure(ctx: &egui::Context) {
         style.visuals.widgets.inactive.bg_fill = Color32::WHITE;
         style.visuals.widgets.inactive.weak_bg_fill = Color32::WHITE;
         style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, LINE);
-        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(237, 242, 253);
-        style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(237, 242, 253);
+        style.visuals.widgets.hovered.bg_fill = HOVER;
+        style.visuals.widgets.hovered.weak_bg_fill = HOVER;
         style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, BLUE);
-        style.visuals.widgets.active.bg_fill = Color32::from_rgb(225, 234, 253);
-        style.visuals.widgets.active.weak_bg_fill = Color32::from_rgb(225, 234, 253);
+        style.visuals.widgets.active.bg_fill = PRESSED;
+        style.visuals.widgets.active.weak_bg_fill = PRESSED;
         style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, LINE);
     });
     ctx.style_mut_of(egui::Theme::Dark, |style| {
         style.visuals = egui::Visuals::dark();
-        style.visuals.panel_fill = Color32::from_rgb(16, 22, 31);
-        style.visuals.window_fill = Color32::from_rgb(24, 32, 44);
+        style.visuals.panel_fill = DARK_BG;
+        style.visuals.window_fill = DARK_WINDOW;
         style.visuals.extreme_bg_color = Color32::from_rgb(12, 17, 25);
-        style.visuals.override_text_color = Some(Color32::from_rgb(230, 236, 246));
-        style.visuals.weak_text_color = Some(Color32::from_rgb(166, 179, 199));
-        style.visuals.error_fg_color = Color32::from_rgb(255, 136, 150);
-        style.visuals.hyperlink_color = Color32::from_rgb(132, 179, 255);
+        style.visuals.override_text_color = Some(DARK_INK);
+        style.visuals.weak_text_color = Some(DARK_MUTED);
+        style.visuals.error_fg_color = DARK_ERROR;
+        style.visuals.hyperlink_color = DARK_LINK;
         style.visuals.widgets.noninteractive.bg_fill = style.visuals.window_fill;
         style.visuals.widgets.noninteractive.bg_stroke =
             Stroke::new(1.0_f32, Color32::from_rgb(52, 65, 84));
@@ -96,22 +105,32 @@ pub(super) fn configure(ctx: &egui::Context) {
                 .insert(text, egui::FontId::proportional(size));
         }
     });
-    #[cfg(windows)]
-    if let Some(windows) = std::env::var_os("WINDIR")
-        && let Ok(bytes) = std::fs::read(PathBuf::from(windows).join("Fonts/segoeui.ttf"))
-    {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts
-            .font_data
-            .insert("system".into(), egui::FontData::from_owned(bytes).into());
-        fonts
-            .families
-            .entry(egui::FontFamily::Proportional)
-            .or_default()
-            .insert(0, "system".into());
-        ctx.set_fonts(fonts);
-    }
+    install_system_font(ctx);
 }
+
+/// Use the Windows system font for consistent proportional metrics.
+#[cfg(windows)]
+fn install_system_font(ctx: &egui::Context) {
+    let Some(windows) = std::env::var_os("WINDIR") else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(PathBuf::from(windows).join("Fonts/segoeui.ttf")) else {
+        return;
+    };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("system".into(), egui::FontData::from_owned(bytes).into());
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "system".into());
+    ctx.set_fonts(fonts);
+}
+
+#[cfg(not(windows))]
+fn install_system_font(_ctx: &egui::Context) {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tone {
@@ -119,6 +138,7 @@ pub(super) enum Tone {
     Success,
     Error,
 }
+
 impl Tone {
     pub(super) fn color(self, visuals: &egui::Visuals) -> Color32 {
         match self {

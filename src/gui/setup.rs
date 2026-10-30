@@ -29,6 +29,7 @@ impl Action {
             Self::ResetDrivers => "Reset Apple USB drivers",
         }
     }
+
     pub(super) fn log_name(self) -> &'static str {
         match self {
             Self::Revive => "revive",
@@ -40,6 +41,7 @@ impl Action {
             Self::InstallUdev => "udev",
         }
     }
+
     pub(super) fn completed_title(self) -> &'static str {
         match self {
             Self::Revive => "Revive complete",
@@ -52,12 +54,14 @@ impl Action {
             Self::ResetDrivers => "USB driver reset complete",
         }
     }
+
     pub(super) fn requires_admin(self) -> bool {
         matches!(
             self,
             Self::PrepareWindows | Self::ResetDrivers | Self::InstallUdev
         )
     }
+
     pub(super) fn writes_device(self) -> bool {
         matches!(self, Self::Revive | Self::Restore)
     }
@@ -93,12 +97,13 @@ impl Setup {
         let path = Path::new(self.ipsw.trim());
         ensure!(
             path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("ipsw")),
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ipsw")),
             "Select an .ipsw file"
         );
         ensure!(path.is_file(), "IPSW file not found");
         Ok(path)
     }
+
     pub(super) fn validate(&self, action: Action) -> Result<()> {
         if action == Action::Verify || (action.writes_device() && !self.automatic) {
             self.local_file()?;
@@ -110,7 +115,7 @@ impl Setup {
     }
 
     pub(super) fn restore_options(&self, transcript: &Path) -> Result<operations::Restore> {
-        let path = |text: &str| (!text.trim().is_empty()).then(|| text.trim().into());
+        let ecid = parse_ecid(self.ecid.trim()).map_err(anyhow::Error::msg)?;
         Ok(operations::Restore {
             ipsw: if self.automatic {
                 None
@@ -118,34 +123,33 @@ impl Setup {
                 Some(self.local_file()?.into())
             },
             firmware_dir: if self.automatic {
-                path(&self.cache)
+                optional_path(&self.cache)
             } else {
                 None
             },
             release: self.automatic.then(|| self.release.clone()).flatten(),
-            ecid: parse_ecid(self.ecid.trim()).map_err(anyhow::Error::msg)?,
+            ecid,
             identity: None,
             transcript: Some(transcript.to_path_buf()),
-            authorization_tokens: path(&self.tokens),
-            apple_connect_data: path(&self.connect_data),
+            authorization_tokens: optional_path(&self.tokens),
+            apple_connect_data: optional_path(&self.connect_data),
         })
     }
 
     pub(super) fn run(&self, action: Action, transcript: &Path) -> Result<()> {
         match action {
             Action::Restore | Action::Revive => {
-                self.restore_options(transcript)?
-                    .run(if action == Action::Restore {
-                        Behavior::Erase
-                    } else {
-                        Behavior::Update
-                    })?
+                let behavior = if action == Action::Restore {
+                    Behavior::Erase
+                } else {
+                    Behavior::Update
+                };
+                self.restore_options(transcript)?.run(behavior)?;
             }
             Action::Download => {
                 let ecid = parse_ecid(self.ecid.trim()).map_err(anyhow::Error::msg)?;
-                let directory =
-                    (!self.cache.trim().is_empty()).then(|| Path::new(self.cache.trim()));
-                operations::fetch(ecid, directory, self.release.as_ref())?;
+                let directory = optional_path(&self.cache);
+                operations::fetch(ecid, directory.as_deref(), self.release.as_ref())?;
             }
             Action::Verify => {
                 let report = operations::verify(self.local_file()?, None)?;
@@ -169,4 +173,9 @@ impl Setup {
         }
         Ok(())
     }
+}
+
+/// An optional trimmed path from a text field.
+fn optional_path(text: &str) -> Option<std::path::PathBuf> {
+    (!text.trim().is_empty()).then(|| text.trim().into())
 }
