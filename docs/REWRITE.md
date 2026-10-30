@@ -87,7 +87,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 3 | `ipsw` (flatten identity/verify/digest/stream) | done (all files rewritten; final flatten deferred to cleanup) |
 | 4 | `crypto` (img4 + aea) | done |
 | 5 | `tss` (transport + requests) | done |
-| 6 | `firmware` (updater/containers/canary/request) | containers moved to ipsw (cycle broken); updater/canary/request pending |
+| 6 | `firmware` (updater/containers/canary/request) | done (containers moved to ipsw; updater/canary/request rewritten) |
 | 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | pending |
 | 8 | `mux` (flatten packet/channel/stream) | pending |
 | 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | pending |
@@ -116,6 +116,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `841a3bc` | container parsing moved to `ipsw/containers`, rewritten, cycle broken | 552 tests, clippy clean |
 | `1440f67` | `ipsw/verify` rewrite | 552 tests, clippy clean |
 | `f585661` | `ipsw.rs` archive rewrite (IPSW domain complete) | 552 tests, clippy clean |
+| `14aad94` | firmware domain rewrite (updater/request/canary) | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
