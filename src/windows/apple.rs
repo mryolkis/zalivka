@@ -47,6 +47,13 @@ const RESET: u32 = 0x22000c;
 const CONTROL: u32 = 0x2200a0;
 const PIPE_INFO: u32 = 0x2200a4;
 const INTERFACE_INFO: u32 = 0x2200a8;
+const KIS_INFO: u32 = 0x220004;
+const KIS_CHUNK_IOCTL: u32 = 0x220008;
+const KIS_BOOT_IOCTL: u32 = 0x22000c;
+const READ_BUFFER: usize = 65_536;
+const MAX_PIPES: u8 = 7;
+const KIS_INFO_LENGTH: usize = 1028;
+const KIS_CHUNK: usize = 0x4000;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
@@ -76,7 +83,7 @@ impl BulkReader {
         let worker = thread::Builder::new().name("zalivka-usb-in".into()).spawn(
             crate::progress::inherit(move || {
                 while incoming.recv().is_ok() {
-                    let result = device.read_using(pipe, 65536, submit);
+                    let result = device.read_using(pipe, READ_BUFFER, submit);
                     if finished.send(result).is_err() {
                         break;
                     }
@@ -180,12 +187,7 @@ impl<'a> IoctlRequest<'a> {
         // gets a new event; notification clones retain it until all waits end.
         let ready = crate::mux::InputReady::new(move |timeout| {
             // SAFETY: the closure owns the event for the entire bounded wait.
-            match unsafe {
-                WaitForSingleObject(
-                    event.as_raw_handle(),
-                    timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32,
-                )
-            } {
+            match unsafe { WaitForSingleObject(event.as_raw_handle(), wait_millis(timeout)) } {
                 WAIT_OBJECT_0 => Ok(true),
                 WAIT_TIMEOUT => Ok(false),
                 _ => Err(io::Error::last_os_error()).context("waiting for Apple USB event"),
@@ -246,7 +248,7 @@ impl<'a> IoctlRequest<'a> {
                 self.handle.as_raw_handle(),
                 self.overlapped.get(),
                 self.transferred.get(),
-                timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32,
+                wait_millis(timeout),
                 0,
             )
         };
@@ -335,6 +337,10 @@ impl Drop for IoctlRequest<'_> {
     }
 }
 
+fn wait_millis(timeout: Duration) -> u32 {
+    timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32
+}
+
 fn interface_number(instance: &str) -> Option<u8> {
     let hardware = instance.split('\\').nth(1)?.to_ascii_uppercase();
     let (_, number) = hardware.rsplit_once("&MI_")?;
@@ -364,7 +370,7 @@ fn path_instance(path: &[u16]) -> Result<Vec<u16>> {
     );
     let end = buffer
         .iter()
-        .position(|c| *c == 0)
+        .position(|unit| *unit == 0)
         .context("unterminated Apple USB instance")?;
     buffer.truncate(end + 1);
     Ok(buffer)
@@ -393,7 +399,7 @@ fn parent_instance(instance: &[u16]) -> Option<String> {
     if status != CR_SUCCESS || ty != DEVPROP_TYPE_STRING {
         return None;
     }
-    let end = buffer.iter().position(|c| *c == 0)?;
+    let end = buffer.iter().position(|unit| *unit == 0)?;
     String::from_utf16(&buffer[..end]).ok()
 }
 
@@ -401,7 +407,7 @@ fn matches_instance(actual: &str, parent: Option<&str>, wanted: &str, number: u8
     if actual.eq_ignore_ascii_case(wanted) {
         return interface_number(actual).unwrap_or(0) == number;
     }
-    parent.is_some_and(|p| p.eq_ignore_ascii_case(wanted))
+    parent.is_some_and(|parent| parent.eq_ignore_ascii_case(wanted))
         && interface_number(actual) == Some(number)
 }
 
@@ -471,30 +477,35 @@ impl AppleUsb {
                 device.kis_info()?;
                 return Ok(Some(device));
             }
-            // Verify the handle with a read-only USB request, not just a cached PnP name.
-            let descriptor = device.control_in(
-                ControlIn {
-                    control_type: nusb::transfer::ControlType::Standard,
-                    recipient: nusb::transfer::Recipient::Device,
-                    request: 6,
-                    value: 0x0100,
-                    index: 0,
-                    length: 18,
-                },
-                TIMEOUT,
-            )?;
-            ensure!(
-                descriptor.len() == 18 && descriptor[0..2] == [18, 1],
-                "invalid Apple USB device descriptor"
-            );
-            ensure!(
-                u16::from_le_bytes([descriptor[8], descriptor[9]]) == info.vendor_id()
-                    && u16::from_le_bytes([descriptor[10], descriptor[11]]) == info.product_id(),
-                "Apple USB device changed during open"
-            );
+            device.verify_descriptor(info)?;
             return Ok(Some(device));
         }
         Ok(None)
+    }
+
+    /// Verify the handle with a read-only USB request, not just a cached PnP name.
+    fn verify_descriptor(&self, info: &nusb::DeviceInfo) -> Result<()> {
+        let descriptor = self.control_in(
+            ControlIn {
+                control_type: nusb::transfer::ControlType::Standard,
+                recipient: nusb::transfer::Recipient::Device,
+                request: 6,
+                value: 0x0100,
+                index: 0,
+                length: 18,
+            },
+            TIMEOUT,
+        )?;
+        ensure!(
+            descriptor.len() == 18 && descriptor[0..2] == [18, 1],
+            "invalid Apple USB device descriptor"
+        );
+        ensure!(
+            u16::from_le_bytes([descriptor[8], descriptor[9]]) == info.vendor_id()
+                && u16::from_le_bytes([descriptor[10], descriptor[11]]) == info.product_id(),
+            "Apple USB device changed during open"
+        );
+        Ok(())
     }
 
     fn ioctl(
@@ -508,25 +519,25 @@ impl AppleUsb {
     }
 
     pub(crate) fn kis_info(&self) -> Result<crate::device::DeviceInfo> {
-        let bytes = self.ioctl(0x220004, &[], 1028, TIMEOUT)?;
+        let bytes = self.ioctl(KIS_INFO, &[], KIS_INFO_LENGTH, TIMEOUT)?;
         kis_info(&bytes)
     }
 
     pub(crate) fn kis_upload_chunk(&self, address: u64, data: &[u8]) -> Result<()> {
         ensure!(
-            !data.is_empty() && data.len() <= 0x4000,
+            !data.is_empty() && data.len() <= KIS_CHUNK,
             "invalid Apple KIS upload chunk"
         );
-        let mut bytes = vec![0; 0x4010];
+        let mut bytes = vec![0; KIS_CHUNK + 0x10];
         bytes[..data.len()].copy_from_slice(data);
-        bytes[0x4000..0x4004].copy_from_slice(&(data.len() as u32).to_le_bytes());
-        bytes[0x4008..].copy_from_slice(&address.to_le_bytes());
-        self.ioctl(0x220008, &bytes, 0, TIMEOUT)?;
+        bytes[KIS_CHUNK..KIS_CHUNK + 4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes[KIS_CHUNK + 8..].copy_from_slice(&address.to_le_bytes());
+        self.ioctl(KIS_CHUNK_IOCTL, &bytes, 0, TIMEOUT)?;
         Ok(())
     }
 
     pub(crate) fn kis_boot(&self, length: u32) -> Result<()> {
-        self.ioctl(0x22000c, &length.to_le_bytes(), 0, TIMEOUT)?;
+        self.ioctl(KIS_BOOT_IOCTL, &length.to_le_bytes(), 0, TIMEOUT)?;
         Ok(())
     }
 
@@ -595,7 +606,10 @@ impl AppleUsb {
             "invalid Apple USB interface descriptor"
         );
         let count = interface[30];
-        ensure!(count <= 7, "Apple USB driver supports at most 7 pipes");
+        ensure!(
+            count <= MAX_PIPES,
+            "Apple USB driver supports at most 7 pipes"
+        );
         for index in 1..=count {
             let mut query = [0; 24];
             query[..4].copy_from_slice(&u32::from(index).to_le_bytes());
@@ -636,7 +650,7 @@ fn control_packet(
 fn kis_info(bytes: &[u8]) -> Result<crate::device::DeviceInfo> {
     use crate::device::{DeviceInfo, Mode};
     ensure!(
-        bytes.len() == 1028 && bytes[..2] == [0xac, 5],
+        bytes.len() == KIS_INFO_LENGTH && bytes[..2] == [0xac, 5],
         "invalid Apple KIS device info"
     );
     let pid = u16::from_le_bytes([bytes[2], bytes[3]]);
@@ -648,7 +662,7 @@ fn kis_info(bytes: &[u8]) -> Result<crate::device::DeviceInfo> {
         let bytes = &bytes[offset..offset + 255];
         let end = bytes
             .iter()
-            .position(|b| *b == 0)
+            .position(|byte| *byte == 0)
             .context("unterminated Apple KIS string")?;
         std::str::from_utf8(&bytes[..end]).context("invalid Apple KIS string")
     };
@@ -663,7 +677,10 @@ fn pipe_address(info: &[u8]) -> Result<Option<u8>> {
 }
 
 fn pipe_ioctl(pipe: u8, input: bool) -> Result<u32> {
-    ensure!((1..=7).contains(&pipe), "invalid Apple USB pipe index");
+    ensure!(
+        (1..=MAX_PIPES).contains(&pipe),
+        "invalid Apple USB pipe index"
+    );
     Ok(if input { 0x220021 } else { 0x220042 } + u32::from(pipe) * 4)
 }
 
