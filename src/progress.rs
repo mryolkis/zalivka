@@ -11,6 +11,8 @@ use std::{
 
 pub const MAC_STARTUP_HINT: &str = "Check that the Mac starts. If it shows the Activate Mac screen, connect the Mac to Wi-Fi or Ethernet and complete activation.";
 const INTERVAL: Duration = Duration::from_millis(500);
+const LOG_INTERVAL: Duration = Duration::from_secs(30);
+const LARGE_TRANSFER: u64 = 64 * 1024 * 1024;
 static NEXT_TRANSFER: AtomicU64 = AtomicU64::new(1);
 thread_local! {
     static CURRENT: RefCell<Option<Context>> = const { RefCell::new(None) };
@@ -82,12 +84,13 @@ impl Context {
             &mut *self
                 .cancel_actions
                 .lock()
-                .unwrap_or_else(|e| e.into_inner()),
+                .unwrap_or_else(|error| error.into_inner()),
         );
         for action in actions {
             action();
         }
     }
+
     pub fn cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
@@ -139,7 +142,7 @@ pub(crate) fn on_cancel(action: impl FnOnce() + Send + 'static) {
         let mut actions = context
             .cancel_actions
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(|error| error.into_inner());
         if context.cancelled() {
             drop(actions);
             action();
@@ -148,6 +151,7 @@ pub(crate) fn on_cancel(action: impl FnOnce() + Send + 'static) {
         }
     }
 }
+
 /// Worker state is independent of human-readable logs and their retained history.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -208,6 +212,26 @@ impl Update {
             }
         })
     }
+
+    pub fn summary(&self) -> String {
+        let size = human_bytes(self.completed);
+        if self.finished {
+            let speed = self.bytes_per_second / 1048576.0;
+            format!(
+                "{}: complete, {size}, {:.1} s, {speed:.1} MiB/s",
+                self.stage, self.elapsed_seconds
+            )
+        } else {
+            format!(
+                "{}: {size}{}, {:.1} MiB/s",
+                self.stage,
+                self.total
+                    .map(|total| format!(" of {}", human_bytes(total)))
+                    .unwrap_or_default(),
+                self.bytes_per_second / 1048576.0
+            )
+        }
+    }
 }
 
 pub struct Progress {
@@ -248,7 +272,7 @@ impl Progress {
                 progress.stage,
                 human_bytes(completed),
                 total
-                    .map(|n| format!(" of {}", human_bytes(n)))
+                    .map(|total| format!(" of {}", human_bytes(total)))
                     .unwrap_or_default()
             ),
         );
@@ -268,7 +292,7 @@ impl Progress {
         let now = Instant::now();
         if now.duration_since(self.sampled_at) >= INTERVAL {
             let update = self.update(now, false);
-            if now.duration_since(self.logged_at) >= Duration::from_secs(30) {
+            if now.duration_since(self.logged_at) >= LOG_INTERVAL {
                 crate::logging::emit(
                     self.level(),
                     "transfer",
@@ -303,7 +327,7 @@ impl Progress {
     }
 
     fn level(&self) -> crate::logging::Level {
-        if self.total.unwrap_or(self.completed) >= 64 * 1024 * 1024 {
+        if self.total.unwrap_or(self.completed) >= LARGE_TRANSFER {
             crate::logging::Level::Info
         } else {
             crate::logging::Level::Debug
@@ -348,35 +372,16 @@ impl Drop for Progress {
     }
 }
 
-impl Update {
-    pub fn summary(&self) -> String {
-        let size = human_bytes(self.completed);
-        if self.finished {
-            let speed = self.bytes_per_second / 1048576.0;
-            format!(
-                "{}: complete, {size}, {:.1} s, {speed:.1} MiB/s",
-                self.stage, self.elapsed_seconds
-            )
-        } else {
-            format!(
-                "{}: {size}{}, {:.1} MiB/s",
-                self.stage,
-                self.total
-                    .map(|n| format!(" of {}", human_bytes(n)))
-                    .unwrap_or_default(),
-                self.bytes_per_second / 1048576.0
-            )
-        }
-    }
-}
-
 pub fn human_bytes(bytes: u64) -> String {
-    if bytes >= 1073741824 {
-        format!("{:.2} GiB", bytes as f64 / 1073741824.0)
-    } else if bytes >= 1048576 {
-        format!("{:.1} MiB", bytes as f64 / 1048576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+    const KIB: u64 = 1 << 10;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
     } else {
         format!("{bytes} B")
     }
