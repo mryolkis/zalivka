@@ -18,6 +18,9 @@ use windows_sys::Win32::{
     },
 };
 
+const MAX_TOKEN: usize = 64 * 1024;
+const MAX_ACCOUNT: usize = 1024;
+
 pub(crate) struct Negotiate {
     credential: SecHandle,
     context: Option<SecHandle>,
@@ -50,18 +53,7 @@ impl Negotiate {
             "SSPI {scheme}: AcquireCredentialsHandleW failed (0x{:08X}); current Windows user credentials are unavailable",
             status as u32
         );
-        let mut name = [0u16; 1024];
-        let mut size = name.len() as u32;
-        let account = if unsafe { GetUserNameExW(NameSamCompatible, name.as_mut_ptr(), &mut size) }
-        {
-            let end = name
-                .iter()
-                .position(|unit| *unit == 0)
-                .unwrap_or(name.len());
-            String::from_utf16_lossy(&name[..end])
-        } else {
-            "current Windows account".into()
-        };
+        let account = account_name();
         crate::log!(
             Info,
             "proxy:auth",
@@ -81,7 +73,7 @@ impl Negotiate {
             .context("invalid proxy authentication token encoding")?
             .unwrap_or_default();
         ensure!(
-            bytes.len() <= 65536,
+            bytes.len() <= MAX_TOKEN,
             "proxy authentication token exceeds 64 KiB"
         );
         let mut input = SecBuffer {
@@ -176,7 +168,22 @@ impl Negotiate {
     }
 }
 
+/// The SAM-compatible account for diagnostics, if available.
+fn account_name() -> String {
+    let mut name = [0u16; MAX_ACCOUNT];
+    let mut size = name.len() as u32;
+    if unsafe { GetUserNameExW(NameSamCompatible, name.as_mut_ptr(), &mut size) } {
+        return "current Windows account".into();
+    }
+    let end = name
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(name.len());
+    String::from_utf16_lossy(&name[..end])
+}
+
 struct Output(SecBuffer);
+
 impl Drop for Output {
     fn drop(&mut self) {
         if !self.0.pvBuffer.is_null() {
@@ -186,6 +193,7 @@ impl Drop for Output {
         }
     }
 }
+
 impl Drop for Negotiate {
     fn drop(&mut self) {
         unsafe {

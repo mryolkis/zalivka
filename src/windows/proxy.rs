@@ -9,11 +9,13 @@ use windows_sys::Win32::{
     Networking::WinHttp::*,
 };
 
+const TIMEOUT_MS: i32 = 30_000;
+
+/// Strings in a WinHTTP result are allocated by WinHTTP but owned by the caller.
 struct UserConfig(WINHTTP_CURRENT_USER_IE_PROXY_CONFIG);
 
 impl Drop for UserConfig {
     fn drop(&mut self) {
-        // These strings are allocated by WinHTTP even though we own the struct.
         unsafe {
             GlobalFree(self.0.lpszAutoConfigUrl.cast());
             GlobalFree(self.0.lpszProxy.cast());
@@ -61,17 +63,17 @@ thread_local! {
     static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
 }
 
+/// Copy a NUL-terminated UTF-16 string owned by a live WinHTTP result.
 fn string(pointer: *const u16) -> String {
     if pointer.is_null() {
         return String::new();
     }
-    // All callers pass NUL-terminated strings owned by a live WinHTTP result.
     unsafe {
-        let mut len = 0;
-        while *pointer.add(len) != 0 {
-            len += 1;
+        let mut length = 0;
+        while *pointer.add(length) != 0 {
+            length += 1;
         }
-        String::from_utf16_lossy(std::slice::from_raw_parts(pointer, len))
+        String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length))
     }
 }
 
@@ -93,7 +95,9 @@ impl Session {
         );
         let session = Self(handle);
         ensure!(
-            unsafe { WinHttpSetTimeouts(session.0, 30_000, 30_000, 30_000, 30_000) } != 0,
+            unsafe {
+                WinHttpSetTimeouts(session.0, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS)
+            } != 0,
             "setting Windows proxy resolver timeouts: {}",
             std::io::Error::last_os_error()
         );
@@ -104,15 +108,15 @@ impl Session {
         let pac_url = wide(pac);
         let url = wide(uri.to_string());
         let mut options = WINHTTP_AUTOPROXY_OPTIONS {
-            dwFlags: if detect {
+            dwFlags: (if detect {
                 WINHTTP_AUTOPROXY_AUTO_DETECT
             } else {
                 0
-            } | if pac.is_empty() {
+            }) | (if pac.is_empty() {
                 0
             } else {
                 WINHTTP_AUTOPROXY_CONFIG_URL
-            },
+            }),
             dwAutoDetectFlags: if detect {
                 WINHTTP_AUTO_DETECT_TYPE_DHCP | WINHTTP_AUTO_DETECT_TYPE_DNS_A
             } else {
@@ -149,11 +153,13 @@ impl Session {
 fn auto_proxy(uri: &Uri, detect: bool, pac: &str) -> Result<Option<Proxy>> {
     SESSION.with(|cell| {
         let mut cached = cell.borrow_mut();
-        let session = match &mut *cached {
-            Some(session) => session,
-            slot @ None => slot.insert(Session::open()?),
-        };
-        session.proxy(uri, detect, pac)
+        if cached.is_none() {
+            *cached = Some(Session::open()?);
+        }
+        cached
+            .as_ref()
+            .expect("proxy session initialized")
+            .proxy(uri, detect, pac)
     })
 }
 
@@ -185,7 +191,7 @@ pub(crate) fn for_url(uri: &Uri) -> Result<Option<Option<Proxy>>> {
                     if pac.is_empty()
                         && error
                             .downcast_ref::<std::io::Error>()
-                            .and_then(|e| e.raw_os_error())
+                            .and_then(|error| error.raw_os_error())
                             == Some(ERROR_WINHTTP_AUTODETECTION_FAILED as i32) => {}
                 Err(error) => return Err(error),
             }
