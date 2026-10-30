@@ -7,7 +7,12 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use plist::{Dictionary, Value};
-use std::io::Write;
+use std::{collections::HashSet, io::Write};
+
+const BOOTABILITY_BUNDLES: [&str; 2] = ["BootabilityBundle/", "BootabilityBundleV2/"];
+const BOOTABILITY_RESTORE: &str = "Restore/Bootability/";
+const BOOTABILITY_TRUSTCACHE: &str = "Restore/Firmware/Bootability.dmg.trustcache";
+const TRAILER: &str = "TRAILER!!!";
 
 pub(super) fn serve_asr(ipsw: &mut Ipsw, id: &Identity, stream: &mut MuxStream) -> Result<()> {
     let mut image = ipsw.image(id.path("OS")?)?;
@@ -15,29 +20,17 @@ pub(super) fn serve_asr(ipsw: &mut Ipsw, id: &Identity, stream: &mut MuxStream) 
     asr::transfer(stream, &mut image, length)
 }
 
+/// Stream selected Bootability files as one odc CPIO archive.
 pub(super) fn bootability(ipsw: &mut Ipsw, out: &mut impl Write) -> Result<()> {
     let _trace = crate::logging::firmware_transfer();
     let mut entries = Vec::new();
-    let mut names = std::collections::HashSet::new();
+    let mut names = HashSet::new();
     for path in ipsw.files()? {
-        let Some(relative) = path
-            .strip_prefix("BootabilityBundle/")
-            .or_else(|| path.strip_prefix("BootabilityBundleV2/"))
-        else {
+        let Some(name) = bootability_name(&path) else {
             continue;
         };
-        let name = if let Some(name) = relative.strip_prefix("Restore/Bootability/") {
-            name
-        } else if relative == "Restore/Firmware/Bootability.dmg.trustcache" {
-            "Bootability.trustcache"
-        } else {
-            continue;
-        };
-        if name.is_empty() {
-            continue;
-        }
         ensure!(
-            name.trim_end_matches('/') != "TRAILER!!!"
+            name.trim_end_matches('/') != TRAILER
                 && names.insert(name.trim_end_matches('/').to_owned()),
             "duplicate or reserved Bootability entry {name}"
         );
@@ -55,7 +48,22 @@ pub(super) fn bootability(ipsw: &mut Ipsw, out: &mut impl Write) -> Result<()> {
             "truncated Bootability entry"
         );
     }
-    cpio_header(out, "TRAILER!!!", 0, 0)
+    cpio_header(out, TRAILER, 0, 0)
+}
+
+/// The CPIO name for a BootabilityBundle entry, without the bundle prefix.
+fn bootability_name(path: &str) -> Option<&str> {
+    let relative = BOOTABILITY_BUNDLES
+        .iter()
+        .find_map(|prefix| path.strip_prefix(prefix))?;
+    let name = match relative {
+        _ if relative.starts_with(BOOTABILITY_RESTORE) => {
+            relative.strip_prefix(BOOTABILITY_RESTORE)?
+        }
+        BOOTABILITY_TRUSTCACHE => "Bootability.trustcache",
+        _ => return None,
+    };
+    (!name.is_empty()).then_some(name)
 }
 
 pub fn cpio_header(out: &mut impl Write, name: &str, mode: u32, size: u64) -> Result<()> {
@@ -84,39 +92,44 @@ pub(super) fn boot_object_path(id: &Identity, name: &str, message: &Value) -> Re
     let path = match name {
         "__RestoreVersion__" => "RestoreVersion.plist".into(),
         "__SystemVersion__" => "SystemVersion.plist".into(),
-        "__GlobalManifest__" => {
-            let variant = match wire::optional(message, &["Arguments", "Variant"])? {
-                Some(value) => value
-                    .as_string()
-                    .filter(|value| !value.is_empty())
-                    .context("invalid Arguments.Variant")?,
-                None => wire::string(&id.value, &["Info", "MacOSVariant"])?,
-            };
-            let class = wire::string(&id.value, &["Info", "DeviceClass"])?;
-            // These optional fields select an AP ticket without a suffix when
-            // omitted. A present value with the wrong type is still an error.
-            let prefix = wire::optional(message, &["Arguments", "GlobalManifestPrefix"])?
-                .map(|value| {
-                    value
-                        .as_string()
-                        .context("invalid Arguments.GlobalManifestPrefix")
-                })
-                .transpose()?
-                .unwrap_or("apticket");
-            let suffix = wire::optional(message, &["Arguments", "GlobalManifestSuffix"])?
-                .map(|value| {
-                    value
-                        .as_string()
-                        .context("invalid Arguments.GlobalManifestSuffix")
-                })
-                .transpose()?
-                .unwrap_or("");
-            format!("Firmware/Manifests/restore/{variant}/{prefix}.{class}{suffix}.im4m")
-        }
+        "__GlobalManifest__" => global_manifest_path(id, message)?,
         component => id.path(component)?.into(),
     };
     crate::ipsw::validate_path(&path)?;
     Ok(path)
+}
+
+/// Locate the AP ticket selected by the requested variant and optional affixes.
+fn global_manifest_path(id: &Identity, message: &Value) -> Result<String> {
+    let variant = match wire::optional(message, &["Arguments", "Variant"])? {
+        Some(value) => value
+            .as_string()
+            .filter(|value| !value.is_empty())
+            .context("invalid Arguments.Variant")?,
+        None => wire::string(&id.value, &["Info", "MacOSVariant"])?,
+    };
+    let class = wire::string(&id.value, &["Info", "DeviceClass"])?;
+    // These optional fields select an AP ticket without a suffix when
+    // omitted. A present value with the wrong type is still an error.
+    let prefix = wire::optional(message, &["Arguments", "GlobalManifestPrefix"])?
+        .map(|value| {
+            value
+                .as_string()
+                .context("invalid Arguments.GlobalManifestPrefix")
+        })
+        .transpose()?
+        .unwrap_or("apticket");
+    let suffix = wire::optional(message, &["Arguments", "GlobalManifestSuffix"])?
+        .map(|value| {
+            value
+                .as_string()
+                .context("invalid Arguments.GlobalManifestSuffix")
+        })
+        .transpose()?
+        .unwrap_or("");
+    Ok(format!(
+        "Firmware/Manifests/restore/{variant}/{prefix}.{class}{suffix}.im4m"
+    ))
 }
 
 pub(super) fn image_data(
@@ -188,6 +201,8 @@ pub(super) fn personalized_images<'a>(
         .collect()
 }
 
+/// NOR images: every primary/secondary boot firmware image except LLB and the
+/// restore SEP, with the primary iBoot image first.
 pub(super) fn nor_data(
     ipsw: &mut Ipsw,
     id: &Identity,
@@ -206,7 +221,7 @@ pub(super) fn nor_data(
             names.push(name.as_str());
         }
     }
-    names.sort_by_key(|n| Some(*n) != iboot);
+    names.sort_by_key(|name| Some(*name) != iboot);
     let flash_v1 = wire::optional(message, &["Arguments", "FlashVersion1"])?.is_some();
     let images = if flash_v1 {
         Value::Dictionary(personalized_images(ipsw, id, ticket, names.into_iter())?)
@@ -218,19 +233,19 @@ pub(super) fn nor_data(
                 .collect::<Result<_>>()?,
         )
     };
-    let mut d = Dictionary::new();
-    d.insert(
+    let mut fields = Dictionary::new();
+    fields.insert(
         "LlbImageData".into(),
         Value::Data(ipsw.personalized(id, llb, ticket)?),
     );
-    d.insert("NorImageData".into(), images);
+    fields.insert("NorImageData".into(), images);
     for (tag, key) in [(b"rsep", "RestoreSEPImageData"), (b"sepi", "SEPImageData")] {
         if let Some(name) = id.component_by_type(tag)? {
-            d.insert(
+            fields.insert(
                 key.into(),
                 Value::Data(ipsw.personalized(id, name, ticket)?),
             );
         }
     }
-    Ok(Value::Dictionary(d))
+    Ok(Value::Dictionary(fields))
 }

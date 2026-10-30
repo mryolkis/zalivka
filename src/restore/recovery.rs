@@ -10,7 +10,6 @@ impl RestoreContext {
         ipsw: &mut Ipsw,
         component: Option<&str>,
     ) -> Result<Value> {
-        let no_asset = || wire::dict([("RecoveryOSNoAssetFound", true.into())]);
         let Some(recovery) = self.recovery.as_ref() else {
             return Ok(no_asset());
         };
@@ -22,14 +21,7 @@ impl RestoreContext {
             }
             Value::Data(ipsw.personalized(id, name, ticket)?)
         } else {
-            let mut names = Vec::new();
-            for (name, entry) in id.manifest()? {
-                let loaded = wire::flag(entry, &["Info", "IsLoadedByiBoot"])?;
-                let stage1 = wire::flag(entry, &["Info", "IsLoadedByiBootStage1"])?;
-                if loaded || stage1 {
-                    names.push(name.as_str());
-                }
-            }
+            let names = boot_image_names(id)?;
             if names.is_empty() {
                 return Ok(no_asset());
             }
@@ -37,6 +29,7 @@ impl RestoreContext {
         };
         Ok(wire::dict([("AdditionalBootImages", images)]))
     }
+
     pub(super) fn recovery_version(&self) -> Result<Value> {
         let id = &self
             .recovery
@@ -72,4 +65,21 @@ impl RestoreContext {
         let bytes = img4::personalize(&img4::empty_local_policy(), tss::ticket(&local)?)?;
         Ok(wire::dict([("Ap,LocalPolicy", Value::Data(bytes))]))
     }
+}
+
+fn no_asset() -> Value {
+    wire::dict([("RecoveryOSNoAssetFound", true.into())])
+}
+
+/// Early-boot components of the recovery identity, in manifest order.
+fn boot_image_names(id: &crate::ipsw::Identity) -> Result<Vec<&str>> {
+    let mut names = Vec::new();
+    for (name, entry) in id.manifest()? {
+        let loaded = wire::flag(entry, &["Info", "IsLoadedByiBoot"])?;
+        let stage1 = wire::flag(entry, &["Info", "IsLoadedByiBootStage1"])?;
+        if loaded || stage1 {
+            names.push(name.as_str());
+        }
+    }
+    Ok(names)
 }
