@@ -91,7 +91,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | done (usb.rs/backend/descriptors/KIS + dfu) |
 | 8 | `mux` (flatten packet/channel/stream) | done (packet/channel/stream/session) |
 | 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | pending |
-| 10 | `restored` services (data/images/keys/FDR/ASR) | pending |
+| 10 | `restored` services (data/images/keys/FDR/ASR) | FDR + ASR done; restored data services pending |
 | 11 | `net` (+ catalog; break proxy cycle) | catalog done; net pending |
 | 12 | `proxy` (one route model; unify framing) | pending |
 | 13 | `host` (drivers/Windows/Linux) | pending |
@@ -125,6 +125,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `96ba27d` | `mux/packet` + `mux/channel` rewrites | 552 tests, clippy clean |
 | `c45df02` | `mux/stream` rewrite | 552 tests, clippy clean |
 | `8452045` | `mux.rs` session rewrite (mux domain complete) | 552 tests, clippy clean |
+| `070df36` | `fdr` + `fdr/protocol` + `asr` rewrites | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
