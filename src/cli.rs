@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use zalivka::{
     device::parse_ecid,
     drivers,
@@ -139,7 +139,7 @@ fn parse_pid(value: &str) -> std::result::Result<u16, String> {
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("PID must contain hexadecimal digits".into());
     }
-    let pid = u16::from_str_radix(digits, 16).map_err(|e| e.to_string())?;
+    let pid = u16::from_str_radix(digits, 16).map_err(|error| error.to_string())?;
     if pid == 0 {
         return Err("USB PID cannot be zero".into());
     }
@@ -167,177 +167,205 @@ pub(super) fn run() -> Result<()> {
             );
         }
     }
-    let cli = Cli::parse();
-    match cli.command {
+    match Cli::parse().command {
         #[cfg(feature = "gui")]
-        Command::Gui => crate::gui::run()?,
-        Command::Doctor => {
-            let diagnostics = operations::doctor()?;
-            print_json(&diagnostics)?;
-            ensure!(
-                diagnostics.iter().all(|d| d.accessible),
-                "USB diagnostics found inaccessible devices; see the errors above"
-            );
-        }
-        Command::Drivers { command } => match command {
-            DriverCommand::Status => {
-                print_json(&drivers::host_status()?)?;
-            }
-            DriverCommand::Prepare => {
-                drivers::prepare_windows()?;
-            }
-            DriverCommand::Reset => {
-                drivers::reset_windows()?;
-            }
-            DriverCommand::Export {
-                directory,
-                pid,
-                interface,
-            } => {
-                drivers::export(&directory, pid, interface)?;
-                println!(
-                    "Driver sources saved to {}. Windows INF requires a signed CAT before installation.",
-                    directory.display()
-                );
-            }
-            DriverCommand::Install { inf } => {
-                println!(
-                    "Driver package installed. Reboot required: {}",
-                    drivers::install(&inf)?
-                );
-            }
-            DriverCommand::InstallUdev => {
-                drivers::install_udev()?;
-                println!("udev rules installed. Reconnect the USB cable.");
-            }
-        },
+        Command::Gui => crate::gui::run(),
+        Command::Doctor => doctor(),
+        Command::Drivers { command } => driver_command(command),
         Command::BootState {
             ipsw,
             ecid,
             load_ibss,
-        } => {
-            print_json(&restore::probe_boot_state(&ipsw, ecid, load_ibss)?)?;
-        }
-        Command::Verify { ipsw, checksum } => {
-            print_json(&operations::verify(&ipsw, checksum.as_deref())?)?;
-        }
-        Command::Detect { json } => {
-            let devices = usb::detect()?;
-            if json {
-                print_json(&devices)?;
-            } else if devices.is_empty() {
-                println!("No Apple DFU/recovery devices found.");
-            } else {
-                for d in devices {
-                    println!(
-                        "ECID {:016x}  CPID {:04x}  BDID {:02x}  {:?}",
-                        d.ecid, d.chip_id, d.board_id, d.mode
-                    );
-                }
-            }
-        }
-        Command::Inspect {
-            ipsw,
-            json: as_json,
-        } => {
-            let ipsw = Ipsw::open(&ipsw)?;
-            let identities = ipsw.identity_summaries().collect::<Result<Vec<_>>>()?;
-            let version = wire::get(&ipsw.manifest, &["ProductVersion"])
-                .cloned()
-                .unwrap_or("?".into());
-            let build = wire::get(&ipsw.manifest, &["ProductBuildVersion"])
-                .cloned()
-                .unwrap_or("?".into());
-            if as_json {
-                print_json(&json!({"version": version, "build": build, "identities": identities}))?;
-            } else {
-                println!(
-                    "Version: {}  Build: {}",
-                    version.as_string().unwrap_or("?"),
-                    build.as_string().unwrap_or("?")
-                );
-                for i in identities {
-                    println!(
-                        "[{}] {}  CPID {:04x}  BDID {:02x}  {}  {} ({} components)",
-                        i.index,
-                        i.device_class,
-                        i.chip_id,
-                        i.board_id,
-                        i.restore_behavior,
-                        i.variant,
-                        i.components
-                    );
-                }
-            }
-        }
+        } => boot_state(&ipsw, ecid, load_ibss),
+        Command::Verify { ipsw, checksum } => verify(&ipsw, checksum.as_deref()),
+        Command::Detect { json } => detect(json),
+        Command::Inspect { ipsw, json } => inspect(&ipsw, json),
         Command::Plan {
             ipsw,
             ecid,
             identity,
             revive,
-        } => {
-            let behavior = if revive {
-                Behavior::Update
-            } else {
-                Behavior::Erase
-            };
-            let mut ipsw = Ipsw::open(&ipsw)?;
-            let mut identity = if let Some(index) = identity {
-                ipsw.identity(index)?
-            } else {
-                let device = usb::detect()?
-                    .into_iter()
-                    .find(|d| Some(d.ecid) == ecid)
-                    .context("DFU device with this ECID not found")?;
-                ipsw.select_behavior(&device, None, behavior)?
-            };
-            let summary = identity.summary()?;
-            identity.validate_behavior(behavior)?;
-            let stages = restore::preflight(&mut ipsw, &mut identity)?;
-            print_json(&json!({
-                    "ecid": ecid.map(|n| format!("{n:016x}")), "hardware_checked": ecid.is_some(),
-                    "identity": summary, "filesystem_bytes": ipsw.size(identity.path("OS")?)?,
-                    "boot_components_verified": true, "hardware_restore_validated": false,
-                    "validation_scope": "this plan checks boot components; it does not perform a hardware restore",
-                    "limitations": ["firmware updaters require explicit device requests or an unambiguous namespace with a verified plist payload bundle", "reconnection requires restored to continue and issue fresh data requests; no byte-offset replay"],
-                    "iboot_firmware_stages": stages,
-                    "runtime_operations_known": false
-            }))?;
-        }
+        } => plan(&ipsw, ecid, identity, revive),
         Command::TssRequest {
             ipsw,
             ecid,
             identity,
             output,
-        } => {
-            let usb = usb::RecoveryUsb::open(ecid)?;
-            let ipsw = Ipsw::open(&ipsw)?;
-            let identity = ipsw.select_behavior(&usb.info, identity, Behavior::Erase)?;
-            let request = tss::request(&usb.info, &identity)?;
-            let mut file = std::fs::File::options()
-                .create_new(true)
-                .write(true)
-                .open(&output)?;
-            request.to_writer_xml(&mut file)?;
-            println!("TSS request saved to {}", output.display());
-        }
+        } => tss_request(&ipsw, ecid, identity, &output),
         Command::Download {
             url,
             output,
             sha256,
-        } => {
-            net::download(&url, &output, &sha256)?;
-            println!("Verified firmware saved to {}", output.display());
-        }
+        } => download(&url, &output, &sha256),
         Command::Fetch { ecid, firmware_dir } => {
             operations::fetch(ecid, firmware_dir.as_deref(), None)?;
+            Ok(())
         }
         Command::Restore { args, erase } => {
             ensure!(erase, "--erase is required");
-            args.run(Behavior::Erase)?;
+            args.run(Behavior::Erase)
         }
-        Command::Revive(args) => args.run(Behavior::Update)?,
+        Command::Revive(args) => args.run(Behavior::Update),
     }
+}
+
+fn doctor() -> Result<()> {
+    let diagnostics = operations::doctor()?;
+    print_json(&diagnostics)?;
+    ensure!(
+        diagnostics.iter().all(|diagnostic| diagnostic.accessible),
+        "USB diagnostics found inaccessible devices; see the errors above"
+    );
+    Ok(())
+}
+
+fn driver_command(command: DriverCommand) -> Result<()> {
+    match command {
+        DriverCommand::Status => print_json(&drivers::host_status()?),
+        DriverCommand::Prepare => {
+            drivers::prepare_windows()?;
+            Ok(())
+        }
+        DriverCommand::Reset => {
+            drivers::reset_windows()?;
+            Ok(())
+        }
+        DriverCommand::Export {
+            directory,
+            pid,
+            interface,
+        } => {
+            drivers::export(&directory, pid, interface)?;
+            println!(
+                "Driver sources saved to {}. Windows INF requires a signed CAT before installation.",
+                directory.display()
+            );
+            Ok(())
+        }
+        DriverCommand::Install { inf } => {
+            println!(
+                "Driver package installed. Reboot required: {}",
+                drivers::install(&inf)?
+            );
+            Ok(())
+        }
+        DriverCommand::InstallUdev => {
+            drivers::install_udev()?;
+            println!("udev rules installed. Reconnect the USB cable.");
+            Ok(())
+        }
+    }
+}
+
+fn boot_state(ipsw: &Path, ecid: u64, load_ibss: bool) -> Result<()> {
+    print_json(&restore::probe_boot_state(ipsw, ecid, load_ibss)?)
+}
+
+fn verify(ipsw: &Path, checksum: Option<&str>) -> Result<()> {
+    print_json(&operations::verify(ipsw, checksum)?)
+}
+
+fn detect(json: bool) -> Result<()> {
+    let devices = usb::detect()?;
+    if json {
+        return print_json(&devices);
+    }
+    if devices.is_empty() {
+        println!("No Apple DFU/recovery devices found.");
+        return Ok(());
+    }
+    for device in devices {
+        println!(
+            "ECID {:016x}  CPID {:04x}  BDID {:02x}  {:?}",
+            device.ecid, device.chip_id, device.board_id, device.mode
+        );
+    }
+    Ok(())
+}
+
+fn inspect(path: &Path, as_json: bool) -> Result<()> {
+    let ipsw = Ipsw::open(path)?;
+    let identities = ipsw.identity_summaries().collect::<Result<Vec<_>>>()?;
+    let version = wire::get(&ipsw.manifest, &["ProductVersion"])
+        .cloned()
+        .unwrap_or("?".into());
+    let build = wire::get(&ipsw.manifest, &["ProductBuildVersion"])
+        .cloned()
+        .unwrap_or("?".into());
+    if as_json {
+        return print_json(&json!({
+            "version": version,
+            "build": build,
+            "identities": identities
+        }));
+    }
+    println!(
+        "Version: {}  Build: {}",
+        version.as_string().unwrap_or("?"),
+        build.as_string().unwrap_or("?")
+    );
+    for identity in identities {
+        println!(
+            "[{}] {}  CPID {:04x}  BDID {:02x}  {}  {} ({} components)",
+            identity.index,
+            identity.device_class,
+            identity.chip_id,
+            identity.board_id,
+            identity.restore_behavior,
+            identity.variant,
+            identity.components
+        );
+    }
+    Ok(())
+}
+
+fn plan(path: &Path, ecid: Option<u64>, identity_index: Option<usize>, revive: bool) -> Result<()> {
+    let behavior = if revive {
+        Behavior::Update
+    } else {
+        Behavior::Erase
+    };
+    let mut ipsw = Ipsw::open(path)?;
+    let mut identity = if let Some(index) = identity_index {
+        ipsw.identity(index)?
+    } else {
+        let device = usb::detect()?
+            .into_iter()
+            .find(|device| Some(device.ecid) == ecid)
+            .context("DFU device with this ECID not found")?;
+        ipsw.select_behavior(&device, None, behavior)?
+    };
+    let summary = identity.summary()?;
+    identity.validate_behavior(behavior)?;
+    let stages = restore::preflight(&mut ipsw, &mut identity)?;
+    print_json(&json!({
+        "ecid": ecid.map(|n| format!("{n:016x}")), "hardware_checked": ecid.is_some(),
+        "identity": summary, "filesystem_bytes": ipsw.size(identity.path("OS")?)?,
+        "boot_components_verified": true, "hardware_restore_validated": false,
+        "validation_scope": "this plan checks boot components; it does not perform a hardware restore",
+        "limitations": ["firmware updaters require explicit device requests or an unambiguous namespace with a verified plist payload bundle", "reconnection requires restored to continue and issue fresh data requests; no byte-offset replay"],
+        "iboot_firmware_stages": stages,
+        "runtime_operations_known": false
+    }))
+}
+
+fn tss_request(path: &Path, ecid: u64, identity_index: Option<usize>, output: &Path) -> Result<()> {
+    let connection = usb::RecoveryUsb::open(ecid)?;
+    let ipsw = Ipsw::open(path)?;
+    let identity = ipsw.select_behavior(&connection.info, identity_index, Behavior::Erase)?;
+    let request = tss::request(&connection.info, &identity)?;
+    let mut file = std::fs::File::options()
+        .create_new(true)
+        .write(true)
+        .open(output)?;
+    request.to_writer_xml(&mut file)?;
+    println!("TSS request saved to {}", output.display());
+    Ok(())
+}
+
+fn download(url: &str, output: &Path, sha256: &str) -> Result<()> {
+    net::download(url, output, sha256)?;
+    println!("Verified firmware saved to {}", output.display());
     Ok(())
 }
 

@@ -39,22 +39,7 @@ impl Restore {
             self.authorization_tokens.as_deref(),
             self.apple_connect_data.as_deref(),
         )?;
-        let ipsw = if let Some(path) = self.ipsw {
-            Ipsw::open(&path)?
-        } else {
-            let device = usb::RecoveryUsb::open(self.ecid)?.info;
-            ensure!(device.mode.can_restore(), "enter DFU before restoring");
-            let directory = self
-                .firmware_dir
-                .map_or_else(catalog::cache_directory, Ok)?;
-            catalog::obtain(
-                &device,
-                &directory,
-                self.identity,
-                behavior,
-                self.release.as_ref(),
-            )?
-        };
+        let ipsw = self.open_firmware(behavior)?;
         restore::run(
             ipsw,
             self.ecid,
@@ -66,6 +51,26 @@ impl Restore {
         crate::log!(Info, "restore", "Restore complete");
         progress::Event::RestoreCompleted.emit();
         Ok(())
+    }
+
+    /// Use the local IPSW, or select and download the compatible firmware.
+    fn open_firmware(&self, behavior: Behavior) -> Result<Ipsw> {
+        if let Some(path) = &self.ipsw {
+            return Ipsw::open(path);
+        }
+        let device = usb::RecoveryUsb::open(self.ecid)?.info;
+        ensure!(device.mode.can_restore(), "enter DFU before restoring");
+        let directory = match &self.firmware_dir {
+            Some(directory) => directory.clone(),
+            None => catalog::cache_directory()?,
+        };
+        catalog::obtain(
+            &device,
+            &directory,
+            self.identity,
+            behavior,
+            self.release.as_ref(),
+        )
     }
 }
 
@@ -100,9 +105,10 @@ pub fn fetch(
     release: Option<&catalog::Release>,
 ) -> Result<PathBuf> {
     let device = usb::RecoveryUsb::open(ecid)?.info;
-    let directory = directory
-        .map(Path::to_path_buf)
-        .map_or_else(catalog::cache_directory, Ok)?;
+    let directory = match directory {
+        Some(directory) => directory.to_path_buf(),
+        None => catalog::cache_directory()?,
+    };
     let ipsw = catalog::obtain(&device, &directory, None, Behavior::Erase, release)?;
     let path = ipsw.path().to_path_buf();
     crate::log!(Info, "firmware", "Saved: {}", path.display());
@@ -111,18 +117,7 @@ pub fn fetch(
 
 pub fn doctor() -> Result<Vec<drivers::UsbDiagnostic>> {
     if let Some(host) = drivers::host_status()? {
-        crate::log!(Debug, "drivers:status", "{}", serde_json::to_string(&host)?);
-        crate::log!(
-            Info,
-            "drivers",
-            "Apple USB driver: {}; Apple KIS/RSM drivers: {}; Apple service running: {}",
-            host.apple_driver_installed,
-            host.apple_kis_driver_installed,
-            host.apple_service_running
-        );
-        if let Some(reason) = host.blocking_reason() {
-            crate::log!(Warning, "drivers", "{reason}");
-        }
+        log_host_status(&host)?;
     }
     let devices = drivers::doctor()?;
     if devices.is_empty() {
@@ -142,4 +137,20 @@ pub fn doctor() -> Result<Vec<drivers::UsbDiagnostic>> {
         }
     }
     Ok(devices)
+}
+
+fn log_host_status(host: &drivers::HostStatus) -> Result<()> {
+    crate::log!(Debug, "drivers:status", "{}", serde_json::to_string(host)?);
+    crate::log!(
+        Info,
+        "drivers",
+        "Apple USB driver: {}; Apple KIS/RSM drivers: {}; Apple service running: {}",
+        host.apple_driver_installed,
+        host.apple_kis_driver_installed,
+        host.apple_service_running
+    );
+    if let Some(reason) = host.blocking_reason() {
+        crate::log!(Warning, "drivers", "{reason}");
+    }
+    Ok(())
 }
