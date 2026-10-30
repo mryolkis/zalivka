@@ -6,54 +6,77 @@ use crate::{
 use anyhow::{Context, Result};
 use plist::{Dictionary, Value};
 
+/// Protocol vocabulary required by the restored service. `false` marks a
+/// required entry; it is not an on/off switch.
+const REQUIRED_DATA_TYPES: &[&str] = &[
+    "DataType",
+    "SystemImageData",
+    "SystemImageRootHash",
+    "SystemImageCanonicalMetadata",
+    "ProvisioningData",
+    "FDRTrustData",
+    "FDRMemoryCommit",
+    "NORData",
+    "FUDData",
+    "EANData",
+    "RootData",
+    "OverlayRootDataCount",
+    "KernelCache",
+    "RootTicket",
+    "BuildIdentityDict",
+    "BuildIdentityDictV2",
+    "BasebandBootData",
+    "BasebandStackData",
+    "BasebandData",
+    "DiagData",
+    "BasebandUpdaterOutputData",
+    "GrapeFWData",
+    "HPMFWData",
+    "SsoServiceTicket",
+    "S3EOverride",
+    "USBCOverride",
+    "USBCFWData",
+    "OpalFWData",
+    "StockholmPostflight",
+    "FirmwareUpdaterData",
+    "FirmwareUpdaterDataV2",
+    "FileData",
+    "FileDataDone",
+    "RecoveryOSOverlayRootDataCount",
+    "SourceBootObjectV3",
+    "SourceBootObjectV4",
+    "RecoveryOSLocalPolicy",
+    "PersonalizedBootObjectV3",
+    "BootabilityBundle",
+    "BootabilityBundleV2",
+    "MessageUseStreamedImageFile",
+];
+
+/// Message names and whether each is optional.
+const MESSAGE_TYPES: &[(&str, bool)] = &[
+    ("MsgType", false),
+    ("DataRequestMsg", false),
+    ("AsyncDataRequestMsg", true),
+    ("ProgressMsg", false),
+    ("StatusMsg", false),
+    ("CheckpointMsg", true),
+    ("PreviousRestoreLogMsg", false),
+    ("BBUpdateStatusMsg", false),
+    ("ProvisioningInfo", false),
+    ("ProvisioningAck", false),
+    ("ProvisioningStatusMsg", false),
+    ("ReceivedFinalStatusMsg", false),
+    ("AsyncWait", true),
+    ("RestoreProtocol", true),
+    ("RestoreAttestation", true),
+    ("RestoredCrash", true),
+];
+
 pub fn supported_data_types() -> Value {
     let mut types = DataType::async_types();
-    // This is the protocol vocabulary, including field names and legacy types.
-    // false marks a required entry; it does not disable the entry.
-    for name in [
-        "DataType",
-        "SystemImageData",
-        "SystemImageRootHash",
-        "SystemImageCanonicalMetadata",
-        "ProvisioningData",
-        "FDRTrustData",
-        "FDRMemoryCommit",
-        "NORData",
-        "FUDData",
-        "EANData",
-        "RootData",
-        "OverlayRootDataCount",
-        "KernelCache",
-        "RootTicket",
-        "BuildIdentityDict",
-        "BuildIdentityDictV2",
-        "BasebandBootData",
-        "BasebandStackData",
-        "BasebandData",
-        "DiagData",
-        "BasebandUpdaterOutputData",
-        "GrapeFWData",
-        "HPMFWData",
-        "SsoServiceTicket",
-        "S3EOverride",
-        "USBCOverride",
-        "USBCFWData",
-        "OpalFWData",
-        "StockholmPostflight",
-        "FirmwareUpdaterData",
-        "FirmwareUpdaterDataV2",
-        "FileData",
-        "FileDataDone",
-        "RecoveryOSOverlayRootDataCount",
-        "SourceBootObjectV3",
-        "SourceBootObjectV4",
-        "RecoveryOSLocalPolicy",
-        "PersonalizedBootObjectV3",
-        "BootabilityBundle",
-        "BootabilityBundleV2",
-        "MessageUseStreamedImageFile",
-    ] {
-        types.insert(name.into(), false.into());
+    // Legacy required message names must also be present.
+    for name in REQUIRED_DATA_TYPES {
+        types.insert((*name).into(), false.into());
     }
     // A capability marker enabling Canary's self-test, not a V3 data envelope.
     types.insert("FirmwareUpdaterDataV3".into(), true.into());
@@ -62,33 +85,15 @@ pub fn supported_data_types() -> Value {
 
 pub fn options(id: &Identity) -> Result<Value> {
     let update = id.behavior()? == Behavior::Update;
-    // The booleans mark optionality, not an on/off switch. Legacy required
-    // message names must also be present.
-    let mut d = Dictionary::from_iter([
+    // The booleans mark optionality, not an on/off switch.
+    let mut fields = Dictionary::from_iter([
         ("SupportedDataTypes", supported_data_types()),
         (
             "SupportedMessageTypes",
             wire::dict(
-                [
-                    ("MsgType", false),
-                    ("DataRequestMsg", false),
-                    ("AsyncDataRequestMsg", true),
-                    ("ProgressMsg", false),
-                    ("StatusMsg", false),
-                    ("CheckpointMsg", true),
-                    ("PreviousRestoreLogMsg", false),
-                    ("BBUpdateStatusMsg", false),
-                    ("ProvisioningInfo", false),
-                    ("ProvisioningAck", false),
-                    ("ProvisioningStatusMsg", false),
-                    ("ReceivedFinalStatusMsg", false),
-                    ("AsyncWait", true),
-                    ("RestoreProtocol", true),
-                    ("RestoreAttestation", true),
-                    ("RestoredCrash", true),
-                ]
-                .into_iter()
-                .map(|(name, optional)| (name, optional.into())),
+                MESSAGE_TYPES
+                    .iter()
+                    .map(|(name, optional)| (*name, (*optional).into())),
             ),
         ),
         (
@@ -110,53 +115,28 @@ pub fn options(id: &Identity) -> Result<Value> {
         ("SystemImageType", "User".into()),
         ("DFUFileType", "RELEASE".into()),
     ]);
-    for key in [
-        "FlashNOR",
-        "SystemImage",
-        "ShouldRestoreSystemImage",
-        "PersonalizedDuringPreflight",
-    ] {
-        d.insert(key.into(), true.into());
-    }
-    for key in [
-        "RootToInstall",
-        "InstallDiags",
-        "UpdateBaseband",
-        "SkipPreflightPersonalization",
-    ] {
-        d.insert(key.into(), false.into());
-    }
+    insert_flags(
+        &mut fields,
+        &[
+            "FlashNOR",
+            "SystemImage",
+            "ShouldRestoreSystemImage",
+            "PersonalizedDuringPreflight",
+        ],
+        true,
+    );
+    insert_flags(
+        &mut fields,
+        &[
+            "RootToInstall",
+            "InstallDiags",
+            "UpdateBaseband",
+            "SkipPreflightPersonalization",
+        ],
+        false,
+    );
     if id.is_macos()? {
-        for key in [
-            "AddSystemPartitionPadding",
-            "DisableUserAuthentication",
-            "FitSystemPartitionToContent",
-            "InstallRecoveryOS",
-            "MacOSSwapPerformed",
-            "MacOSVariantPresent",
-            "RecoveryOSUnpack",
-        ] {
-            d.insert(key.into(), true.into());
-        }
-        for key in [
-            "AllowUntetheredRestore",
-            "AuthInstallEnableSso",
-            "FormatForLwVM",
-        ] {
-            d.insert(key.into(), false.into());
-        }
-        d.insert(
-            "AuthInstallRecoveryOSVariant".into(),
-            id.info("MacOSVariant")?.clone(),
-        );
-        if let Some(value) = wire::optional(&id.value, &["Info", "recoveryOSPartitionSize"])? {
-            wire::number(value).context("invalid recoveryOSPartitionSize")?;
-            d.insert("recoveryOSPartitionSize".into(), value.clone());
-        }
-        if let Some(value) = wire::optional(&id.value, &["Info", "MinimumSystemPartition"])? {
-            wire::number(value).context("invalid MinimumSystemPartition")?;
-            d.insert("SystemPartitionSize".into(), value.clone());
-        }
+        macos_options(&mut fields, id)?;
     }
     if let Some(value) = wire::optional(&id.value, &["Info", "SystemPartitionPadding"])? {
         for (size, padding) in wire::dictionary(value).context("invalid SystemPartitionPadding")? {
@@ -165,9 +145,53 @@ pub fn options(id: &Identity) -> Result<Value> {
             wire::number(padding)
                 .with_context(|| format!("invalid SystemPartitionPadding.{size}"))?;
         }
-        d.insert("SystemPartitionPadding".into(), value.clone());
+        fields.insert("SystemPartitionPadding".into(), value.clone());
     }
-    Ok(Value::Dictionary(d))
+    Ok(Value::Dictionary(fields))
+}
+
+fn insert_flags(fields: &mut Dictionary, keys: &[&str], value: bool) {
+    for key in keys {
+        fields.insert((*key).into(), value.into());
+    }
+}
+
+fn macos_options(fields: &mut Dictionary, id: &Identity) -> Result<()> {
+    insert_flags(
+        fields,
+        &[
+            "AddSystemPartitionPadding",
+            "DisableUserAuthentication",
+            "FitSystemPartitionToContent",
+            "InstallRecoveryOS",
+            "MacOSSwapPerformed",
+            "MacOSVariantPresent",
+            "RecoveryOSUnpack",
+        ],
+        true,
+    );
+    insert_flags(
+        fields,
+        &[
+            "AllowUntetheredRestore",
+            "AuthInstallEnableSso",
+            "FormatForLwVM",
+        ],
+        false,
+    );
+    fields.insert(
+        "AuthInstallRecoveryOSVariant".into(),
+        id.info("MacOSVariant")?.clone(),
+    );
+    if let Some(value) = wire::optional(&id.value, &["Info", "recoveryOSPartitionSize"])? {
+        wire::number(value).context("invalid recoveryOSPartitionSize")?;
+        fields.insert("recoveryOSPartitionSize".into(), value.clone());
+    }
+    if let Some(value) = wire::optional(&id.value, &["Info", "MinimumSystemPartition"])? {
+        wire::number(value).context("invalid MinimumSystemPartition")?;
+        fields.insert("SystemPartitionSize".into(), value.clone());
+    }
+    Ok(())
 }
 
 pub fn boot_arguments(id: &Identity) -> Result<&'static str> {
