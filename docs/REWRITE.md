@@ -1,0 +1,137 @@
+# Zalivka rewrite plan — from scratch, KISS, DRY
+
+This document is the durable plan for the clean rewrite. `git tag pre-rewrite`
+(commit `c79e478`) is the untouched original. Every rewrite commit must leave
+`cargo fmt`, `cargo clippy -D warnings`, and the test suite green.
+
+## Objective and interpretation
+
+User objective: **rewrite all code from scratch, KISS, DRY**.
+
+- *From scratch*: every production source file is replaced with a new
+  implementation. Files are not patched incrementally; they are deleted and
+  rewritten. The final module tree is rebuilt around domains, not history.
+- *All code*: all production code and all tests are in scope. Tests are being
+  consolidated to behavior-level contracts; implementation-detail tests are
+  replaced with tests for the new internals. No feature is dropped.
+- *KISS*: fewer modules (85 → ~15), one obvious way to do each thing, no
+  test-only seams in production code, no forwarding layers that add no
+  invariant, deadline/poll and validation logic shared.
+- *DRY*: one proxy route model, one HTTP framing decoder, one device-transition
+  helper, one protocol vocabulary, one digest/poll/validation helper per concept.
+
+Behavior is frozen by the existing black-box suite under `tests/protocols/`
+(217 tests using scripted USB/TLS peers) plus the fixtures in `tests/fixtures/`.
+Those tests are the specification; they are adapted only for import paths.
+
+## Baseline (recorded before the rewrite)
+
+- Production: 85 files, 19,508 non-blank lines.
+- Tests: 66 files, 24,384 lines, 558 tests (549 run, 9 ignored).
+- `cargo fmt --check`: clean. `cargo clippy --all-targets --all-features`: clean.
+- Full suite green except one environment failure: the GUI test that calls the
+  real `Job::spawn` needs a writable `%LOCALAPPDATA%\zalivka\logs`. The sandbox
+  denies AppData, so local runs redirect it:
+  `LOCALAPPDATA=.cache/env/localappdata`, `TEMP=.cache/env/temp`.
+- Known structural findings:
+  - No copy-paste duplication (18 six-line windows total); duplication is
+    *parallel implementations*: proxy resolution ×3.5, HTTP/1.1 framing ×2,
+    poll-until-deadline ×8, device re-connect ×4, container parsing ×2.
+  - Cycles: `net ↔ proxy`, `ipsw ↔ firmware`, `drivers ↔ windows`, `usb ↔ windows`.
+  - 18 `#[path]` unit-test modules injected into production modules; the library
+    compiles `tests/support/*` into itself under `cfg(test)`.
+  - Mechanical consolidation identified: ~550–650 LOC. Structural cleanup is
+    worth more than line-count reduction.
+
+## Target architecture (~15 domain modules)
+
+| Module | Responsibility | Old sources |
+| --- | --- | --- |
+| `support` | device identity, storage, logging, progress/cancel | device, storage, logging, progress |
+| `wire` | plist framing/accessors, digest factory | wire, checksum |
+| `ipsw` | ZIP, manifest, identities, verification, image streaming | ipsw + 4 submodules |
+| `crypto` | IM4P/IMG4 DER, AEA key unwrap | img4, aea |
+| `tss` | TSS transport + request builders (Apple private PKI) | tss + request |
+| `firmware` | updater personalization, containers, canary | firmware + 3 submodules |
+| `usb` | enumeration, DFU, KIS, platform USB backends | usb + 3 submodules, windows/apple, windows/reset |
+| `mux` | USB multiplex transport + streams | mux + 3 submodules |
+| `restore` | restore orchestration, boot, Port DFU, session, attestation | restore.rs + boot/port_dfu/session/connection/options/events |
+| `restored` | device-side restored service: data requests, images, keys, FDR/ASR | restore/data*, images, recovery, file_data, keys, requests, attestation + fdr + asr |
+| `net` | HTTP agents, Apple URL policy, TLS, assets, downloads, catalog/cache | net + 4 submodules + catalog |
+| `proxy` | proxy policy, CONNECT, sockets, OS resolvers | proxy + 6 submodules, windows/proxy, windows/negotiate |
+| `host` | host readiness, drivers, Windows setup/packages, Linux udev | drivers + linux + windows/setup* |
+| `app` | CLI surface and shared operations | cli, operations |
+| `gui` | egui application + localization (feature `gui`) | gui + 10 submodules, localization |
+
+Rules:
+- Break `net ↔ proxy` by moving TLS configuration ownership into `net` and
+  having `proxy` depend on a small `proxy::Tls` trait or on `net` (one direction).
+  Break `ipsw ↔ firmware` by moving plist-bundle/container verification into `ipsw`.
+- Platform code lives behind `#[cfg]` inside `usb`, `proxy`, `host`; no caller
+  reaches through OS chains.
+- Tests live outside the library: unit-only seams (`InputReady::new`,
+  `Record::parse_json`, `routes_from_strings`, `winusb_inf`) become private or
+  are deleted when their tests are ported.
+- One error type style: `anyhow` with contextual messages; no new error enums
+  unless they carry recovery semantics.
+
+## Execution order and status
+
+Each slice = rewrite module + adapt/port its tests + delete old files + verify.
+
+| # | Slice | Status |
+| --- | --- | --- |
+| 0 | Baseline, checkpoint tag, audits, green recipe | done |
+| 1 | `support` (device/storage first; logging/progress next) | in progress |
+| 2 | `wire` (+ digest factory) | pending |
+| 3 | `ipsw` (flatten identity/verify/digest/stream) | pending |
+| 4 | `crypto` (img4 + aea) | pending |
+| 5 | `tss` (transport + requests) | pending |
+| 6 | `firmware` (flatten updater/containers/canary/request) | pending |
+| 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | pending |
+| 8 | `mux` (flatten packet/channel/stream) | pending |
+| 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | pending |
+| 10 | `restored` services (data/images/keys/FDR/ASR) | pending |
+| 11 | `net` (+ catalog; break proxy cycle) | pending |
+| 12 | `proxy` (one route model; unify framing) | pending |
+| 13 | `host` (drivers/Windows/Linux) | pending |
+| 14 | `app` (CLI + operations) | pending |
+| 15 | `gui` (+ localization) | pending |
+| 16 | Cleanup: Cargo dependencies, dead cfg, docs, final full verification | pending |
+
+## Verification recipe
+
+```powershell
+# Local sandbox: keep temporary and application data inside the workspace.
+$env:TEMP = "$PWD\.cache\env\temp"
+$env:TMP = $env:TEMP
+$env:LOCALAPPDATA = "$PWD\.cache\env\localappdata"
+cargo fmt --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-features --locked
+```
+
+`cargo test --all-features` covers 4 targets: library, GUI binary, protocol
+integration tests, throughput (ignored). Clippy is also run with
+`--no-default-features` to keep the CLI-only build working.
+
+## Test strategy during the rewrite
+
+- Keep every `tests/protocols/*` behavior test; adapt imports only.
+- Keep essential unit tests: `aea`, `catalog`, `wire`, `localization`, `cli`,
+  `storage`, `ipsw` public streaming, `firmware` container/request rules, one
+  end-to-end GUI test plus non-layout state-machine tests.
+- Replace or drop implementation-detail suites when their module is rewritten:
+  `unit/mux/stream.rs`, GUI layout/repaint assertions, `unit/windows/apple.rs`,
+  `unit/windows/fdr_lab.rs`, `unit/net/{request,assets}.rs`, throughput benches.
+- New tests live in the new module (`#[cfg(test)] mod tests`) or in
+  `tests/protocols/`; the library no longer compiles `tests/support/*`.
+- The one GUI failure disappears by injecting the journal directory into
+  `Job::spawn` instead of using `%LOCALAPPDATA%` inside the test.
+
+## Non-goals
+
+- No behavior changes to the CLI, GUI, protocols, proxy/PAC/WPAD support,
+  Windows driver setup, UAC helper, localization, or logging formats.
+- No dropped features, no new runtime dependencies. Dependency cleanup is
+  limited to removing duplicates/dead cfg (e.g. duplicate `ureq` entry).
