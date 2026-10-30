@@ -94,7 +94,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 10 | `restored` services (data/images/keys/FDR/ASR) | FDR + ASR done; restored data services pending |
 | 11 | `net` (+ catalog; break proxy cycle) | done (catalog/net/assets/download/request; TLS moved to crate root; cycle broken) |
 | 12 | `proxy` (one route model; unify framing) | core + Windows done; `macos.rs` pending |
-| 13 | `host` (drivers/Windows/Linux) | windows setup/cleanup/log/token/mod/reset/proxy/SSPI + drivers done; windows package/apple pending |
+| 13 | `host` (drivers/Windows/Linux) | windows package/cleanup/log/token/mod/reset/proxy/SSPI/setup + drivers done; windows apple pending |
 | 14 | `app` (CLI + operations) | done |
 | 15 | `gui` (+ localization) | pending |
 | 16 | Cleanup: Cargo dependencies, dead cfg, docs, final full verification | pending |
@@ -151,6 +151,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `ef3458c` | `windows/setup/log` + `windows/setup/token` rewrites | 552 tests, clippy clean |
 | `e70a93d` | `windows/setup/cleanup` rewrite | 552 tests, clippy clean |
 | `52c7bc1` | `windows/setup` orchestration rewrite | 552 tests, clippy clean |
+| `d67e1aa` | `windows/package` rewrite | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
