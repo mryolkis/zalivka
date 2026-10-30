@@ -10,6 +10,11 @@ use std::{
     sync::Arc,
 };
 
+const MAX_PACK: u64 = 1024 * 1024;
+const MAX_LOCALE: usize = 35;
+const MAX_NAME: usize = 80;
+const MAX_SYSTEM_LANGUAGES: u32 = 65_536;
+
 thread_local! {
     static ACTIVE: RefCell<Option<Arc<Pack>>> = const { RefCell::new(None) };
 }
@@ -28,6 +33,7 @@ enum Part {
     Field(String),
 }
 
+/// Split a message into literal text and `{placeholder[:format]}` fields.
 fn parts(text: &str) -> Result<Vec<Part>> {
     let mut result = Vec::new();
     let mut rest = text;
@@ -38,13 +44,13 @@ fn parts(text: &str) -> Result<Vec<Part>> {
         }
         rest = &rest[start + 1..];
         let end = rest.find('}').context("unclosed translation placeholder")?;
-        let name = rest[..end].split(':').next().unwrap_or_default();
-        let name = if name.is_empty() {
+        let explicit = rest[..end].split(':').next().unwrap_or_default();
+        let name = if explicit.is_empty() {
             let name = position.to_string();
             position += 1;
             name
         } else {
-            name.into()
+            explicit.into()
         };
         ensure!(
             name.bytes()
@@ -76,14 +82,14 @@ impl Pack {
         pack.locale = normalize(&pack.locale);
         ensure!(
             !pack.locale.is_empty()
-                && pack.locale.len() <= 35
+                && pack.locale.len() <= MAX_LOCALE
                 && pack.locale.split('-').all(|part| !part.is_empty()
                     && part.bytes().all(|byte| byte.is_ascii_alphanumeric())),
             "invalid language tag"
         );
         ensure!(
             !pack.name.trim().is_empty()
-                && pack.name.chars().count() <= 80
+                && pack.name.chars().count() <= MAX_NAME
                 && !pack.name.chars().any(char::is_control),
             "invalid language name"
         );
@@ -91,10 +97,8 @@ impl Pack {
         pack.messages
             .retain(|source, _| english.messages.contains_key(source));
         for (source, translated) in &pack.messages {
-            let source_parts = parts(source)?;
-            let translated_parts = parts(translated)?;
             ensure!(
-                fields(&source_parts) == fields(&translated_parts),
+                fields(&parts(source)?) == fields(&parts(translated)?),
                 "translation placeholders differ: {source}"
             );
         }
@@ -158,16 +162,7 @@ impl Localizer {
                 .collect();
             files.sort();
             for file in files {
-                let loaded = (|| -> Result<Pack> {
-                    let bytes = crate::storage::read_limited(
-                        std::fs::File::open(&file)?,
-                        1024 * 1024,
-                        "language pack exceeds 1 MiB",
-                    )?;
-                    let text = std::str::from_utf8(&bytes)?.trim_start_matches('\u{feff}');
-                    Pack::new(serde_json::from_str(text)?, &english)
-                })();
-                match loaded {
+                match load_pack(&file, &english) {
                     Ok(language) => {
                         languages.insert(language.locale.clone(), Arc::new(language));
                     }
@@ -180,12 +175,11 @@ impl Localizer {
                 }
             }
         }
-        let selected = languages["en"].clone();
         let mut result = Self {
+            selected: languages["en"].clone(),
             languages,
             system,
             preference: String::new(),
-            selected,
         };
         result.select(preference);
         result
@@ -214,33 +208,50 @@ impl Localizer {
     pub fn preference(&self) -> &str {
         &self.preference
     }
+
     pub fn language(&self) -> &str {
         &self.selected.locale
     }
+
     pub fn name(&self) -> &str {
         &self.selected.name
     }
+
     pub fn languages(&self) -> Vec<(String, String)> {
         self.languages
             .iter()
             .map(|(id, language)| (id.clone(), language.name.clone()))
             .collect()
     }
+
     pub fn enter(&self) -> LanguageGuard {
         LanguageGuard {
             previous: ACTIVE.with(|active| active.replace(Some(self.selected.clone()))),
             thread: PhantomData,
         }
     }
+
     pub fn save_preference(&self) -> Result<()> {
         write_preference(&preference_file()?, &self.preference)
     }
+}
+
+/// Read and validate one JSON language pack, tolerating a UTF-8 BOM.
+fn load_pack(file: &Path, english: &Pack) -> Result<Pack> {
+    let bytes = crate::storage::read_limited(
+        std::fs::File::open(file)?,
+        MAX_PACK,
+        "language pack exceeds 1 MiB",
+    )?;
+    let text = std::str::from_utf8(&bytes)?.trim_start_matches('\u{feff}');
+    Pack::new(serde_json::from_str(text)?, english)
 }
 
 pub struct LanguageGuard {
     previous: Option<Arc<Pack>>,
     thread: PhantomData<Rc<()>>,
 }
+
 impl Drop for LanguageGuard {
     fn drop(&mut self) {
         ACTIVE.with(|active| active.replace(self.previous.take()));
@@ -322,7 +333,7 @@ fn system_languages() -> Vec<String> {
             &mut size,
         )
     } == 0
-        || !(1..=65536).contains(&size)
+        || !(1..=MAX_SYSTEM_LANGUAGES).contains(&size)
     {
         return Vec::new();
     }
