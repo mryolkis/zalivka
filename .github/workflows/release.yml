@@ -137,7 +137,8 @@ jobs:
               & lipo -create -output $executable $arm $intel
               if ($LASTEXITCODE -ne 0) { throw 'lipo failed.' }
 
-              & lipo -verify_arch arm64 x86_64 $executable
+              # lipo expects the input file before the -verify_arch arguments.
+              & lipo $executable -verify_arch arm64 x86_64
               if ($LASTEXITCODE -ne 0) { throw 'Universal binary is missing an architecture.' }
 
               & chmod +x $executable
