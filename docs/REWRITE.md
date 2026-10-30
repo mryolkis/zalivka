@@ -85,8 +85,8 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 1 | `support` (device/storage first; logging/progress next) | device + storage done; logging/progress pending |
 | 2 | `wire` (+ digest factory) | wire done; digest factory pending |
 | 3 | `ipsw` (flatten identity/verify/digest/stream) | pending |
-| 4 | `crypto` (img4 + aea) | aea done; img4 pending |
-| 5 | `tss` (transport + requests) | pending |
+| 4 | `crypto` (img4 + aea) | done |
+| 5 | `tss` (transport + requests) | transport done; request builders pending |
 | 6 | `firmware` (flatten updater/containers/canary/request) | pending |
 | 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | pending |
 | 8 | `mux` (flatten packet/channel/stream) | pending |
@@ -107,6 +107,9 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `b990b12` | plan and baseline audits | — |
 | `db79a31` | `wire` full rewrite | 552 tests, clippy clean |
 | `35fbf08` | `catalog` and `aea` full rewrites | 552 tests, clippy clean |
+| `5e53668` | `img4` full rewrite | 552 tests, clippy clean |
+| `0c03d79` | `wire::flag` consolidation (14 call sites) | 552 tests, clippy clean |
+| `dec6857` | `tss` transport rewrite | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
