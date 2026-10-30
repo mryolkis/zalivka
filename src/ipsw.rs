@@ -1,3 +1,8 @@
+//! IPSW archive access: manifest metadata, component verification, signing and
+//! seekable filesystem images.
+//!
+//! An IPSW is an ordinary ZIP at offset zero. The full ZIP directory is indexed
+//! once; entries are read as bounded streams and never extracted wholesale.
 mod containers;
 mod digest;
 mod identity;
@@ -22,6 +27,9 @@ pub use verify::Verification;
 use zip::ZipArchive;
 
 pub const MAX_COMPONENT: u64 = 1024 * 1024 * 1024;
+const MAX_MANIFEST: u64 = 32 * 1024 * 1024;
+const ZIP_BUFFER: usize = 128 * 1024;
+const COPY_BUFFER: usize = 1024 * 1024;
 
 /// Signing-only entries may omit a path; present metadata must still be valid.
 pub(crate) fn component_path(entry: &Value) -> Result<Option<&str>> {
@@ -66,7 +74,7 @@ pub struct Ipsw {
 
 impl Ipsw {
     /// Independent file cursor and ZIP reader for a concurrent restore request.
-    /// File::try_clone shares the seek position and cannot be used here.
+    /// `File::try_clone` shares the seek position and cannot be used here.
     pub fn reopen(&self) -> Result<Self> {
         let mut reopened = Self::open(&self.path)?;
         ensure!(
@@ -87,7 +95,7 @@ impl Ipsw {
             zip::read::Config {
                 archive_offset: zip::read::ArchiveOffset::Known(0),
             },
-            BufReader::with_capacity(128 * 1024, File::open(path).context("opening IPSW")?),
+            BufReader::with_capacity(ZIP_BUFFER, File::open(path).context("opening IPSW")?),
         )
         .context("reading IPSW ZIP directory")?;
         let mut names = HashSet::new();
@@ -105,31 +113,18 @@ impl Ipsw {
 
     pub fn open(path: &Path) -> Result<Self> {
         let mut archive = Self::open_archive(path)?;
-        let entry = archive
-            .by_name("BuildManifest.plist")
-            .context("IPSW has no BuildManifest.plist")?;
-        ensure!(entry.size() <= 32 * 1024 * 1024, "BuildManifest too large");
-        let manifest = wire::decode_plist(&crate::storage::read_limited(
-            entry,
-            32 * 1024 * 1024,
-            "BuildManifest too large",
-        )?)?;
-        ensure!(
-            wire::get(&manifest, &["BuildIdentities"])?
-                .as_array()
-                .is_some_and(|identities| !identities.is_empty()),
-            "BuildIdentities must be a nonempty array"
-        );
-        let products = wire::get(&manifest, &["SupportedProductTypes"])?
-            .as_array()
-            .context("invalid product types")?;
-        ensure!(
-            !products.is_empty()
-                && products
-                    .iter()
-                    .all(|value| value.as_string().is_some_and(|value| !value.is_empty())),
-            "IPSW must declare nonempty SupportedProductTypes"
-        );
+        let manifest = {
+            let entry = archive
+                .by_name("BuildManifest.plist")
+                .context("IPSW has no BuildManifest.plist")?;
+            ensure!(entry.size() <= MAX_MANIFEST, "BuildManifest too large");
+            wire::decode_plist(&crate::storage::read_limited(
+                entry,
+                MAX_MANIFEST,
+                "BuildManifest too large",
+            )?)?
+        };
+        validate_manifest(&manifest)?;
         Ok(Self {
             path: path.into(),
             archive,
@@ -262,9 +257,10 @@ impl Ipsw {
     }
 
     pub fn unix_mode(&mut self, path: &str) -> Result<u32> {
-        let e = self.archive.by_name(path)?;
-        Ok(e.unix_mode()
-            .unwrap_or(if e.is_dir() { 0o040755 } else { 0o100644 }))
+        let entry = self.archive.by_name(path)?;
+        Ok(entry
+            .unix_mode()
+            .unwrap_or(if entry.is_dir() { 0o040755 } else { 0o100644 }))
     }
 
     /// Prepare seekable images and validate CRC before uploading any boot firmware.
@@ -286,29 +282,31 @@ impl Ipsw {
             .context("preparing filesystem temporary storage before restore")?;
         self.verify_filesystem_to(id, &mut image)?;
         image.flush()?;
-        self.prepared_images.insert(path.into(), Arc::new(image));
+        self.prepared_images
+            .insert(path.to_owned(), Arc::new(image));
         Ok(())
     }
 
+    /// Stream the filesystem entry to `out` while validating its ZIP CRC.
     fn verify_filesystem_to(&mut self, id: &Identity, out: &mut impl Write) -> Result<()> {
         let path = id.path("OS")?;
         let mut entry = self.archive.by_name(path)?;
         let size = entry.size();
         let mut progress =
             crate::progress::Progress::new(format!("Verifying {path}"), Some(size), 0);
-        let mut buffer = vec![0; 1024 * 1024];
+        let mut buffer = vec![0; COPY_BUFFER];
         let mut copied = 0;
         loop {
             crate::progress::check_cancelled()?;
-            let n = entry
+            let read = entry
                 .read(&mut buffer)
                 .with_context(|| format!("checking filesystem {path}"))?;
-            if n == 0 {
+            if read == 0 {
                 break;
             }
-            out.write_all(&buffer[..n])?;
-            copied += n as u64;
-            progress.advance(n as u64);
+            out.write_all(&buffer[..read])?;
+            copied += read as u64;
+            progress.advance(read as u64);
         }
         ensure!(copied == size, "truncated filesystem {path}");
         progress.finish();
@@ -318,7 +316,7 @@ impl Ipsw {
     pub fn files(&self) -> Result<Vec<String>> {
         self.archive
             .file_names()
-            .map(|n| Ok(n?.into_owned()))
+            .map(|name| Ok(name?.into_owned()))
             .collect()
     }
 
@@ -329,21 +327,22 @@ impl Ipsw {
         let entry = self.archive.by_name(path)?;
         let size = entry.size();
         let expected_crc = entry.crc32();
-        let (file, start) = if let Some(prepared) = self.prepared_images.get(path) {
-            (prepared.reopen().context("opening prepared filesystem")?, 0)
-        } else {
-            ensure!(
-                entry.compression() == zip::CompressionMethod::Stored,
-                "compressed filesystem was not prepared before starting restore"
-            );
-            ensure!(
-                entry.compressed_size() == size,
-                "stored ZIP entry size mismatch: {path}"
-            );
-            (
-                File::open(&self.path)?,
-                entry.data_start().context("ZIP entry has no data offset")?,
-            )
+        let (file, start) = match self.prepared_images.get(path) {
+            Some(prepared) => (prepared.reopen().context("opening prepared filesystem")?, 0),
+            None => {
+                ensure!(
+                    entry.compression() == zip::CompressionMethod::Stored,
+                    "compressed filesystem was not prepared before starting restore"
+                );
+                ensure!(
+                    entry.compressed_size() == size,
+                    "stored ZIP entry size mismatch: {path}"
+                );
+                (
+                    File::open(&self.path)?,
+                    entry.data_start().context("ZIP entry has no data offset")?,
+                )
+            }
         };
         ImageReader::new(file, start, size, expected_crc)
             .with_context(|| format!("opening filesystem image {path}"))
@@ -431,7 +430,7 @@ impl Ipsw {
 
     /// Read only IM4P headers, retaining the original manifest for TSS and restored.
     pub(crate) fn resolve_types(&mut self, id: &mut Identity) -> Result<()> {
-        let mut types = std::collections::HashMap::new();
+        let mut types = HashMap::new();
         for (name, entry) in id.manifest()? {
             if img4::component_tag(name, Some(entry))?.is_some() {
                 continue;
@@ -457,6 +456,27 @@ impl Ipsw {
     }
 }
 
+fn validate_manifest(manifest: &Value) -> Result<()> {
+    ensure!(
+        wire::get(manifest, &["BuildIdentities"])?
+            .as_array()
+            .is_some_and(|identities| !identities.is_empty()),
+        "BuildIdentities must be a nonempty array"
+    );
+    let products = wire::get(manifest, &["SupportedProductTypes"])?
+        .as_array()
+        .context("invalid product types")?;
+    ensure!(
+        !products.is_empty()
+            && products
+                .iter()
+                .all(|value| value.as_string().is_some_and(|value| !value.is_empty())),
+        "IPSW must declare nonempty SupportedProductTypes"
+    );
+    Ok(())
+}
+
+/// Reject names that could escape the archive or alias another entry.
 pub fn validate_path(path: &str) -> Result<()> {
     ensure!(
         !path.is_empty()
@@ -468,11 +488,11 @@ pub fn validate_path(path: &str) -> Result<()> {
     ensure!(
         Path::new(path)
             .components()
-            .all(|c| matches!(c, Component::Normal(_))),
+            .all(|component| matches!(component, Component::Normal(_))),
         "unsafe archive path {path:?}"
     );
     ensure!(
-        !path.split('/').any(|p| p == "." || p == ".."),
+        !path.split('/').any(|part| part == "." || part == ".."),
         "unsafe archive path {path:?}"
     );
     Ok(())
