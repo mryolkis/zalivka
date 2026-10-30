@@ -1,3 +1,8 @@
+//! USB DFU and Recovery transfers, iBoot commands and environment reads.
+//!
+//! DFU uploads append Apple's 16-byte CRC suffix to the final 2-KiB block. When
+//! the last data block is already full the suffix travels as a continuation with
+//! the same block index; GETSTATUS follows the completed block, not the suffix.
 use crate::{device::Mode, usb::RecoveryTransport};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
@@ -6,7 +11,10 @@ use std::{
 };
 
 pub const BLOCK_SIZE: usize = 0x800;
+const PORT_BLOCK_SIZE: usize = 64;
+const RECOVERY_CHUNK: usize = 0x8000;
 const SUFFIX: [u8; 12] = [255, 255, 255, 255, 0xac, 5, 0, 1, 0x55, 0x46, 0x44, 0x10];
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Only the reset failed: the complete image and final DFU requests were sent.
 /// A boot-stage caller can check reconnection without replaying the upload.
@@ -25,13 +33,18 @@ pub struct Status {
     pub poll_ms: u32,
     pub state: u8,
 }
+
 impl Status {
-    pub fn parse(b: &[u8]) -> Result<Self> {
-        ensure!(b.len() == 6, "DFU GETSTATUS returned {} bytes", b.len());
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        ensure!(
+            bytes.len() == 6,
+            "DFU GETSTATUS returned {} bytes",
+            bytes.len()
+        );
         let status = Self {
-            status: b[0],
-            poll_ms: u32::from_le_bytes([b[1], b[2], b[3], 0]),
-            state: b[4],
+            status: bytes[0],
+            poll_ms: u32::from_le_bytes([bytes[1], bytes[2], bytes[3], 0]),
+            state: bytes[4],
         };
         ensure!(
             status.status == 0,
@@ -43,72 +56,84 @@ impl Status {
     }
 }
 
+fn block_size(mode: Mode) -> usize {
+    if mode == Mode::PortDfu {
+        PORT_BLOCK_SIZE
+    } else {
+        BLOCK_SIZE
+    }
+}
+
 fn status(usb: &mut impl RecoveryTransport) -> Result<Status> {
     Status::parse(&usb.control_in(0xa1, 3, 0, 0, 6)?)
 }
 
 fn wait_download(usb: &mut impl RecoveryTransport) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + DOWNLOAD_TIMEOUT;
     loop {
-        let s = status(usb)?;
-        if s.state == 5 {
+        let status = status(usb)?;
+        if status.state == 5 {
             return Ok(());
         }
         ensure!(
-            matches!(s.state, 3 | 4),
+            matches!(status.state, 3 | 4),
             "unexpected DFU download state {}",
-            s.state
+            status.state
         );
         ensure!(Instant::now() < deadline, "DFU download status timed out");
-        std::thread::sleep(Duration::from_millis(u64::from(s.poll_ms).clamp(1, 1000)));
+        std::thread::sleep(Duration::from_millis(
+            u64::from(status.poll_ms).clamp(1, 1000),
+        ));
     }
 }
 
-/// Match Apple's last-packet convention: a suffix-only packet can reuse the last block index.
-/// Full blocks borrow the input. Only the final block and suffix need storage.
+/// Match Apple's last-packet convention: a suffix-only packet can reuse the last
+/// block index. Full blocks borrow the input; only the suffix needs storage.
 pub fn packets(data: &[u8]) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>> {
     image_packets(data, Mode::Dfu)
 }
 
 fn image_packets(data: &[u8], mode: Mode) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>> {
     ensure!(!data.is_empty(), "cannot send an empty DFU image");
-    let block_size = if mode == Mode::PortDfu {
-        64
-    } else {
-        BLOCK_SIZE
-    };
+    let block_size = block_size(mode);
     let blocks = data.len().div_ceil(block_size);
     ensure!(
         blocks <= u16::MAX as usize,
         "DFU image exceeds block index range"
     );
+    let index = (blocks - 1) as u16;
+    let (prefix, last) = data.split_at(usize::from(index) * block_size);
+    let (last, continuation) = if mode == Mode::PortDfu {
+        (Cow::Borrowed(last), None)
+    } else if last.len() + 16 <= block_size {
+        let mut bytes = Vec::with_capacity(last.len() + 16);
+        bytes.extend_from_slice(last);
+        bytes.extend_from_slice(&suffix(data));
+        (Cow::Owned(bytes), None)
+    } else {
+        // A full final block cannot carry the suffix; send it as continuation.
+        (
+            Cow::Borrowed(last),
+            Some((index, Cow::Owned(suffix(data).to_vec()))),
+        )
+    };
+    Ok(prefix
+        .chunks(block_size)
+        .enumerate()
+        .map(|(index, chunk)| (index as u16, Cow::Borrowed(chunk)))
+        .chain(std::iter::once((index, last)))
+        .chain(continuation))
+}
+
+/// The 16-byte Apple DFU suffix: terminator/magic followed by inverted CRC.
+fn suffix(data: &[u8]) -> [u8; 16] {
     let mut suffix = [0; 16];
     suffix[..SUFFIX.len()].copy_from_slice(&SUFFIX);
     let mut checksum = crc32fast::Hasher::new();
     checksum.update(data);
     checksum.update(&SUFFIX);
     suffix[SUFFIX.len()..].copy_from_slice(&(!checksum.finalize()).to_le_bytes());
-    let index = (blocks - 1) as u16;
-    let (prefix, last) = data.split_at(usize::from(index) * block_size);
-    let (last, continuation) = if mode == Mode::PortDfu {
-        (Cow::Borrowed(last), None)
-    } else if last.len() + suffix.len() <= block_size {
-        let mut bytes = Vec::with_capacity(last.len() + suffix.len());
-        bytes.extend_from_slice(last);
-        bytes.extend_from_slice(&suffix);
-        (Cow::Owned(bytes), None)
-    } else {
-        (
-            Cow::Borrowed(last),
-            Some((index, Cow::Owned(suffix.to_vec()))),
-        )
-    };
-    Ok(prefix
-        .chunks(block_size)
-        .enumerate()
-        .map(|(i, chunk)| (i as u16, Cow::Borrowed(chunk)))
-        .chain(std::iter::once((index, last)))
-        .chain(continuation))
+    suffix
 }
 
 pub fn upload(
@@ -131,18 +156,38 @@ pub fn upload(
         Some(data.len() as u64),
         0,
     );
-    if mode == Mode::Recovery {
-        usb.control_out(0x41, 0, 0, 0, &[])?;
-        for chunk in data.chunks(0x8000) {
-            usb.bulk_out(chunk)?;
-            progress.advance(chunk.len() as u64);
-        }
-        if data.len().is_multiple_of(512) {
-            usb.bulk_out(&[])?;
-        }
-        progress.finish();
-        return Ok(());
+    match mode {
+        Mode::Recovery => upload_recovery(usb, data, &mut progress)?,
+        Mode::Dfu | Mode::PortDfu => upload_dfu(usb, mode, data, finish, &mut progress)?,
     }
+    Ok(())
+}
+
+fn upload_recovery(
+    usb: &mut impl RecoveryTransport,
+    data: &[u8],
+    progress: &mut crate::progress::Progress,
+) -> Result<()> {
+    usb.control_out(0x41, 0, 0, 0, &[])?;
+    for chunk in data.chunks(RECOVERY_CHUNK) {
+        usb.bulk_out(chunk)?;
+        progress.advance(chunk.len() as u64);
+    }
+    // A short packet terminates the transfer; an exact multiple needs an empty one.
+    if data.len().is_multiple_of(512) {
+        usb.bulk_out(&[])?;
+    }
+    progress.finish();
+    Ok(())
+}
+
+fn upload_dfu(
+    usb: &mut impl RecoveryTransport,
+    mode: Mode,
+    data: &[u8],
+    finish: bool,
+    progress: &mut crate::progress::Progress,
+) -> Result<()> {
     let state = usb.control_in(0xa1, 5, 0, 0, 1)?;
     ensure!(state.len() == 1, "invalid DFU GETSTATE reply");
     match state[0] {
@@ -168,12 +213,13 @@ pub fn upload(
     }
     progress.finish();
     if finish {
-        let block_size = if mode == Mode::PortDfu {
-            64
-        } else {
-            BLOCK_SIZE
-        };
-        usb.control_out(0x21, 1, data.len().div_ceil(block_size) as u16, 0, &[])?;
+        usb.control_out(
+            0x21,
+            1,
+            data.len().div_ceil(block_size(mode)) as u16,
+            0,
+            &[],
+        )?;
         for _ in 0..2 {
             status(usb)?;
         }
@@ -205,7 +251,10 @@ pub fn getenv(usb: &mut impl RecoveryTransport, name: &str) -> Result<String> {
     // iBoot stalls instead of truncating when strlen(cmd-results) + 1 > wLength.
     // Persistent boot breadcrumbs can exceed the usual 255-byte getenv buffer.
     let mut bytes = usb.control_in(0xc0, 0, 0, 0, 0x1000)?;
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
     bytes.truncate(end);
     String::from_utf8(bytes).context("iBoot environment reply is not UTF-8")
 }
