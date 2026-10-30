@@ -12,10 +12,15 @@ The trust anchor comes separately from Apple's official PKI publication; see
 `certs/README.md`. Neither a server-provided root nor a leaf certificate is
 automatically trusted by the client.
 
-The offline regression test verifies the recorded chain at a fixed capture
-time of 2026-10-20 00:00:00 UTC. It rejects a different hostname, missing
-intermediate, modified signature and a verification date after expiry.
-Normal connections always use the actual current time.
+The offline regression test verifies the recorded chain with rustls' webpki
+verifier against the same Apple root, at a fixed capture time of 2026-10-20
+00:00:00 UTC. It rejects a different hostname, missing intermediate, modified
+signature and a verification date after expiry. Apple revoked this captured
+leaf as superseded (reason 4) when it was replaced, and platform chain engines
+consult that live revocation data, so the platform verifier is not asked to
+accept the fixture; its extra-root handling is covered by the loopback
+certificate tests instead. Normal connections always use the actual current
+time.
 
 The separate ignored live HTTPS test can be run explicitly:
 
