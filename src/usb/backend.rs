@@ -1,4 +1,7 @@
 //! Native nusb and AppleUsbFilter endpoints, ordered bursts and pending reads.
+//!
+//! The normal OS backend is used first. On Windows, Apple's installed filter
+//! driver is the fallback when WinUSB cannot claim the interface.
 use super::TIMEOUT;
 #[cfg(windows)]
 use anyhow::bail;
@@ -12,6 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const READ_BUFFER: usize = 64 * 1024;
+
 /// Use the normal OS USB backend first, then Apple's installed Windows filter.
 pub(crate) enum UsbInterface {
     Native(Interface),
@@ -20,12 +25,12 @@ pub(crate) enum UsbInterface {
 }
 
 impl UsbInterface {
-    pub(crate) fn claim(device: &Device, _info: &nusb::DeviceInfo, number: u8) -> Result<Self> {
+    pub(crate) fn claim(device: &Device, info: &nusb::DeviceInfo, number: u8) -> Result<Self> {
         match device.claim_interface(number).wait() {
             Ok(interface) => Ok(Self::Native(interface)),
             Err(error) => {
                 #[cfg(windows)]
-                match crate::windows::apple::AppleUsb::open(_info, number) {
+                match crate::windows::apple::AppleUsb::open(info, number) {
                     Ok(Some(apple)) => return Ok(Self::Apple(apple)),
                     Ok(None) => {}
                     Err(apple) => {
@@ -41,13 +46,8 @@ impl UsbInterface {
 
     pub(crate) fn transport(&self) -> &'static str {
         match self {
-            Self::Native(_) => {
-                if cfg!(windows) {
-                    "winusb"
-                } else {
-                    "usbfs"
-                }
-            }
+            Self::Native(_) if cfg!(windows) => "winusb",
+            Self::Native(_) => "usbfs",
             #[cfg(windows)]
             Self::Apple(_) => "apple_usb",
         }
@@ -67,7 +67,7 @@ impl UsbInterface {
             return Ok(());
         }
         match self {
-            Self::Native(i) => i.set_alt_setting(alt).wait().map_err(Into::into),
+            Self::Native(interface) => interface.set_alt_setting(alt).wait().map_err(Into::into),
             #[cfg(windows)]
             Self::Apple(_) => bail!(
                 "Apple USB driver does not expose alternate setting {alt}; use a compatible WinUSB driver for this interface"
@@ -77,35 +77,41 @@ impl UsbInterface {
 
     pub(crate) fn control_in(&self, request: ControlIn, timeout: Duration) -> Result<Vec<u8>> {
         match self {
-            Self::Native(i) => i.control_in(request, timeout).wait().map_err(Into::into),
+            Self::Native(interface) => interface
+                .control_in(request, timeout)
+                .wait()
+                .map_err(Into::into),
             #[cfg(windows)]
-            Self::Apple(i) => i.control_in(request, timeout),
+            Self::Apple(apple) => apple.control_in(request, timeout),
         }
     }
 
     pub(super) fn control_out(&self, request: ControlOut<'_>, timeout: Duration) -> Result<()> {
         match self {
-            Self::Native(i) => i.control_out(request, timeout).wait().map_err(Into::into),
+            Self::Native(interface) => interface
+                .control_out(request, timeout)
+                .wait()
+                .map_err(Into::into),
             #[cfg(windows)]
-            Self::Apple(i) => i.control_out(request, timeout),
+            Self::Apple(apple) => apple.control_out(request, timeout),
         }
     }
 
     pub(super) fn bulk_out(&self, address: u8) -> Result<BulkOutput> {
         match self {
-            Self::Native(i) => Ok(BulkOutput::Native(i.endpoint(address)?)),
+            Self::Native(interface) => Ok(BulkOutput::Native(interface.endpoint(address)?)),
             #[cfg(windows)]
-            Self::Apple(i) => Ok(BulkOutput::Apple(i.clone(), i.pipe(address)?)),
+            Self::Apple(apple) => Ok(BulkOutput::Apple(apple.clone(), apple.pipe(address)?)),
         }
     }
 
     pub(super) fn bulk_in(&self, address: u8) -> Result<BulkInput> {
         match self {
-            Self::Native(i) => Ok(BulkInput::Native(i.endpoint(address)?)),
+            Self::Native(interface) => Ok(BulkInput::Native(interface.endpoint(address)?)),
             #[cfg(windows)]
-            Self::Apple(i) => Ok(BulkInput::Apple(crate::windows::apple::BulkReader::new(
-                i.clone(),
-                i.pipe(address)?,
+            Self::Apple(apple) => Ok(BulkInput::Apple(crate::windows::apple::BulkReader::new(
+                apple.clone(),
+                apple.pipe(address)?,
             )?)),
         }
     }
@@ -120,50 +126,17 @@ pub(super) enum BulkOutput {
 impl BulkOutput {
     pub(super) fn write(&mut self, data: &[u8]) -> Result<()> {
         match self {
-            Self::Native(ep) => {
-                let sent = ep.transfer_blocking(data.to_vec().into(), TIMEOUT);
-                sent.status?;
-                ensure!(sent.actual_len == data.len(), "short USB bulk write");
-                Ok(())
-            }
+            Self::Native(endpoint) => write_blocking(endpoint, data),
             #[cfg(windows)]
-            Self::Apple(i, pipe) => i.bulk_out(*pipe, data, TIMEOUT),
+            Self::Apple(apple, pipe) => apple.bulk_out(*pipe, data, TIMEOUT),
         }
     }
 
     pub(super) fn write_batch(&mut self, packets: &[&[u8]], cancelled: &AtomicBool) -> Result<()> {
         match self {
-            Self::Native(ep) => {
-                let result = (|| {
-                    for packet in packets {
-                        ensure!(
-                            !cancelled.load(Ordering::Acquire),
-                            "USB mux session cancelled"
-                        );
-                        ep.submit(packet.to_vec().into());
-                    }
-                    let deadline = Instant::now() + TIMEOUT;
-                    for packet in packets {
-                        ensure!(
-                            !cancelled.load(Ordering::Acquire),
-                            "USB mux session cancelled"
-                        );
-                        let sent = ep
-                            .wait_next_complete(deadline.saturating_duration_since(Instant::now()))
-                            .context("USB bulk write burst timed out")?;
-                        sent.status?;
-                        ensure!(sent.actual_len == packet.len(), "short USB bulk write");
-                    }
-                    Ok(())
-                })();
-                if result.is_err() {
-                    // Retain all buffers until the cancelled requests complete.
-                    cancel_and_drain(ep);
-                }
-                result
-            }
+            Self::Native(endpoint) => write_burst(endpoint, packets, cancelled),
             #[cfg(windows)]
-            Self::Apple(device, pipe) => {
+            Self::Apple(apple, pipe) => {
                 // AppleUsbFilter 538 dispatches OUT IOCTLs in parallel and
                 // calls synchronous WinUsb_WritePipe from each handler. More
                 // than one pending IOCTL can reorder mux/TCP frames before
@@ -174,12 +147,54 @@ impl BulkOutput {
                         !cancelled.load(Ordering::Acquire),
                         "USB mux session cancelled"
                     );
-                    device.bulk_out(*pipe, packet, TIMEOUT)?;
+                    apple.bulk_out(*pipe, packet, TIMEOUT)?;
                 }
                 Ok(())
             }
         }
     }
+}
+
+fn write_blocking(endpoint: &mut nusb::Endpoint<Bulk, Out>, data: &[u8]) -> Result<()> {
+    let sent = endpoint.transfer_blocking(data.to_vec().into(), TIMEOUT);
+    sent.status?;
+    ensure!(sent.actual_len == data.len(), "short USB bulk write");
+    Ok(())
+}
+
+/// Submit an ordered burst, then retire every request before returning.
+fn write_burst(
+    endpoint: &mut nusb::Endpoint<Bulk, Out>,
+    packets: &[&[u8]],
+    cancelled: &AtomicBool,
+) -> Result<()> {
+    let result = (|| {
+        for packet in packets {
+            ensure!(
+                !cancelled.load(Ordering::Acquire),
+                "USB mux session cancelled"
+            );
+            endpoint.submit(packet.to_vec().into());
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        for packet in packets {
+            ensure!(
+                !cancelled.load(Ordering::Acquire),
+                "USB mux session cancelled"
+            );
+            let sent = endpoint
+                .wait_next_complete(deadline.saturating_duration_since(Instant::now()))
+                .context("USB bulk write burst timed out")?;
+            sent.status?;
+            ensure!(sent.actual_len == packet.len(), "short USB bulk write");
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        // Retain all buffers until the cancelled requests complete.
+        cancel_and_drain(endpoint);
+    }
+    result
 }
 
 pub(super) enum BulkInput {
@@ -198,31 +213,31 @@ impl BulkInput {
     }
 
     pub(super) fn read(&mut self) -> Result<Vec<u8>> {
-        // The IN request stays pending in the driver. Poll completion without
-        // waiting under the mux lock; yield_link sleeps outside it when idle.
-        let timeout = Duration::ZERO;
         match self {
-            Self::Native(ep) => {
-                if ep.pending() == 0 {
-                    ep.submit(Buffer::new(65536));
-                }
-                let Some(mut completion) = ep.wait_next_complete(timeout) else {
-                    return Ok(Vec::new());
-                };
-                match completion.status {
-                    Ok(()) | Err(nusb::transfer::TransferError::Cancelled) => {
-                        let data = completion.buffer[..completion.actual_len].to_vec();
-                        // clear() preserves the capacity and requested read length.
-                        completion.buffer.clear();
-                        ep.submit(completion.buffer);
-                        Ok(data)
-                    }
-                    Err(error) => Err(error.into()),
-                }
-            }
+            Self::Native(endpoint) => read_pending(endpoint),
             #[cfg(windows)]
             Self::Apple(reader) => reader.read(),
         }
+    }
+}
+
+/// Poll one pending IN request without waiting; an idle link returns no bytes.
+fn read_pending(endpoint: &mut nusb::Endpoint<Bulk, In>) -> Result<Vec<u8>> {
+    if endpoint.pending() == 0 {
+        endpoint.submit(Buffer::new(READ_BUFFER));
+    }
+    let Some(mut completion) = endpoint.wait_next_complete(Duration::ZERO) else {
+        return Ok(Vec::new());
+    };
+    match completion.status {
+        Ok(()) | Err(nusb::transfer::TransferError::Cancelled) => {
+            let data = completion.buffer[..completion.actual_len].to_vec();
+            // clear() preserves the capacity and requested read length.
+            completion.buffer.clear();
+            endpoint.submit(completion.buffer);
+            Ok(data)
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
