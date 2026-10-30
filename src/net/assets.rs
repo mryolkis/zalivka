@@ -3,16 +3,18 @@ use super::{agent, fetch, request::asset_request, validate_apple_uri, validate_a
 use crate::wire;
 use anyhow::{Context, Result, ensure};
 use plist::Value;
-use std::path::Path;
-use std::sync::Arc;
+use std::{collections::HashMap, path::Path, sync::Arc};
 use ureq::http::{Request, Response};
+
+const MAX_AUTH_FILE: u64 = 1024 * 1024;
+const MAX_ASSET: u64 = 32 * 1024 * 1024;
 
 /// Host-scoped credentials supplied by the operator. Never sent to restored.
 #[derive(Clone)]
 pub struct AssetClient {
     // Agent clones share connections across synchronous and asynchronous requests.
     agent: ureq::Agent,
-    tokens: Arc<std::collections::HashMap<String, ureq::http::HeaderValue>>,
+    tokens: Arc<HashMap<String, ureq::http::HeaderValue>>,
     apple_connect: Option<ureq::http::HeaderValue>,
 }
 
@@ -28,39 +30,10 @@ impl Default for AssetClient {
 
 impl AssetClient {
     pub fn from_files(tokens: Option<&Path>, apple_connect: Option<&Path>) -> Result<Self> {
-        let mut values = std::collections::HashMap::new();
-        if let Some(path) = tokens {
-            let data = read_auth_file(path)?;
-            let plist =
-                wire::decode_plist(&data).context("authorization tokens file is not a plist")?;
-            for (host, token) in wire::dictionary(&plist)? {
-                let host = host.to_ascii_lowercase();
-                validate_apple_url(&format!("https://{host}/"))?;
-                ensure!(
-                    !host.contains(['/', ':', '@', '?', '#']),
-                    "authorization token key must be an Apple hostname"
-                );
-                let token = token
-                    .as_string()
-                    .context("authorization token must be a string")?;
-                ensure!(
-                    values.insert(host, bearer_token(token)?).is_none(),
-                    "duplicate authorization token hostname"
-                );
-            }
-        }
-        let apple_connect = apple_connect
-            .map(|path| -> Result<_> {
-                let bytes = read_auth_file(path)?;
-                ensure!(
-                    bytes.starts_with(b"DAWTKN"),
-                    "AppleConnect data has no DAWTKN prefix"
-                );
-                bearer_token(std::str::from_utf8(&bytes).context("AppleConnect data is not UTF-8")?)
-            })
-            .transpose()?;
+        let tokens = tokens.map(load_tokens).transpose()?.unwrap_or_default();
+        let apple_connect = apple_connect.map(load_apple_connect).transpose()?;
         Ok(Self {
-            tokens: Arc::new(values),
+            tokens: Arc::new(tokens),
             apple_connect,
             ..Self::default()
         })
@@ -72,20 +45,19 @@ impl AssetClient {
         wrapped_key: bool,
     ) -> Result<()> {
         validate_apple_uri(request.uri())?;
-        if wrapped_key && !request.headers().contains_key("authorization") {
-            let host = request
-                .uri()
-                .host()
-                .context("WKMS request has no host")?
-                .to_ascii_lowercase();
-            let fallback = if host.starts_with("wkms.") && host.ends_with(".apple.com") {
-                self.apple_connect.as_ref()
-            } else {
-                None
-            };
-            if let Some(token) = self.tokens.get(&host).or(fallback) {
-                request.headers_mut().insert("authorization", token.clone());
-            }
+        if !wrapped_key || request.headers().contains_key("authorization") {
+            return Ok(());
+        }
+        let host = request
+            .uri()
+            .host()
+            .context("WKMS request has no host")?
+            .to_ascii_lowercase();
+        let fallback = (host.starts_with("wkms.") && host.ends_with(".apple.com"))
+            .then_some(self.apple_connect.as_ref())
+            .flatten();
+        if let Some(token) = self.tokens.get(&host).or(fallback) {
+            request.headers_mut().insert("authorization", token.clone());
         }
         Ok(())
     }
@@ -107,12 +79,46 @@ impl AssetClient {
 
 fn read_auth_file(path: &Path) -> Result<Vec<u8>> {
     let file = std::fs::File::open(path).context("opening WKMS authorization file")?;
-    crate::storage::read_limited(file, 1024 * 1024, "WKMS authorization file exceeds 1 MiB")
+    crate::storage::read_limited(file, MAX_AUTH_FILE, "WKMS authorization file exceeds 1 MiB")
+}
+
+/// Parse the host-scoped bearer-token plist.
+fn load_tokens(path: &Path) -> Result<HashMap<String, ureq::http::HeaderValue>> {
+    let plist = wire::decode_plist(&read_auth_file(path)?)
+        .context("authorization tokens file is not a plist")?;
+    let mut tokens = HashMap::new();
+    for (host, token) in wire::dictionary(&plist)? {
+        let host = host.to_ascii_lowercase();
+        validate_apple_url(&format!("https://{host}/"))?;
+        ensure!(
+            !host.contains(['/', ':', '@', '?', '#']),
+            "authorization token key must be an Apple hostname"
+        );
+        let token = token
+            .as_string()
+            .context("authorization token must be a string")?;
+        ensure!(
+            tokens.insert(host, bearer_token(token)?).is_none(),
+            "duplicate authorization token hostname"
+        );
+    }
+    Ok(tokens)
+}
+
+fn load_apple_connect(path: &Path) -> Result<ureq::http::HeaderValue> {
+    let bytes = read_auth_file(path)?;
+    ensure!(
+        bytes.starts_with(b"DAWTKN"),
+        "AppleConnect data has no DAWTKN prefix"
+    );
+    bearer_token(std::str::from_utf8(&bytes).context("AppleConnect data is not UTF-8")?)
 }
 
 fn bearer_token(token: &str) -> Result<ureq::http::HeaderValue> {
     ensure!(
-        !token.is_empty() && token.len() <= 65536 && token.bytes().all(|b| (33..127).contains(&b)),
+        !token.is_empty()
+            && token.len() <= 65536
+            && token.bytes().all(|byte| (33..127).contains(&byte)),
         "invalid WKMS bearer token"
     );
     let mut header = ureq::http::HeaderValue::from_str(&format!("Bearer {token}"))
@@ -150,7 +156,7 @@ pub(super) fn asset_reply(mut response: Response<ureq::Body>, wrapped_key: bool)
     );
     let body = crate::storage::read_limited(
         response.body_mut().as_reader(),
-        32 * 1024 * 1024,
+        MAX_ASSET,
         "asset response exceeds 32 MiB",
     )?;
     if wrapped_key {
@@ -172,7 +178,7 @@ pub(super) fn asset_reply(mut response: Response<ureq::Body>, wrapped_key: bool)
         response
             .headers()
             .iter()
-            .map(|(k, v)| Ok((k.to_string(), Value::String(v.to_str()?.to_owned()))))
+            .map(|(name, value)| Ok((name.to_string(), Value::String(value.to_str()?.to_owned()))))
             .collect::<Result<plist::Dictionary>>()?,
     );
     Ok(wire::dict([

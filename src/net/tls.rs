@@ -14,32 +14,34 @@ use ureq::unversioned::transport::{
     Buffers, ConnectionDetails, LazyBuffers, NextTimeout, Transport, TransportAdapter,
 };
 
+const TSS_EXTRA_ROOT: &[u8] = include_bytes!("../../certs/AppleIncRootCertificate.cer");
+
+fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(oxitls_rustcrypto_provider::provider())
+}
+
 fn verifier(extra: Option<CertificateDer<'static>>) -> Result<Arc<dyn ServerCertVerifier>> {
-    let provider = Arc::new(oxitls_rustcrypto_provider::provider());
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-    let verifier = Arc::new(if let Some(root) = extra {
-        rustls_platform_verifier::Verifier::new_with_extra_roots([root], provider)?
-    } else {
-        rustls_platform_verifier::Verifier::new(provider)?
+    let verifier = Arc::new(match extra {
+        Some(root) => rustls_platform_verifier::Verifier::new_with_extra_roots([root], provider())?,
+        None => rustls_platform_verifier::Verifier::new(provider())?,
     });
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     let verifier = {
         let mut roots = rustls::RootCertStore::empty();
-        if let Some(root) = extra {
-            roots.add(root)?;
-        } else {
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        match extra {
+            Some(root) => roots.add(root)?,
+            None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
         }
-        rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+        rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider())
             .build()?
     };
     Ok(verifier)
 }
 
 pub(crate) fn config(extra: Option<CertificateDer<'static>>) -> Result<Arc<ClientConfig>> {
-    let provider = Arc::new(oxitls_rustcrypto_provider::provider());
     Ok(Arc::new(
-        ClientConfig::builder_with_provider(provider)
+        ClientConfig::builder_with_provider(provider())
             .with_safe_default_protocol_versions()?
             // The verifier checks the chain, hostname, validity and handshake signatures.
             .dangerous()
@@ -54,10 +56,8 @@ pub(crate) fn connect_tss(
     details: &ConnectionDetails,
     transport: Box<dyn Transport>,
 ) -> Result<Box<dyn Transport>, ureq::Error> {
-    let config = config(Some(CertificateDer::from(
-        include_bytes!("../../certs/AppleIncRootCertificate.cer").as_slice(),
-    )))
-    .map_err(|error| ureq::Error::Other(error.into()))?;
+    let config = config(Some(CertificateDer::from(TSS_EXTRA_ROOT)))
+        .map_err(|error| ureq::Error::Other(error.into()))?;
     crate::log!(Debug, "tls:tss", "Certificates: system trust + Apple Root");
     connect_with_config(details, transport, config)
 }
@@ -87,30 +87,36 @@ struct TlsTransport {
     stream: StreamOwned<ClientConnection, TransportAdapter>,
     buffers: LazyBuffers,
 }
+
 impl fmt::Debug for TlsTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TlsTransport").finish_non_exhaustive()
     }
 }
+
 impl Transport for TlsTransport {
     fn buffers(&mut self) -> &mut dyn Buffers {
         &mut self.buffers
     }
+
     fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
         self.stream.sock.set_timeout(timeout);
         self.stream.write_all(&self.buffers.output()[..amount])?;
         self.stream.flush()?;
         Ok(())
     }
+
     fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
         self.stream.sock.set_timeout(timeout);
         let amount = self.stream.read(self.buffers.input_append_buf())?;
         self.buffers.input_appended(amount);
         Ok(amount > 0)
     }
+
     fn is_open(&mut self) -> bool {
         self.stream.sock.get_mut().is_open()
     }
+
     fn is_tls(&self) -> bool {
         true
     }
