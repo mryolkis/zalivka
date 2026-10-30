@@ -1,4 +1,9 @@
 //! Bind updater metadata without controller or model tables.
+//!
+//! Updaters either provide a device-generated request (used verbatim with AP
+//! fields checked against the connected machine) or name a namespace in
+//! MessageArgInfo whose single manifest component is signed from a verified
+//! plist payload bundle.
 use super::Update;
 use crate::{
     device::DeviceInfo,
@@ -15,19 +20,7 @@ pub(super) fn namespace_update(
     arguments: &Value,
 ) -> Result<Update> {
     let info = wire::dictionary(wire::get(arguments, &["MessageArgInfo"])?)?;
-    let namespace = info
-        .keys()
-        .next()
-        .and_then(|key| key.split_once(',').map(|(prefix, _)| prefix))
-        .context(
-            "DeviceGeneratedRequest is absent and updater namespace is missing or ambiguous",
-        )?;
-    ensure!(!namespace.is_empty(), "empty updater namespace");
-    let prefix = format!("{namespace},");
-    ensure!(
-        info.keys().all(|name| name.starts_with(&prefix)),
-        "updater info contains fields outside its namespace"
-    );
+    let prefix = namespace_prefix(info)?;
     let mut components = id
         .manifest()?
         .iter()
@@ -39,6 +32,7 @@ pub(super) fn namespace_update(
         components.next().is_none(),
         "updater namespace selects multiple manifest components"
     );
+
     let mut parameters = Dictionary::new();
     for (key, value) in wire::dictionary(&id.value)? {
         if key.starts_with(&prefix) {
@@ -62,18 +56,20 @@ pub(super) fn namespace_update(
         .get(&format!("{prefix}ProductionMode"))
         .and_then(Value::as_boolean)
         .context("namespace updater requires explicit production mode")?;
+
     let mut entry = wire::dictionary(value)?.clone();
     entry.remove("Info");
     if let Some(rules) = wire::optional(value, &["Info", "RestoreRequestRules"])? {
         tss::apply_rules(&mut entry, rules, &parameters)?;
     }
-    if let Some(value) = entry.get("EPRO") {
+    if let Some(epro) = entry.get("EPRO") {
         ensure!(
-            value.as_boolean() == Some(production),
+            epro.as_boolean() == Some(production),
             "updater EPRO disagrees with device production mode"
         );
     }
     entry.insert("EPRO".into(), production.into());
+
     let ticket = format!("{prefix}Ticket");
     let mut request = tss::host_fields();
     request.extend(parameters);
@@ -86,6 +82,24 @@ pub(super) fn namespace_update(
         response_tags: vec![ticket],
         payload: Some(payload),
     })
+}
+
+/// The `Namespace,` prefix shared by every MessageArgInfo key.
+fn namespace_prefix(info: &Dictionary) -> Result<String> {
+    let namespace = info
+        .keys()
+        .next()
+        .and_then(|key| key.split_once(',').map(|(prefix, _)| prefix))
+        .context(
+            "DeviceGeneratedRequest is absent and updater namespace is missing or ambiguous",
+        )?;
+    ensure!(!namespace.is_empty(), "empty updater namespace");
+    let prefix = format!("{namespace},");
+    ensure!(
+        info.keys().all(|name| name.starts_with(&prefix)),
+        "updater info contains fields outside its namespace"
+    );
+    Ok(prefix)
 }
 
 pub(super) fn tags(value: &Value) -> Result<Vec<&str>> {
@@ -132,6 +146,7 @@ pub(super) fn generated_update(
         !response_tags.is_empty(),
         "firmware updater supplied no response tags"
     );
+
     let common = tss::updater_fields(device)?;
     let mut request = generated.clone();
     let identity = wire::dictionary(&id.value)?;

@@ -15,47 +15,9 @@ pub fn canary_response(arguments: &Value) -> Result<Option<Value>> {
         "invalid Canary message type"
     );
     let info = wire::dictionary(wire::get(arguments, &["MessageArgInfo"])?)?;
-    let mut query = info.get("QueryLoop0");
-    if let Some(generated) = wire::dictionary(arguments)?.get("DeviceGeneratedRequest")
-        && let Some(value) = wire::dictionary(generated)?.get("QueryLoop0")
-    {
-        ensure!(
-            query.is_none_or(|previous| previous == value),
-            "conflicting Canary QueryLoop0"
-        );
-        query = Some(value);
-    }
-    let query = query
-        .and_then(Value::as_boolean)
-        .context("Canary QueryLoop0 must be boolean")?;
+    let query = query_mode(info, arguments)?;
     if let Some(tags) = wire::dictionary(arguments)?.get("DeviceGeneratedTags") {
-        let tags = wire::dictionary(tags)?;
-        let names = super::request::tags(
-            tags.get("ResponseTags")
-                .context("missing Canary ResponseTags")?,
-        )?;
-        ensure!(
-            names
-                .iter()
-                .copied()
-                .filter(|s| *s != "FirmwareData")
-                .eq(["Test,Ticket,1", "Test,Ticket,2"]),
-            "unrecognized Canary response tags"
-        );
-        if let Some(build) = tags.get("BuildIdentityTags") {
-            ensure!(
-                build
-                    .as_array()
-                    .is_some_and(|a| a.len() == 1 && a[0].as_string() == Some("TestFirmware")),
-                "unrecognized Canary build tags"
-            );
-        }
-        if let Some(instance) = tags.get("LoopInstance") {
-            ensure!(
-                instance.as_string() == Some(if query { "InstanceA" } else { "InstanceB" }),
-                "invalid Canary LoopInstance"
-            );
-        }
+        validate_tags(wire::dictionary(tags)?, query)?;
     }
     let test = Value::Data(vec![if query { 1 } else { 2 }; 4]);
     Ok(Some(wire::dict([
@@ -72,4 +34,51 @@ pub fn canary_response(arguments: &Value) -> Result<Option<Value>> {
             ]),
         ),
     ])))
+}
+
+/// QueryLoop0 may be in MessageArgInfo or in a generated request; both must agree.
+fn query_mode(info: &plist::Dictionary, arguments: &Value) -> Result<bool> {
+    let mut query = info.get("QueryLoop0");
+    if let Some(generated) = wire::dictionary(arguments)?.get("DeviceGeneratedRequest")
+        && let Some(value) = wire::dictionary(generated)?.get("QueryLoop0")
+    {
+        ensure!(
+            query.is_none_or(|previous| previous == value),
+            "conflicting Canary QueryLoop0"
+        );
+        query = Some(value);
+    }
+    query
+        .and_then(Value::as_boolean)
+        .context("Canary QueryLoop0 must be boolean")
+}
+
+fn validate_tags(tags: &plist::Dictionary, query: bool) -> Result<()> {
+    let names = super::request::tags(
+        tags.get("ResponseTags")
+            .context("missing Canary ResponseTags")?,
+    )?;
+    ensure!(
+        names
+            .iter()
+            .copied()
+            .filter(|name| *name != "FirmwareData")
+            .eq(["Test,Ticket,1", "Test,Ticket,2"]),
+        "unrecognized Canary response tags"
+    );
+    if let Some(build) = tags.get("BuildIdentityTags") {
+        ensure!(
+            build
+                .as_array()
+                .is_some_and(|tags| tags.len() == 1 && tags[0].as_string() == Some("TestFirmware")),
+            "unrecognized Canary build tags"
+        );
+    }
+    if let Some(instance) = tags.get("LoopInstance") {
+        ensure!(
+            instance.as_string() == Some(if query { "InstanceA" } else { "InstanceB" }),
+            "invalid Canary LoopInstance"
+        );
+    }
+    Ok(())
 }

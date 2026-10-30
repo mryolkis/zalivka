@@ -1,4 +1,8 @@
 //! Firmware updater personalization for the auxiliary controllers in Macs.
+//!
+//! An updater exchanges property lists with a controller through restored. The
+//! request either uses a device-generated template or a single verified plist
+//! payload bundle from the IPSW; responses carry controller tickets and data.
 mod canary;
 mod request;
 use crate::{device::DeviceInfo, ipsw::Identity, wire};
@@ -18,22 +22,20 @@ impl Update {
         &self.request
     }
 
+    /// Validate the controller response and append the payload this update owns.
     pub fn finish(self, mut response: Value) -> Result<Value> {
         let fields = wire::dictionary(&response).context("invalid updater response")?;
         for tag in &self.response_tags {
-            let is_ticket = tag != "FirmwareData";
             // ResponseTags can keep completed controllers across updater rounds.
             // Only this request's @Tag=true asks Apple to return that ticket.
-            if is_ticket
-                && wire::optional_boolean(&self.request, &[&format!("@{tag}")])? != Some(true)
-            {
+            if tag != "FirmwareData" && !wire::flag(&self.request, &[&format!("@{tag}")])? {
                 continue;
             }
             let value = fields
                 .get(tag)
                 .with_context(|| format!("Apple returned no requested firmware tag {tag}"))?;
-            if is_ticket {
-                anyhow::ensure!(
+            if tag != "FirmwareData" {
+                ensure!(
                     value.as_data().is_some_and(|data| !data.is_empty()),
                     "Apple returned an invalid or empty firmware ticket {tag}"
                 );
@@ -43,7 +45,7 @@ impl Update {
             let fields = response
                 .as_dictionary_mut()
                 .context("invalid updater response")?;
-            anyhow::ensure!(
+            ensure!(
                 !fields.contains_key("FirmwareData"),
                 "namespace response unexpectedly contains FirmwareData"
             );
@@ -57,7 +59,7 @@ impl Update {
 /// one verified plist payload bundle. Updater names never select behavior.
 pub fn prepare(
     ipsw: &mut crate::ipsw::Ipsw,
-    id: &Identity,
+    identity: &Identity,
     device: &DeviceInfo,
     arguments: &Value,
 ) -> Result<Update> {
@@ -69,9 +71,9 @@ pub fn prepare(
     if wire::optional(arguments, &["DeviceGeneratedRequest"])?.is_none()
         && wire::optional(arguments, &["DeviceGeneratedTags"])?.is_none()
     {
-        request::namespace_update(ipsw, id, arguments)
+        request::namespace_update(ipsw, identity, arguments)
     } else {
-        request::generated_update(id, device, arguments)
+        request::generated_update(identity, device, arguments)
     }
 }
 
@@ -93,7 +95,9 @@ pub fn send_response(out: &mut impl Write, mut response: Value, arguments: &Valu
         .context("invalid updater response")?;
     let bytes = match fields.get_mut("FirmwareData") {
         Some(Value::Data(bytes)) if size != 0 => std::mem::take(bytes),
-        _ => return wire::send(out, &wire::dict([("FirmwareResponseData", response)])),
+        _ => {
+            return wire::send(out, &wire::dict([("FirmwareResponseData", response)]));
+        }
     };
     fields.remove("FirmwareData");
     wire::send(
