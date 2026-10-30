@@ -54,6 +54,7 @@ impl App {
                 });
             });
     }
+
     pub(super) fn journal(&mut self, ui: &mut egui::Ui) {
         if !self.journal_open {
             return;
@@ -123,12 +124,7 @@ impl App {
                     .show_rows(ui, row_height, records.len(), |ui, rows| {
                         for row in rows {
                             let record = records[row];
-                            let color = match record.level {
-                                Level::Error => ui.visuals().error_fg_color,
-                                Level::Warning => ui.visuals().warn_fg_color,
-                                Level::Info => ui.visuals().text_color(),
-                                Level::Trace | Level::Debug => ui.visuals().weak_text_color(),
-                            };
+                            let color = journal_color(record.level, ui.visuals());
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(record.to_string())
@@ -175,15 +171,7 @@ impl App {
                 frame.show(ui, |ui| {
                     ui.set_width(width);
                     ui.horizontal_top(|ui| {
-                        pill(
-                            ui,
-                            match notice.tone {
-                                Tone::Neutral => "i",
-                                Tone::Success => "✓",
-                                Tone::Error => "!",
-                            },
-                            color,
-                        );
+                        pill(ui, notice_symbol(notice.tone), color);
                         let text_width = ui.available_width() - 24.0 - ui.spacing().item_spacing.x;
                         ui.vertical(|ui| {
                             ui.set_width(text_width);
@@ -197,14 +185,7 @@ impl App {
                                     .show(ui, |ui| {
                                         ui.add(
                                             egui::Label::new(
-                                                RichText::new({
-                                                    let mut detail = tr(&notice.detail);
-                                                    if let Some(error) = &notice.journal_error {
-                                                        if !detail.is_empty() { detail.push(' '); }
-                                                        detail.push_str(&trf("Disk journal incomplete: {error}. Recent history is available in this window.", &[error]));
-                                                    }
-                                                    detail
-                                                })
+                                                RichText::new(notice_detail(notice))
                                                     .size(13.0)
                                                     .color(ui.visuals().weak_text_color()),
                                             )
@@ -233,9 +214,7 @@ impl App {
             self.notice = None;
         }
     }
-}
 
-impl App {
     pub(super) fn view(&mut self, ui: &mut egui::Ui) {
         let _language = self.localization.enter();
         let ctx = ui.ctx().clone();
@@ -328,6 +307,37 @@ impl App {
     }
 }
 
+fn journal_color(level: Level, visuals: &egui::Visuals) -> Color32 {
+    match level {
+        Level::Error => visuals.error_fg_color,
+        Level::Warning => visuals.warn_fg_color,
+        Level::Info => visuals.text_color(),
+        Level::Trace | Level::Debug => visuals.weak_text_color(),
+    }
+}
+
+fn notice_symbol(tone: Tone) -> &'static str {
+    match tone {
+        Tone::Neutral => "i",
+        Tone::Success => "✓",
+        Tone::Error => "!",
+    }
+}
+
+fn notice_detail(notice: &Notice) -> String {
+    let mut detail = tr(&notice.detail);
+    if let Some(error) = &notice.journal_error {
+        if !detail.is_empty() {
+            detail.push(' ');
+        }
+        detail.push_str(&trf(
+            "Disk journal incomplete: {error}. Recent history is available in this window.",
+            &[error],
+        ));
+    }
+    detail
+}
+
 impl eframe::App for App {
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         visuals.panel_fill.to_normalized_gamma_f32()
@@ -343,7 +353,7 @@ impl eframe::App for App {
         } else {
             SCAN_INTERVAL
         });
-        if ctx.input(|i| i.viewport().close_requested())
+        if ctx.input(|input| input.viewport().close_requested())
             && let Some(job) = &mut self.job
         {
             if !job.can_stop() {
@@ -361,14 +371,15 @@ impl eframe::App for App {
             }
         }
         if self.job.is_none() && !self.picking && self.confirmation.is_none() {
-            let dropped = ctx.input(|i| {
-                i.raw
+            let dropped = ctx.input(|input| {
+                input
+                    .raw
                     .dropped_files
                     .iter()
-                    .map(|f| f.path().to_path_buf())
-                    .find(|p| {
-                        p.extension()
-                            .is_some_and(|s| s.eq_ignore_ascii_case("ipsw"))
+                    .map(|file| file.path().to_path_buf())
+                    .find(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("ipsw"))
                     })
             });
             if let Some(path) = dropped {
