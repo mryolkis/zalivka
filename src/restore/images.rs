@@ -135,7 +135,7 @@ pub(super) fn image_data(
             "ImageData",
         ),
     };
-    let want_list = wire::optional_boolean(message, &["Arguments", list])?.unwrap_or(false);
+    let want_list = wire::flag(message, &["Arguments", list])?;
     let image_name = wire::optional(message, &["Arguments", "ImageName"])?
         .map(|value| {
             value
@@ -146,7 +146,7 @@ pub(super) fn image_data(
         .transpose()?;
     let mut names = Vec::new();
     for (name, entry) in id.manifest()? {
-        if wire::optional_boolean(entry, &["Info", image_type])?.unwrap_or(false) {
+        if wire::flag(entry, &["Info", image_type])? {
             names.push(name.as_str());
         }
     }
@@ -199,11 +199,9 @@ pub(super) fn nor_data(
     let iboot = id.component_by_type(b"ibot")?;
     let mut names = Vec::new();
     for (name, entry) in id.manifest()? {
-        let primary =
-            wire::optional_boolean(entry, &["Info", "IsFirmwarePayload"])?.unwrap_or(false);
-        let secondary = wire::optional_boolean(entry, &["Info", "IsSecondaryFirmwarePayload"])?
-            .unwrap_or(false);
-        let loaded = wire::optional_boolean(entry, &["Info", "IsLoadedByiBoot"])?.unwrap_or(false);
+        let primary = wire::flag(entry, &["Info", "IsFirmwarePayload"])?;
+        let secondary = wire::flag(entry, &["Info", "IsSecondaryFirmwarePayload"])?;
+        let loaded = wire::flag(entry, &["Info", "IsLoadedByiBoot"])?;
         if (primary || (secondary && loaded)) && name != llb && Some(name.as_str()) != restore_sep {
             names.push(name.as_str());
         }

@@ -27,9 +27,8 @@ pub enum IBootStep {
 pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>> {
     let mut firmware = Vec::new();
     for (name, entry) in id.manifest()? {
-        let first =
-            wire::optional_boolean(entry, &["Info", "IsLoadedByiBootStage1"])?.unwrap_or(false);
-        let loaded = wire::optional_boolean(entry, &["Info", "IsLoadedByiBoot"])?.unwrap_or(false);
+        let first = wire::flag(entry, &["Info", "IsLoadedByiBootStage1"])?;
+        let loaded = wire::flag(entry, &["Info", "IsLoadedByiBoot"])?;
         if first == stage1 && (stage1 || loaded) {
             ensure!(
                 id.payload_type(name)?.is_some(),

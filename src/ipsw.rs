@@ -35,7 +35,7 @@ pub(crate) fn component_path(entry: &Value) -> Result<Option<&str>> {
 /// File digests are required for trusted payloads; fileless signing entries
 /// may request an empty server-generated measurement. Check both consistently.
 pub(crate) fn component_digest(entry: &Value) -> Result<Option<&[u8]>> {
-    let trusted = wire::optional_boolean(entry, &["Trusted"])?.unwrap_or(false);
+    let trusted = wire::flag(entry, &["Trusted"])?;
     let digest = wire::optional(entry, &["Digest"])?
         .map(|value| value.as_data().context("invalid component Digest"))
         .transpose()?;
@@ -221,7 +221,7 @@ impl Ipsw {
         let bytes = self.component(id, name)?;
         // Trusted is a signing attribute, not the IMG4 transport container.
         // InputDevice is an untrusted IM4P but still needs the IMG4 wrapper.
-        if !wire::optional_boolean(&id.value, &["Manifest", name, "Trusted"])?.unwrap_or(false)
+        if !wire::flag(&id.value, &["Manifest", name, "Trusted"])?
             && img4::type_offset(&bytes).is_none()
         {
             return Ok(bytes);

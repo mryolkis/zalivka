@@ -63,8 +63,7 @@ impl RestoreContext {
         let restore = &self.restore.identity;
         let recovery = self.recovery.as_ref();
         let identity = || -> Result<&Identity> {
-            let is_recovery =
-                wire::optional_boolean(message, &["Arguments", "IsRecoveryOS"])?.unwrap_or(false);
+            let is_recovery = wire::flag(message, &["Arguments", "IsRecoveryOS"])?;
             if data_type == DataType::RecoveryAsr || is_recovery {
                 Ok(&recovery
                     .context("device requested a recoveryOS identity absent from this IPSW")?
@@ -125,8 +124,7 @@ impl RestoreContext {
                 let id = identity()?;
                 let name = wire::string(message, &["Arguments", "ImageName"])?;
                 let global_optional = if name == "__GlobalManifest__" {
-                    wire::optional_boolean(message, &["Arguments", "GlobalManifestOptional"])?
-                        .unwrap_or(false)
+                    wire::flag(message, &["Arguments", "GlobalManifestOptional"])?
                 } else {
                     false
                 };

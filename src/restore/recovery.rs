@@ -24,10 +24,8 @@ impl RestoreContext {
         } else {
             let mut names = Vec::new();
             for (name, entry) in id.manifest()? {
-                let loaded =
-                    wire::optional_boolean(entry, &["Info", "IsLoadedByiBoot"])?.unwrap_or(false);
-                let stage1 = wire::optional_boolean(entry, &["Info", "IsLoadedByiBootStage1"])?
-                    .unwrap_or(false);
+                let loaded = wire::flag(entry, &["Info", "IsLoadedByiBoot"])?;
+                let stage1 = wire::flag(entry, &["Info", "IsLoadedByiBootStage1"])?;
                 if loaded || stage1 {
                     names.push(name.as_str());
                 }

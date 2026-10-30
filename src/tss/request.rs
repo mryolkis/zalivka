@@ -72,10 +72,10 @@ fn base(device: &DeviceInfo, id: &Identity) -> Result<Dictionary> {
             "PermitNeRDPivot",
         ],
     );
-    if wire::optional_boolean(&id.value, &["Info", "RequiresUIDMode"])?.unwrap_or(false) {
+    if wire::flag(&id.value, &["Info", "RequiresUIDMode"])? {
         // Use upstream's retail DFU compatibility defaults: UID mode off,
         // Sika fuse zero. These are not measurements from the BuildManifest.
-        let uid = wire::optional_boolean(&id.value, &["UID_MODE"])?.unwrap_or(false);
+        let uid = wire::flag(&id.value, &["UID_MODE"])?;
         d.insert("UID_MODE".into(), uid.into());
         d.insert(
             "Ap,SikaFuse".into(),

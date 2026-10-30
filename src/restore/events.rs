@@ -84,7 +84,7 @@ pub(super) fn log_checkpoint(
     let result = wire::get(message, &["CHECKPOINT_RESULT"])?
         .as_signed_integer()
         .context("invalid checkpoint result")?;
-    let complete = wire::optional_boolean(message, &["CHECKPOINT_COMPLETE"])?.unwrap_or(false);
+    let complete = wire::flag(message, &["CHECKPOINT_COMPLETE"])?;
     let phase = if complete { "completed" } else { "started" };
     // Checkpoints describe individual steps; only StatusMsg decides the final result.
     output(Record::new(
