@@ -13,6 +13,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+const SERVICE_TYPE: &str = "com.apple.mobile.restored";
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const RESTORE_READ_TIMEOUT: Duration = Duration::from_secs(300);
+const APPEAR_TIMEOUT: Duration = Duration::from_secs(180);
+const RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Query an existing service without booting firmware or starting a restore.
 pub fn query_value(stream: &mut (impl Read + Write), key: &str) -> Result<Value> {
     wire::send(
@@ -51,44 +57,13 @@ pub(super) fn confirm_restore_service<T>(
 
 pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, u64)> {
     crate::log!(Info, "restore", "Waiting for the Mac restore service");
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + APPEAR_TIMEOUT;
     let mut last_error = None;
     let mut reported_error = None;
     loop {
         for candidate in MuxUsb::candidates()? {
-            let result = (|| -> Result<_> {
-                let session = Session::new(MuxUsb::open(&candidate)?)?;
-                let mut stream = session.connect(RESTORED_PORT)?;
-                stream.set_read_timeout(Duration::from_secs(10));
-                wire::send(
-                    &mut stream,
-                    &wire::dict([("Request", "QueryType".into()), ("Label", "zalivka".into())]),
-                )?;
-                let query = wire::receive(&mut stream)?;
-                ensure!(
-                    wire::string(&query, &["Type"])? == "com.apple.mobile.restored",
-                    "not the restored service"
-                );
-                let version = wire::number(wire::get(&query, &["RestoreProtocolVersion"])?)?;
-                let hardware = query_value(&mut stream, "HardwareInfo")?;
-                let hw = wire::get(&hardware, &["HardwareInfo"])?;
-                ensure!(
-                    wire::number(wire::get(hw, &["UniqueChipID"])?)? == device.ecid,
-                    "restore service ECID mismatch"
-                );
-                ensure!(
-                    wire::number(wire::get(hw, &["ChipID"])?)? == u64::from(device.chip_id),
-                    "restore service chip mismatch"
-                );
-                ensure!(
-                    wire::number(wire::get(hw, &["BoardID"])?)? == u64::from(device.board_id),
-                    "restore service board mismatch"
-                );
-                stream.set_read_timeout(Duration::from_secs(300));
-                Ok((session, stream, version))
-            })();
-            match result {
-                Ok(result) => return Ok(result),
+            match connect_candidate(&candidate, device) {
+                Ok(found) => return Ok(found),
                 Err(error) => {
                     let message = format!("{error:#}");
                     if reported_error.as_ref() != Some(&message) {
@@ -107,6 +82,42 @@ pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, 
                     device.ecid
                 )));
         }
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(RETRY_INTERVAL);
     }
+}
+
+/// Confirm the restored protocol and hardware before exposing the channel.
+fn connect_candidate(
+    candidate: &nusb::DeviceInfo,
+    device: &DeviceInfo,
+) -> Result<(Session, MuxStream, u64)> {
+    let session = Session::new(MuxUsb::open(candidate)?)?;
+    let mut stream = session.connect(RESTORED_PORT)?;
+    stream.set_read_timeout(HANDSHAKE_TIMEOUT);
+    wire::send(
+        &mut stream,
+        &wire::dict([("Request", "QueryType".into()), ("Label", "zalivka".into())]),
+    )?;
+    let query = wire::receive(&mut stream)?;
+    ensure!(
+        wire::string(&query, &["Type"])? == SERVICE_TYPE,
+        "not the restored service"
+    );
+    let version = wire::number(wire::get(&query, &["RestoreProtocolVersion"])?)?;
+    let hardware = query_value(&mut stream, "HardwareInfo")?;
+    let hw = wire::get(&hardware, &["HardwareInfo"])?;
+    ensure!(
+        wire::number(wire::get(hw, &["UniqueChipID"])?)? == device.ecid,
+        "restore service ECID mismatch"
+    );
+    ensure!(
+        wire::number(wire::get(hw, &["ChipID"])?)? == u64::from(device.chip_id),
+        "restore service chip mismatch"
+    );
+    ensure!(
+        wire::number(wire::get(hw, &["BoardID"])?)? == u64::from(device.board_id),
+        "restore service board mismatch"
+    );
+    stream.set_read_timeout(RESTORE_READ_TIMEOUT);
+    Ok((session, stream, version))
 }

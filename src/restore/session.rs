@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub fn validate_final_status(message: &Value) -> Result<()> {
     ensure!(
         wire::string(message, &["MsgType"])? == "StatusMsg",
@@ -28,8 +30,9 @@ pub fn validate_final_status(message: &Value) -> Result<()> {
         .context("invalid StatusMsg.Status: expected signed plist integer")?;
     let amr = wire::get(message, &["AMRError"])
         .ok()
-        .map(|v| {
-            v.as_signed_integer()
+        .map(|value| {
+            value
+                .as_signed_integer()
                 .context("invalid StatusMsg.AMRError: expected signed plist integer")
         })
         .transpose()?
@@ -142,7 +145,7 @@ impl Connection {
             attestation.finish()
         })?;
         crate::log!(Debug, "restore:usb", "Waiting for channel closure");
-        wait_for_restore_close(&mut self.main, &self.session, Duration::from_secs(60))?;
+        wait_for_restore_close(&mut self.main, &self.session, CLOSE_TIMEOUT)?;
         crate::log!(Debug, "restore:usb", "Channel closed");
         Ok(())
     }
@@ -260,16 +263,7 @@ pub(super) fn run(
                     state.context.device.ecid
                 );
                 if provisioning_error {
-                    let message = "Could not obtain Apple certificates. Connect the Mac to Wi-Fi or Ethernet and complete activation.";
-                    crate::log!(
-                        Warning,
-                        "restore",
-                        "Apple certificate error; Mac activation required"
-                    );
-                    crate::progress::Event::ProvisioningWarning {
-                        message: message.into(),
-                    }
-                    .emit();
+                    emit_provisioning_warning();
                 }
                 return Ok(());
             }
@@ -285,4 +279,17 @@ pub(super) fn run(
         }
     }
     unreachable!()
+}
+
+fn emit_provisioning_warning() {
+    let message = "Could not obtain Apple certificates. Connect the Mac to Wi-Fi or Ethernet and complete activation.";
+    crate::log!(
+        Warning,
+        "restore",
+        "Apple certificate error; Mac activation required"
+    );
+    crate::progress::Event::ProvisioningWarning {
+        message: message.into(),
+    }
+    .emit();
 }
