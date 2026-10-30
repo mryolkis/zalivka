@@ -84,10 +84,10 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 0 | Baseline, checkpoint tag, audits, green recipe | done |
 | 1 | `support` (device/storage first; logging/progress next) | device + storage done; logging/progress pending |
 | 2 | `wire` (+ digest factory) | wire done; digest factory pending |
-| 3 | `ipsw` (flatten identity/verify/digest/stream) | `stream` + `digest` + `identity` done; verify/ipsw/containers pending |
+| 3 | `ipsw` (flatten identity/verify/digest/stream) | `stream` + `digest` + `identity` + `containers` done; verify/ipsw pending |
 | 4 | `crypto` (img4 + aea) | done |
 | 5 | `tss` (transport + requests) | done |
-| 6 | `firmware` (flatten updater/containers/canary/request) | pending |
+| 6 | `firmware` (updater/containers/canary/request) | containers moved to ipsw (cycle broken); updater/canary/request pending |
 | 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | pending |
 | 8 | `mux` (flatten packet/channel/stream) | pending |
 | 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | pending |
@@ -113,6 +113,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `ceaa8e8` | `tss` request builders rewrite | 552 tests, clippy clean |
 | `964db87` | `ipsw/stream` + `ipsw/digest` rewrites | 552 tests, clippy clean |
 | `878c3f3` | `ipsw/identity` rewrite | 552 tests, clippy clean |
+| `841a3bc` | container parsing moved to `ipsw/containers`, rewritten, cycle broken | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
