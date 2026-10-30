@@ -96,7 +96,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 12 | `proxy` (one route model; unify framing) | core + Windows done; `macos.rs` pending |
 | 13 | `host` (drivers/Windows/Linux) | done (drivers + linux + entire Windows tree rewritten) |
 | 14 | `app` (CLI + operations) | done |
-| 15 | `gui` (+ localization) | `localization` + theme/setup/journal/widgets/events/view/cards/dialogs done; worker/gui pending |
+| 15 | `gui` (+ localization) | all gui modules except `gui.rs` done; `gui.rs` pending |
 | 16 | Cleanup: Cargo dependencies, dead cfg, docs, final full verification | pending |
 
 ## Progress log
@@ -158,6 +158,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `8705ced` | `gui/journal` + `gui/widgets` rewrites | 552 tests, clippy clean |
 | `a71fe3c` | `gui/events` + `gui/view` rewrites | 552 tests, clippy clean |
 | `8564e31` | `gui/cards` + `gui/dialogs` rewrites | 552 tests, clippy clean |
+| `951bb92` | `gui/worker` rewrite | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
