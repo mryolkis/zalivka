@@ -48,6 +48,7 @@ pub(super) struct Transfer {
     pub(super) update: progress::Update,
     pub(super) received: Instant,
 }
+
 impl Transfer {
     pub(super) fn speed(&self, now: Instant) -> f64 {
         if now.duration_since(self.received) > Duration::from_secs(2) {
@@ -56,6 +57,7 @@ impl Transfer {
             self.update.bytes_per_second
         }
     }
+
     pub(super) fn remaining(&self, now: Instant) -> Option<u64> {
         let bytes = self.update.total?.saturating_sub(self.update.completed);
         let speed = self.speed(now);
@@ -264,7 +266,9 @@ impl Job {
         let repaint = ctx.clone();
         let context = progress::Context::new(move |event| match event {
             progress::Event::Log(record) => {
-                let mut journal = log_journal.lock().unwrap_or_else(|e| e.into_inner());
+                let mut journal = log_journal
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 let wake = journal.record(record);
                 drop(journal);
                 if wake {
@@ -274,7 +278,7 @@ impl Job {
             event => {
                 completion_events
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(|error| error.into_inner())
                     .observe(&event);
                 let _ = events.send(Event::Worker(id, Output::State(event)));
                 repaint.request_repaint_after(UI_REFRESH_INTERVAL);
@@ -284,7 +288,7 @@ impl Job {
         let repaint = ctx.clone();
         let context = context
             .with_async_logs(move || {
-                let mut journal = journal.lock().unwrap_or_else(|e| e.into_inner());
+                let mut journal = journal.lock().unwrap_or_else(|error| error.into_inner());
                 if journal.flush() {
                     repaint.request_repaint_after(UI_REFRESH_INTERVAL);
                 }
@@ -301,31 +305,7 @@ impl Job {
         ctx: &egui::Context,
         reboot_required: bool,
     ) -> Result<(Self, PathBuf)> {
-        let directory = zalivka::storage::log_directory()?;
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let name = format!("{}-{stamp}", action.log_name());
-        let path = directory.join(format!("{name}.log"));
-        let transcript = directory.join(format!("{name}.jsonl"));
-        setup.validate(action)?;
-        let log = File::options().write(true).create_new(true).open(&path)?;
-        let mut journal = Journal::new(log);
-        let record = Record::new(
-            Level::Info,
-            "session",
-            format!(
-                "Starting: {}; Zalivka {}{}",
-                action.title(),
-                zalivka::VERSION,
-                if setup.ecid.is_empty() {
-                    String::new()
-                } else {
-                    format!("; ECID: {}", setup.ecid)
-                }
-            ),
-        );
-        journal.record(record);
-        journal.flush();
-        let journal = Arc::new(Mutex::new(journal));
+        let (journal, path, transcript) = create_journal(action, &setup)?;
         let (context, completion) = Self::worker_context(id, &journal, tx, ctx, reboot_required)?;
         let job = Self::new(id, action, context.clone(), journal.clone());
         let started = job.started;
@@ -339,12 +319,10 @@ impl Job {
                         setup.run(action, &transcript)
                     }))
                     .unwrap_or_else(|panic| {
-                        let message = panic
-                            .downcast_ref::<String>()
-                            .map(String::as_str)
-                            .or_else(|| panic.downcast_ref::<&str>().copied())
-                            .unwrap_or("unknown panic");
-                        Err(anyhow::anyhow!("Operation thread: {message}"))
+                        Err(anyhow::anyhow!(
+                            "Operation thread: {}",
+                            panic_message(&*panic)
+                        ))
                     });
                     if let Err(error) = &result
                         && !context.cancelled()
@@ -353,8 +331,9 @@ impl Job {
                     }
                     result
                 });
-                let mut completion =
-                    std::mem::take(&mut *completion.lock().unwrap_or_else(|e| e.into_inner()));
+                let mut completion = std::mem::take(
+                    &mut *completion.lock().unwrap_or_else(|error| error.into_inner()),
+                );
                 completion.success = result.is_ok();
                 let completion = completion.finish(action, started, &context, &journal);
                 let _ = tx.send(Event::Worker(id, Output::Finished(completion)));
@@ -363,6 +342,46 @@ impl Job {
             .context("starting native operation")?;
         Ok((job, path))
     }
+}
+
+/// Open the operation log and write its starting record.
+fn create_journal(
+    action: Action,
+    setup: &Setup,
+) -> Result<(Arc<Mutex<Journal>>, PathBuf, PathBuf)> {
+    let directory = zalivka::storage::log_directory()?;
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let name = format!("{}-{stamp}", action.log_name());
+    let path = directory.join(format!("{name}.log"));
+    let transcript = directory.join(format!("{name}.jsonl"));
+    setup.validate(action)?;
+    let log = File::options().write(true).create_new(true).open(&path)?;
+    let mut journal = Journal::new(log);
+    let record = Record::new(
+        Level::Info,
+        "session",
+        format!(
+            "Starting: {}; Zalivka {}{}",
+            action.title(),
+            zalivka::VERSION,
+            if setup.ecid.is_empty() {
+                String::new()
+            } else {
+                format!("; ECID: {}", setup.ecid)
+            }
+        ),
+    );
+    journal.record(record);
+    journal.flush();
+    Ok((Arc::new(Mutex::new(journal)), path, transcript))
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("unknown panic")
 }
 
 impl Drop for Job {
@@ -377,7 +396,7 @@ impl Completion {
     fn observe(&mut self, event: &progress::Event) {
         match event {
             progress::Event::ProvisioningWarning { message } => {
-                self.warning = Some(message.clone())
+                self.warning = Some(message.clone());
             }
             progress::Event::RebootRequired => self.reboot_required = true,
             _ => {}
@@ -405,7 +424,11 @@ impl Completion {
             self.journal_error.get_or_insert_with(|| error.to_string());
         }
         self.cancelled = context.cancelled();
-        if let Some(error) = journal.lock().unwrap_or_else(|e| e.into_inner()).error() {
+        if let Some(error) = journal
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .error()
+        {
             self.journal_error.get_or_insert_with(|| error.clone());
         }
     }
