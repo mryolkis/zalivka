@@ -1,14 +1,22 @@
-//! Property-list framing used by restored (big-endian length, then XML/binary plist).
+//! Property-list framing used by restored and FDR.
+//!
+//! Restored prefixes each plist with a big-endian byte length. FDR uses the same
+//! binary-plist body with a little-endian length. ASR instead sends unframed XML
+//! whose root element ends the message. All paths share the same depth, size and
+//! canonical-form checks; nothing here trusts a length supplied by the device.
 use anyhow::{Context, Result, bail, ensure};
 use plist::{Dictionary, Value};
 use quick_xml::{Reader, Writer, events::Event};
 use serde::de::Error as _;
 use std::io::{BufRead, Read, Write};
 
+/// Upper bound for one plist message, in bytes, on both directions.
 pub const MAX_PLIST: usize = 64 * 1024 * 1024;
+const MAX_PLIST_DEPTH: usize = 128;
+const MAX_XML_DEPTH: usize = 256;
+const LENGTH_BYTES: usize = 4;
 
-/// Decode XML, binary or ASCII once, checking depth before the Value builder
-/// receives each collection event.
+/// Decode XML, binary or ASCII with a depth limit applied while streaming.
 pub(crate) fn decode_plist(bytes: &[u8]) -> Result<Value> {
     use plist::stream::{Event as PlistEvent, Reader as PlistReader};
     let mut depth = 0usize;
@@ -17,7 +25,7 @@ pub(crate) fn decode_plist(bytes: &[u8]) -> Result<Value> {
         match &event {
             PlistEvent::StartArray(_) | PlistEvent::StartDictionary(_) => {
                 depth += 1;
-                if depth > 128 {
+                if depth > MAX_PLIST_DEPTH {
                     return Err(plist::Error::custom("plist nested too deeply"));
                 }
             }
@@ -34,7 +42,12 @@ pub(crate) fn decode_plist(bytes: &[u8]) -> Result<Value> {
 }
 
 pub fn dict(items: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Value {
-    Value::Dictionary(items.into_iter().map(|(k, v)| (k.into(), v)).collect())
+    Value::Dictionary(
+        items
+            .into_iter()
+            .map(|(key, value)| (key.into(), value))
+            .collect(),
+    )
 }
 
 pub(crate) fn copy_keys(target: &mut Dictionary, source: &Dictionary, keys: &[&str]) {
@@ -45,16 +58,18 @@ pub(crate) fn copy_keys(target: &mut Dictionary, source: &Dictionary, keys: &[&s
     }));
 }
 
-pub fn get<'a>(v: &'a Value, path: &[&str]) -> Result<&'a Value> {
-    path.iter().try_fold(v, |v, key| {
-        v.as_dictionary()
-            .and_then(|d| d.get(key))
-            .with_context(|| format!("missing plist key {}", path.join(".")))
-    })
+/// Look up a required value.
+pub fn get<'a>(value: &'a Value, path: &[&str]) -> Result<&'a Value> {
+    walk(value, path)?.with_context(|| format!("missing plist key {}", path.join(".")))
 }
 
-/// Missing keys are optional; a present value with the wrong shape is an error.
-pub fn optional<'a>(mut value: &'a Value, path: &[&str]) -> Result<Option<&'a Value>> {
+/// Look up an optional value. A missing key is `None`; a present value with the
+/// wrong shape is still an error, so callers cannot silently treat it as absent.
+pub fn optional<'a>(value: &'a Value, path: &[&str]) -> Result<Option<&'a Value>> {
+    walk(value, path)
+}
+
+fn walk<'a>(mut value: &'a Value, path: &[&str]) -> Result<Option<&'a Value>> {
     for key in path {
         let fields = value.as_dictionary().with_context(|| {
             format!("expected plist dictionary while reading {}", path.join("."))
@@ -77,22 +92,18 @@ pub fn optional_boolean(value: &Value, path: &[&str]) -> Result<Option<bool>> {
         .transpose()
 }
 
-pub fn string<'a>(v: &'a Value, path: &[&str]) -> Result<&'a str> {
-    get(v, path)?.as_string().context("expected plist string")
+pub fn string<'a>(value: &'a Value, path: &[&str]) -> Result<&'a str> {
+    get(value, path)?
+        .as_string()
+        .context("expected plist string")
 }
 
-/// Data requests use DataType; image key channels also accept a direct MsgType.
-/// A present but malformed DataType must not fall back to another interpretation.
+/// A data request can name its payload through `DataType`, through a direct
+/// `MsgType`, or through a data-request envelope wrapping `DataType`.
 pub(crate) fn data_type(message: &Value) -> Result<&str> {
     let fields = dictionary(message)?;
-    let name = fields
-        .get("DataType")
-        .map(|value| value.as_string().context("invalid DataType"))
-        .transpose()?;
-    let envelope = fields
-        .get("MsgType")
-        .map(|value| value.as_string().context("invalid MsgType"))
-        .transpose()?;
+    let name = optional_string(fields.get("DataType"), "DataType")?;
+    let envelope = optional_string(fields.get("MsgType"), "MsgType")?;
     match (name, envelope) {
         (Some(name), Some("DataRequestMsg" | "AsyncDataRequestMsg") | None) => Ok(name),
         (Some(name), Some(kind)) => {
@@ -110,7 +121,13 @@ pub(crate) fn data_type(message: &Value) -> Result<&str> {
     }
 }
 
-/// A missing or zero service port uses the caller's protocol-specific default.
+fn optional_string<'a>(value: Option<&'a Value>, name: &str) -> Result<Option<&'a str>> {
+    value
+        .map(|value| value.as_string().with_context(|| format!("invalid {name}")))
+        .transpose()
+}
+
+/// A missing or zero service port means the caller's protocol default.
 pub fn data_port(message: &Value, default: u16) -> Result<u16> {
     let port = dictionary(message)?
         .get("DataPort")
@@ -119,87 +136,113 @@ pub fn data_port(message: &Value, default: u16) -> Result<u16> {
     Ok(port.filter(|port| *port != 0).unwrap_or(default))
 }
 
-pub fn number(v: &Value) -> Result<u64> {
-    if let Some(n) = v.as_unsigned_integer() {
-        return Ok(n);
+pub fn number(value: &Value) -> Result<u64> {
+    if let Some(number) = value.as_unsigned_integer() {
+        return Ok(number);
     }
-    if let Some(s) = v.as_string() {
-        let (digits, radix) = if let Some(s) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
-        {
-            (s, 16)
-        } else {
-            (s, 10)
-        };
-        ensure!(
-            !digits.is_empty()
-                && digits.bytes().all(|byte| if radix == 16 {
-                    byte.is_ascii_hexdigit()
-                } else {
-                    byte.is_ascii_digit()
-                }),
-            "invalid unsigned plist integer"
-        );
-        return u64::from_str_radix(digits, radix).context("plist integer overflow");
-    }
-    bail!("expected plist integer")
+    let text = value.as_string().context("expected plist integer")?;
+    let (digits, radix) = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => (hex, 16),
+        None => (text, 10),
+    };
+    let digit = match radix {
+        16 => |byte: u8| byte.is_ascii_hexdigit(),
+        _ => |byte: u8| byte.is_ascii_digit(),
+    };
+    ensure!(
+        !digits.is_empty() && digits.bytes().all(digit),
+        "invalid unsigned plist integer"
+    );
+    u64::from_str_radix(digits, radix).context("plist integer overflow")
 }
 
-pub fn xml(v: &Value) -> Result<Vec<u8>> {
+pub fn xml(value: &Value) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    v.to_writer_xml(LimitedWriter {
+    value.to_writer_xml(LimitedWriter {
         bytes: &mut out,
         remaining: MAX_PLIST,
     })?;
     Ok(out)
 }
 
-pub fn send(w: &mut impl Write, v: &Value) -> Result<()> {
-    crate::logging::plist("plist", "TX XML", v);
-    let mut bytes = Vec::new();
-    append_frame(&mut bytes, |out| v.to_writer_xml(out), u32::to_be_bytes)?;
-    send_frame(w, &bytes)
+pub fn send(output: &mut impl Write, value: &Value) -> Result<()> {
+    crate::logging::plist("plist", "TX XML", value);
+    write_frame(output, value, Endian::Big, Encoding::Xml)
 }
 
-pub fn send_binary(w: &mut impl Write, v: &Value) -> Result<()> {
-    crate::logging::plist("plist", "TX binary BE", v);
-    let mut bytes = Vec::new();
-    append_binary(&mut bytes, v)?;
-    send_frame(w, &bytes)
+pub fn send_binary(output: &mut impl Write, value: &Value) -> Result<()> {
+    crate::logging::plist("plist", "TX binary BE", value);
+    write_frame(output, value, Endian::Big, Encoding::Binary)
 }
 
-/// FDR uses the same binary plist body with a little-endian frame length.
-pub(crate) fn send_binary_le(w: &mut impl Write, v: &Value) -> Result<()> {
-    crate::logging::plist("plist", "TX binary LE", v);
-    let mut bytes = Vec::new();
-    append_frame(&mut bytes, |out| v.to_writer_binary(out), u32::to_le_bytes)?;
-    send_frame(w, &bytes)
+/// FDR uses the restored binary-plist body with a little-endian frame length.
+pub(crate) fn send_binary_le(output: &mut impl Write, value: &Value) -> Result<()> {
+    crate::logging::plist("plist", "TX binary LE", value);
+    write_frame(output, value, Endian::Little, Encoding::Binary)
 }
 
-/// Append a complete frame directly to an existing batch. Offsets inside a
-/// binary plist stay relative to its own writer, not the enclosing batch.
-pub(crate) fn append_binary(bytes: &mut Vec<u8>, v: &impl serde::Serialize) -> Result<()> {
-    append_frame(
-        bytes,
-        |out| plist::to_writer_binary(out, v),
-        u32::to_be_bytes,
-    )
+/// Append a complete frame to an existing batch. Offsets inside a binary plist
+/// stay relative to its own writer, never to the enclosing batch.
+pub(crate) fn append_binary(bytes: &mut Vec<u8>, value: &impl serde::Serialize) -> Result<()> {
+    append_frame(bytes, u32::to_be_bytes, |out| {
+        plist::to_writer_binary(out, value)
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Endian {
+    Big,
+    Little,
+}
+
+#[derive(Clone, Copy)]
+enum Encoding {
+    Xml,
+    Binary,
+}
+
+impl Endian {
+    fn prefix(self) -> fn(u32) -> [u8; 4] {
+        match self {
+            Self::Big => u32::to_be_bytes,
+            Self::Little => u32::to_le_bytes,
+        }
+    }
+}
+
+fn write_frame(
+    output: &mut impl Write,
+    value: &Value,
+    endian: Endian,
+    encoding: Encoding,
+) -> Result<()> {
+    let mut bytes = Vec::new();
+    append_frame(&mut bytes, endian.prefix(), |out| match encoding {
+        Encoding::Xml => value.to_writer_xml(out),
+        Encoding::Binary => plist::to_writer_binary(out, value),
+    })?;
+    crate::log!(Trace, "plist", "TX frame={} B", bytes.len());
+    // One call keeps the length and body in a single USB transfer.
+    output.write_all(&bytes)?;
+    output.flush()?;
+    Ok(())
 }
 
 fn append_frame(
     bytes: &mut Vec<u8>,
-    encode: impl FnOnce(&mut LimitedWriter<'_>) -> std::result::Result<(), plist::Error>,
     length_prefix: fn(u32) -> [u8; 4],
+    encode: impl FnOnce(&mut LimitedWriter<'_>) -> std::result::Result<(), plist::Error>,
 ) -> Result<()> {
     let start = bytes.len();
-    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(&[0; LENGTH_BYTES]);
     let result = (|| {
         encode(&mut LimitedWriter {
             bytes,
             remaining: MAX_PLIST,
         })?;
-        let length = bytes.len() - start - 4;
+        let length = bytes.len() - start - LENGTH_BYTES;
         ensure!(length <= MAX_PLIST, "outgoing plist too large");
-        bytes[start..start + 4].copy_from_slice(&length_prefix(length as u32));
+        bytes[start..start + LENGTH_BYTES].copy_from_slice(&length_prefix(length as u32));
         Ok(())
     })();
     if result.is_err() {
@@ -208,8 +251,8 @@ fn append_frame(
     result
 }
 
-/// Enforce the frame limit during encoding, before a large value can grow the
-/// output allocation beyond the protocol's bound.
+/// Enforce the frame limit while encoding, before a value can grow the output
+/// allocation past the protocol's bound.
 struct LimitedWriter<'a> {
     bytes: &'a mut Vec<u8>,
     remaining: usize,
@@ -230,49 +273,44 @@ impl Write for LimitedWriter<'_> {
     }
 }
 
-fn send_frame(w: &mut impl Write, bytes: &[u8]) -> Result<()> {
-    crate::log!(Trace, "plist", "TX frame={} B", bytes.len());
-    // A separate four-byte write becomes a separate USB transfer on MuxStream.
-    w.write_all(bytes)?;
-    w.flush()?;
-    Ok(())
-}
-
-/// A timeout is optional only when no byte of the next frame has arrived.
-pub fn try_receive(r: &mut impl Read) -> Result<Option<Value>> {
-    let mut prefix = [0; 4];
-    match r.read_exact(&mut prefix[..1]) {
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Ok(None),
+/// Read a message only when at least one byte is already available. A timeout
+/// before the first byte means "nothing yet"; a timeout mid-frame is an error.
+pub fn try_receive(input: &mut impl Read) -> Result<Option<Value>> {
+    let mut length = [0; LENGTH_BYTES];
+    match input.read_exact(&mut length[..1]) {
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return Ok(None),
         result => result.context("service disconnected during optional message read")?,
-    };
-    r.read_exact(&mut prefix[1..])?;
-    receive_body(r, u32::from_be_bytes(prefix)).map(Some)
+    }
+    input.read_exact(&mut length[1..])?;
+    receive_body(input, u32::from_be_bytes(length)).map(Some)
 }
 
-pub fn receive(r: &mut impl Read) -> Result<Value> {
-    let mut len = [0; 4];
-    r.read_exact(&mut len).context("reading plist length")?;
-    receive_body(r, u32::from_be_bytes(len))
+pub fn receive(input: &mut impl Read) -> Result<Value> {
+    let mut length = [0; LENGTH_BYTES];
+    input
+        .read_exact(&mut length)
+        .context("reading plist length")?;
+    receive_body(input, u32::from_be_bytes(length))
 }
 
-pub(crate) fn receive_body(r: &mut impl Read, len: u32) -> Result<Value> {
-    let len = len as usize;
+pub(crate) fn receive_body(input: &mut impl Read, length: u32) -> Result<Value> {
+    let length = length as usize;
     ensure!(
-        (1..=MAX_PLIST).contains(&len),
-        "invalid plist frame length {len}"
+        (1..=MAX_PLIST).contains(&length),
+        "invalid plist frame length {length}"
     );
-    let mut buf = vec![0; len];
-    r.read_exact(&mut buf).context("reading plist body")?;
-    let value = decode_plist(&buf)?;
-    crate::log!(Trace, "plist", "RX frame={len} B");
+    let mut body = vec![0; length];
+    input.read_exact(&mut body).context("reading plist body")?;
+    let value = decode_plist(&body)?;
+    crate::log!(Trace, "plist", "RX frame={length} B");
     crate::logging::plist("plist", "RX", &value);
     Ok(value)
 }
 
-/// ASR uses unframed XML. Keep the caller's buffer across messages so read-ahead
+/// ASR sends unframed XML. Keep the caller's buffer across messages so read-ahead
 /// remains available for the next plist or raw payload.
-pub fn receive_xml(r: &mut impl BufRead) -> Result<Value> {
-    let mut reader = Reader::from_reader(r.take(MAX_PLIST as u64));
+pub fn receive_xml(input: &mut impl BufRead) -> Result<Value> {
+    let mut reader = Reader::from_reader(input.take(MAX_PLIST as u64));
     let mut writer = Writer::new(Vec::new());
     let mut buffer = Vec::new();
     let mut depth = 0usize;
@@ -287,7 +325,7 @@ pub fn receive_xml(r: &mut impl BufRead) -> Result<Value> {
                     "ASR XML root is not plist"
                 );
                 depth += 1;
-                ensure!(depth <= 256, "ASR XML nested too deeply");
+                ensure!(depth <= MAX_XML_DEPTH, "ASR XML nested too deeply");
             }
             Event::End(_) => {
                 depth = depth
@@ -300,9 +338,9 @@ pub fn receive_xml(r: &mut impl BufRead) -> Result<Value> {
             Event::Eof => bail!("truncated ASR XML or message exceeds {MAX_PLIST} bytes"),
             _ => {}
         }
-        let finished = depth == 0 && matches!(event, Event::End(_) | Event::Empty(_));
+        let complete = depth == 0 && matches!(event, Event::End(_) | Event::Empty(_));
         writer.write_event(event)?;
-        if finished {
+        if complete {
             let value = Value::from_reader_xml(writer.into_inner().as_slice())
                 .context("decoding ASR plist")?;
             crate::logging::plist("asr:plist", "RX", &value);
@@ -312,8 +350,8 @@ pub fn receive_xml(r: &mut impl BufRead) -> Result<Value> {
     }
 }
 
-pub fn dictionary(v: &Value) -> Result<&Dictionary> {
-    v.as_dictionary().context("expected plist dictionary")
+pub fn dictionary(value: &Value) -> Result<&Dictionary> {
+    value.as_dictionary().context("expected plist dictionary")
 }
 
 #[cfg(test)]
