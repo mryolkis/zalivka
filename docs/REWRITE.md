@@ -98,7 +98,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 14 | `app` (CLI + operations) | done |
 | 15 | `gui` (+ localization) | done (all gui modules and localization rewritten) |
 | — | cross-cutting `logging`/`progress` | done |
-| 16 | Cleanup: Cargo dependencies, dead cfg, docs, final full verification | in progress (structural pass next) |
+| 16 | Cleanup: Cargo dependencies, dead cfg, docs, final full verification | in progress: GUI log-dir injection, `ureq` merge and remaining files done; docs/final audit next |
 
 ## Progress log
 
@@ -163,6 +163,8 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `aca05a3` | `gui.rs` rewrite (GUI domain complete) | 552 tests, clippy clean |
 | `9bd9895` | `logging` + `progress` rewrites | 552 tests, clippy clean |
 | `7ba1945` | `proxy/macos` rewrite (all production files now rewritten) | 552 tests, clippy clean; macOS compile-only elsewhere |
+| `421a468` | cleanup: GUI journal-dir injection + `ureq` feature merge | 552 tests, clippy clean, `--no-default-features` clean |
+| `fe8db25` | `mux/channel` + `main` rewrites (every src file now differs from `pre-rewrite`) | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
