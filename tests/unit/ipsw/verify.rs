@@ -70,7 +70,7 @@ fn a_valid_outer_digest_does_not_hide_a_corrupt_bundle_payload() {
             bytes.len() as u64,
             &mut [0; 64],
         );
-        let prepared = firmware::verify_plist_bundle(&bytes);
+        let prepared = verify_plist_bundle(&bytes);
         assert_eq!(result.is_ok(), prepared.is_ok(), "corrupt={corrupt}");
         assert_eq!(result.is_ok(), !corrupt);
     }
@@ -209,8 +209,8 @@ fn streamed_verification_matches_full_verification_for_nested_late_ftab() {
             interrupted: false,
         };
         assert_eq!(
-            firmware::payload_ranges_from(&mut index, bytes.len() as u64).unwrap(),
-            firmware::payload_ranges(&bytes, bytes.len() as u64).unwrap()
+            payload_ranges_from(&mut index, bytes.len() as u64).unwrap(),
+            crate::ipsw::payload_ranges(&bytes, bytes.len() as u64).unwrap()
         );
         let expected = Sha256::digest(&payload).to_vec();
         let full = DigestInput::variants(&bytes, bytes.len() as u64, None).unwrap();

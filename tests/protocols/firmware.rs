@@ -579,11 +579,11 @@ fn ftab_index_preserves_payload_ranges_and_rejects_bad_offsets() {
     let bytes = table.encode();
     // A streaming reader has the complete index, without the payload bytes.
     assert_eq!(
-        zalivka::firmware::payload_ranges(&bytes[..80], bytes.len() as u64).unwrap(),
+        zalivka::ipsw::payload_ranges(&bytes[..80], bytes.len() as u64).unwrap(),
         [80..83, 83..85]
     );
     let rejects = |bad: &[u8]| {
-        assert!(zalivka::firmware::payload_ranges(bad, bad.len() as u64).is_err());
+        assert!(zalivka::ipsw::payload_ranges(bad, bad.len() as u64).is_err());
     };
     let mut bad = bytes.clone();
     bad[52..56].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -603,7 +603,7 @@ fn ftab_index_preserves_payload_ranges_and_rejects_bad_offsets() {
 #[test]
 fn container_indexes_must_fit_the_declared_file_even_without_payloads() {
     use crate::test_support::Ftab;
-    use zalivka::firmware::payload_ranges;
+    use zalivka::ipsw::payload_ranges;
     let mut header = [0; 48];
     header[36..40].copy_from_slice(b"ftab");
     let table = Ftab {
@@ -631,7 +631,7 @@ fn container_indexes_must_fit_the_declared_file_even_without_payloads() {
 
 #[test]
 fn nested_payloads_keep_their_parsed_tags_when_layout_entries_change_order() {
-    use zalivka::firmware::payload_ranges;
+    use zalivka::ipsw::payload_ranges;
     let mut layout = centauri_table(vec![(*b"msww", vec![], 0)]);
     layout[52..56].copy_from_slice(&640u32.to_le_bytes());
     layout[56..60].copy_from_slice(&0x20_0000u32.to_le_bytes());
@@ -807,7 +807,7 @@ fn centauri_layout_index_is_hashable_without_treating_device_addresses_as_file_o
     layout[52..56].copy_from_slice(&640u32.to_le_bytes());
     layout[56..60].copy_from_slice(&0x20_0000u32.to_le_bytes());
     let original = centauri_table(vec![(*b"rkos", vec![1, 2, 3], 0), (*b"2ftb", layout, 0)]);
-    let ranges = zalivka::firmware::payload_ranges(&original, original.len() as u64).unwrap();
+    let ranges = zalivka::ipsw::payload_ranges(&original, original.len() as u64).unwrap();
     assert_eq!(ranges.len(), 2);
     let firmware = &original[ranges[0].start as usize..ranges[0].end as usize];
     assert_eq!(firmware, &[1, 2, 3]);

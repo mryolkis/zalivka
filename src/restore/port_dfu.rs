@@ -241,7 +241,7 @@ fn payloads(bytes: &[u8], board: u64, revision: u64) -> Result<Payloads<'_>> {
         "invalid UARP index or metadata range"
     );
     // Reuse the container validator for row sizes, payload bounds and overlap.
-    crate::firmware::payload_ranges(bytes, bytes.len() as u64)?;
+    crate::ipsw::payload_ranges(bytes, bytes.len() as u64)?;
     let archive = wire::decode_plist(&bytes[metadata_offset..])?;
     let metadata = unarchive(&archive)?;
     let mut selection = None;

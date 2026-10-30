@@ -3,7 +3,8 @@
 //! A BuildManifest digest may describe the whole file, the same file with the
 //! IM4P type replaced, or one payload record inside an FTAB/UARP container. The
 //! verifier tries only the inputs declared for that component.
-use crate::{checksum::hasher, firmware, img4};
+use super::containers;
+use crate::{checksum::hasher, img4};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::digest::DynDigest;
 
@@ -19,7 +20,7 @@ impl DigestInput {
         let mut inputs = vec![Self::File];
         inputs.extend(Self::retag(prefix, tag));
         inputs.extend(
-            firmware::payload_ranges(prefix, length)?
+            containers::payload_ranges(prefix, length)?
                 .into_iter()
                 .map(|range| Self::Payload(range.start, range.end)),
         );

@@ -1022,7 +1022,7 @@ fn empty_components_have_the_same_digest_in_memory_and_streaming() {
 #[test]
 fn ftab_and_uarp_manifest_digests_validate_inner_payloads_across_stream_chunks() {
     use crate::test_support::Ftab;
-    use zalivka::firmware::payload_ranges;
+    use zalivka::ipsw::payload_ranges;
     let payload = vec![0x35; 3 * 1024 * 1024 + 17];
     let mut header = [0; 48];
     header[32..36].copy_from_slice(b"rkos");

@@ -1,9 +1,11 @@
+mod containers;
 mod digest;
 mod identity;
 mod stream;
 mod verify;
 use crate::{img4, wire};
 use anyhow::{Context, Result, ensure};
+pub use containers::payload_ranges;
 pub use digest::verify_digest;
 pub use identity::{Behavior, Identity, IdentitySummary};
 use plist::Value;
@@ -178,8 +180,8 @@ impl Ipsw {
         id.payload_type(name)?;
         let expected = component_digest(entry)?
             .context("namespace updater requires a nonempty supported manifest Digest")?;
-        let data = self.read_limited(id.path(name)?, crate::firmware::MAX_PLIST_BUNDLE)?;
-        let digests = crate::firmware::verify_plist_bundle(&data)
+        let data = self.read_limited(id.path(name)?, containers::MAX_PLIST_BUNDLE)?;
+        let digests = containers::verify_plist_bundle(&data)
             .with_context(|| format!("checking component {name} payload bundle"))?;
         ensure!(
             !digests.is_empty(),
@@ -199,7 +201,7 @@ impl Ipsw {
         let data = self.read(id.path(name)?)?;
         if let Some(expected) = digest {
             let inputs = digest::DigestInput::variants(&data, data.len() as u64, tag)?;
-            let digests = crate::firmware::verify_plist_bundle(&data)
+            let digests = containers::verify_plist_bundle(&data)
                 .with_context(|| format!("checking component {name} payload bundle"))?;
             if let Err(error) =
                 digest::verify_component_digest(inputs, |input| input.matches(&data, expected))

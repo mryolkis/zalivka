@@ -1,10 +1,13 @@
 //! Collect manifest requirements, stream ZIP entries and report verified digests.
 use super::{
     Ipsw, component_digest, component_path,
+    containers::{
+        MAX_PLIST_BUNDLE, container_prefix, payload_ranges_from, plist_prefix, verify_plist_bundle,
+    },
     digest::{DigestInput, verify_component_digest},
     stream::read_chunk,
 };
-use crate::{checksum::hasher, firmware, img4, wire};
+use crate::{checksum::hasher, img4, wire};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{
@@ -124,15 +127,14 @@ impl EntryDigests {
         let mut n =
             read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
         let aea = buffer[..n].starts_with(b"AEA1");
-        let mut bundle =
-            (!self.components.is_empty() && firmware::plist_prefix(&buffer[..n])).then(Vec::new);
+        let mut bundle = (!self.components.is_empty() && plist_prefix(&buffer[..n])).then(Vec::new);
         ensure!(
-            bundle.is_none() || length <= firmware::MAX_PLIST_BUNDLE,
+            bundle.is_none() || length <= MAX_PLIST_BUNDLE,
             "plist payload bundle exceeds memory limit: {name}"
         );
         // ZIP readers cannot seek into deflated entries. Retain only firmware
         // containers on disk so nested indexes can be read at any file offset.
-        let mut container = if firmware::container_prefix(&buffer[..n]) {
+        let mut container = if container_prefix(&buffer[..n]) {
             crate::storage::require(&std::env::temp_dir(), length)?;
             Some(tempfile::tempfile()?)
         } else {
@@ -167,7 +169,7 @@ impl EntryDigests {
             }
             if let Some(bytes) = &mut bundle {
                 ensure!(
-                    bytes.len() as u64 + n as u64 <= firmware::MAX_PLIST_BUNDLE,
+                    bytes.len() as u64 + n as u64 <= MAX_PLIST_BUNDLE,
                     "plist payload bundle exceeds memory limit: {name}"
                 );
                 bytes.extend_from_slice(&buffer[..n]);
@@ -181,7 +183,7 @@ impl EntryDigests {
         }
         ensure!(verified.bytes == length, "truncated ZIP entry {name}");
         if let Some(file) = &mut container {
-            for range in firmware::payload_ranges_from(file, length)? {
+            for range in payload_ranges_from(file, length)? {
                 let input = DigestInput::Payload(range.start, range.end);
                 inputs.push(input);
                 for (component, _) in &checks {
@@ -209,7 +211,7 @@ impl EntryDigests {
         // Verify all payload records even when an outer-file digest matches.
         let bundle_digests = bundle
             .as_ref()
-            .map(|bytes| firmware::verify_plist_bundle(bytes))
+            .map(|bytes| verify_plist_bundle(bytes))
             .transpose()
             .with_context(|| format!("checking payload bundle {name}"))?
             .unwrap_or_default();
