@@ -6,30 +6,12 @@ use plist::Value;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-fn recovery_variant(value: &Value) -> Result<Option<&str>> {
-    let info = wire::dictionary(wire::get(value, &["Info"])?)?;
-    let mut selected = None;
-    for key in ["MacOSVariant", "RecoveryVariant"] {
-        if let Some(value) = info.get(key) {
-            let variant = value
-                .as_string()
-                .filter(|value| !value.is_empty())
-                .with_context(|| format!("invalid recoveryOS variant name in {key}"))?;
-            ensure!(
-                selected.is_none_or(|previous| previous == variant),
-                "conflicting MacOSVariant and RecoveryVariant"
-            );
-            selected = Some(variant);
-        }
-    }
-    Ok(selected)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Behavior {
     Erase,
     Update,
 }
+
 impl Behavior {
     pub fn name(self) -> &'static str {
         match self {
@@ -59,7 +41,15 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// ROM DFU can omit SDOM. Signing obtains it from the matching firmware
+    pub fn new(index: usize, value: Value) -> Self {
+        Self {
+            index,
+            value,
+            file_types: HashMap::new(),
+        }
+    }
+
+    /// ROM DFU can omit SDOM. Signing takes it from the matching firmware
     /// identity, as Apple's request format specifies, and checks any USB value.
     pub fn device_parameters(&self, device: &DeviceInfo) -> Result<DeviceInfo> {
         ensure!(
@@ -85,24 +75,19 @@ impl Identity {
         Ok(device)
     }
 
-    pub fn new(index: usize, value: Value) -> Self {
-        Self {
-            index,
-            value,
-            file_types: HashMap::new(),
-        }
-    }
-
     pub fn manifest(&self) -> Result<&plist::Dictionary> {
         wire::dictionary(wire::get(&self.value, &["Manifest"])?)
     }
+
     pub fn info(&self, key: &str) -> Result<&Value> {
         wire::get(&self.value, &["Info", key])
     }
+
     pub fn path(&self, name: &str) -> Result<&str> {
         component_path(wire::get(&self.value, &["Manifest", name])?)?
             .with_context(|| format!("missing component path {name}"))
     }
+
     pub fn component_by_type(&self, tag: &[u8; 4]) -> Result<Option<&str>> {
         let mut selected = None;
         for name in self.manifest()?.keys() {
@@ -134,6 +119,7 @@ impl Identity {
             )
         })
     }
+
     pub fn is_macos(&self) -> Result<bool> {
         recovery_variant(&self.value)?;
         Ok(wire::optional(&self.value, &["Info", "MacOSVariant"])?.is_some())
@@ -146,6 +132,7 @@ impl Identity {
             value => bail!("invalid restore behavior {value:?}"),
         }
     }
+
     pub fn validate_behavior(&self, behavior: Behavior) -> Result<()> {
         ensure!(
             self.behavior()? == behavior,
@@ -153,6 +140,7 @@ impl Identity {
         );
         Ok(())
     }
+
     pub fn summary(&self) -> Result<IdentitySummary> {
         IdentitySummary::from_value(self.index, &self.value)
     }
@@ -161,32 +149,54 @@ impl Identity {
 impl IdentitySummary {
     fn from_value(index: usize, value: &Value) -> Result<Self> {
         recovery_variant(value)?;
-        let info = |key| wire::get(value, &["Info", key]);
         Ok(Self {
             index,
             chip_id: wire::number(wire::get(value, &["ApChipID"])?)?,
             board_id: wire::number(wire::get(value, &["ApBoardID"])?)?,
-            device_class: info("DeviceClass")?
-                .as_string()
-                .filter(|value| !value.is_empty())
-                .context("invalid DeviceClass")?
-                .into(),
-            variant: info("Variant")?
-                .as_string()
-                .filter(|value| !value.is_empty())
-                .context("invalid Variant")?
-                .into(),
-            restore_behavior: info("RestoreBehavior")?
-                .as_string()
-                .filter(|value| !value.is_empty())
-                .context("invalid RestoreBehavior")?
-                .into(),
+            device_class: text(value, "DeviceClass")?,
+            variant: text(value, "Variant")?,
+            restore_behavior: text(value, "RestoreBehavior")?,
             macos_variant: wire::optional(value, &["Info", "MacOSVariant"])?
                 .and_then(Value::as_string)
                 .map(str::to_owned),
             components: wire::dictionary(wire::get(value, &["Manifest"])?)?.len(),
         })
     }
+}
+
+fn text(value: &Value, key: &str) -> Result<String> {
+    wire::get(value, &["Info", key])?
+        .as_string()
+        .filter(|text| !text.is_empty())
+        .with_context(|| format!("invalid {key}"))
+        .map(str::to_owned)
+}
+
+/// The companion recoveryOS variant declared by an identity, if any.
+fn recovery_variant(value: &Value) -> Result<Option<&str>> {
+    let info = wire::dictionary(wire::get(value, &["Info"])?)?;
+    let mut selected = None;
+    for key in ["MacOSVariant", "RecoveryVariant"] {
+        if let Some(value) = info.get(key) {
+            let variant = value
+                .as_string()
+                .filter(|value| !value.is_empty())
+                .with_context(|| format!("invalid recoveryOS variant name in {key}"))?;
+            ensure!(
+                selected.is_none_or(|previous| previous == variant),
+                "conflicting MacOSVariant and RecoveryVariant"
+            );
+            selected = Some(variant);
+        }
+    }
+    Ok(selected)
+}
+
+/// A manifest identity that matches the requested hardware and behavior.
+struct Candidate<'a> {
+    index: usize,
+    value: &'a Value,
+    summary: IdentitySummary,
 }
 
 impl Ipsw {
@@ -239,12 +249,9 @@ impl Ipsw {
         let Some(variant) = recovery_variant(&restore.value)? else {
             return Ok(None);
         };
-        let identity = self
-            .matching_identity(device, None, Some(variant), Behavior::Erase)?
-            .with_context(|| {
-                format!("declared recoveryOS variant {variant:?} is absent from IPSW")
-            })?;
-        Ok(Some(identity))
+        self.matching_identity(device, None, Some(variant), Behavior::Erase)?
+            .map(Some)
+            .with_context(|| format!("declared recoveryOS variant {variant:?} is absent from IPSW"))
     }
 
     fn matching_identity(
@@ -254,8 +261,8 @@ impl Ipsw {
         variant: Option<&str>,
         behavior: Behavior,
     ) -> Result<Option<Identity>> {
-        let mut matches = Vec::new();
         let (chip, board) = device.hardware_ids();
+        let mut matches = Vec::new();
         for (i, value) in self.identity_values() {
             let summary = IdentitySummary::from_value(i, value)?;
             if summary.chip_id != u64::from(chip) || summary.board_id != u64::from(board) {
@@ -264,24 +271,26 @@ impl Ipsw {
             if index.is_some_and(|index| summary.index != index) {
                 continue;
             }
-            if let Some(variant) = variant
-                && summary.variant != variant
-            {
+            if variant.is_some_and(|variant| summary.variant != variant) {
                 continue;
             }
             if summary.restore_behavior != behavior.name() {
                 continue;
             }
-            matches.push((i, value, summary));
+            matches.push(Candidate {
+                index: i,
+                value,
+                summary,
+            });
         }
+        // A restore identity can explicitly name its companion variant. That
+        // referenced identity is not a competing DFU entry point.
         if index.is_none() && variant.is_none() && matches.len() > 1 {
-            // A restore identity can explicitly name its companion variant.
-            // That referenced identity is not a competing DFU entry point.
             let referenced = matches
                 .iter()
-                .filter_map(|(_, value, _)| recovery_variant(value).transpose())
+                .filter_map(|candidate| recovery_variant(candidate.value).transpose())
                 .collect::<Result<HashSet<_>>>()?;
-            matches.retain(|(_, _, summary)| !referenced.contains(summary.variant.as_str()));
+            matches.retain(|candidate| !referenced.contains(candidate.summary.variant.as_str()));
             ensure!(
                 !matches.is_empty(),
                 "matching {} build identities form a variant reference cycle; specify --identity",
@@ -289,17 +298,20 @@ impl Ipsw {
             );
         }
         match matches.len() {
-            1 => {
-                let (index, value, _) = &matches[0];
-                Ok(Some(Identity::new(*index, (*value).clone())))
-            }
             0 => Ok(None),
+            1 => {
+                let candidate = &matches[0];
+                Ok(Some(Identity::new(
+                    candidate.index,
+                    candidate.value.clone(),
+                )))
+            }
             _ => bail!(
                 "ambiguous {} build identities {:?}{}",
                 variant.unwrap_or(behavior.name()),
                 matches
                     .iter()
-                    .map(|(index, _, _)| *index)
+                    .map(|candidate| candidate.index)
                     .collect::<Vec<_>>(),
                 if variant.is_some() {
                     ""
