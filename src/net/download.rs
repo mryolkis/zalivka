@@ -1,13 +1,18 @@
+//! Resumable, checksum-verified firmware downloads.
 use super::{agent_with_body_timeout, fetch, validate_apple_url};
 use anyhow::{Context, Result, ensure};
 use sha2::digest::DynDigest;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 use ureq::http::{Request, Response, StatusCode};
+
+const HASH_BUFFER: usize = 1024 * 1024;
+const WRITE_BUFFER: usize = 4 * 1024 * 1024;
+const PART_SUFFIX: &str = ".part";
 
 pub fn download(url: &str, destination: &Path, expected_sha256: &str) -> Result<()> {
     let expected = crate::device::decode_hex(expected_sha256)?;
@@ -38,19 +43,19 @@ pub fn verify_file(path: &Path, expected: &[u8]) -> Result<()> {
 }
 
 fn hash_file(file: &mut File, hash: &mut dyn DynDigest) -> Result<u64> {
-    let mut buffer = vec![0; 1024 * 1024];
+    let mut buffer = vec![0; HASH_BUFFER];
     let mut total = 0u64;
     let mut progress =
         crate::progress::Progress::new("IPSW verification", Some(file.metadata()?.len()), 0);
     loop {
         crate::progress::check_cancelled()?;
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
             break;
         }
-        hash.update(&buffer[..n]);
-        total += n as u64;
-        progress.advance(n as u64);
+        hash.update(&buffer[..read]);
+        total += read as u64;
+        progress.advance(read as u64);
     }
     progress.finish();
     Ok(total)
@@ -87,16 +92,18 @@ fn retry_download(error: &anyhow::Error, attempts: &mut u8, maximum: u8) -> bool
 }
 
 pub(super) fn retryable_download(error: &anyhow::Error) -> bool {
-    error.chain().any(|e| {
-        e.downcast_ref::<ureq::Error>()
+    error.chain().any(|error| {
+        error
+            .downcast_ref::<ureq::Error>()
             .or_else(|| {
-                e.downcast_ref::<std::io::Error>()?
+                error
+                    .downcast_ref::<std::io::Error>()?
                     .get_ref()?
                     .downcast_ref::<ureq::Error>()
             })
-            .is_some_and(|e| {
+            .is_some_and(|error| {
                 matches!(
-                    e,
+                    error,
                     ureq::Error::Io(_)
                         | ureq::Error::Timeout(_)
                         | ureq::Error::ConnectionFailed
@@ -105,9 +112,9 @@ pub(super) fn retryable_download(error: &anyhow::Error) -> bool {
                         | ureq::Error::StatusCode(408 | 429 | 500 | 502 | 503 | 504)
                 )
             })
-            || e.downcast_ref::<std::io::Error>().is_some_and(|e| {
+            || error.downcast_ref::<std::io::Error>().is_some_and(|error| {
                 matches!(
-                    e.kind(),
+                    error.kind(),
                     std::io::ErrorKind::ConnectionAborted
                         | std::io::ErrorKind::ConnectionReset
                         | std::io::ErrorKind::BrokenPipe
@@ -126,6 +133,7 @@ pub(super) fn firmware_request(url: &str, offset: u64) -> Result<Request<Vec<u8>
     Ok(request.body(Vec::new())?)
 }
 
+/// Download into a locked `.part` file, resuming when the server supports it.
 pub(super) fn download_from(
     destination: &Path,
     expected: &[u8],
@@ -133,12 +141,10 @@ pub(super) fn download_from(
     mut request: impl FnMut(u64) -> Result<Response<ureq::Body>>,
 ) -> Result<()> {
     ensure!(!destination.exists(), "destination already exists");
-    let mut part_name = destination.as_os_str().to_os_string();
-    part_name.push(".part");
-    let part = std::path::PathBuf::from(part_name);
+    let part = part_path(destination);
     let directory = destination
         .parent()
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut download = PartialDownload::open(&part, expected)?;
     // A crash can leave the whole verified file under its temporary name.
@@ -179,8 +185,18 @@ pub(super) fn download_from(
     }
     download.file.sync_all()?;
     crate::progress::check_cancelled()?;
-    // Use a no-replace rename where supported (including Windows exFAT).
-    // Keep the partial available for retry if publication fails.
+    publish(&part, destination)
+}
+
+fn part_path(destination: &Path) -> PathBuf {
+    let mut name = destination.as_os_str().to_os_string();
+    name.push(PART_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Use a no-replace rename where supported (including Windows exFAT).
+/// Keep the partial available for retry if publication fails.
+fn publish(part: &Path, destination: &Path) -> Result<()> {
     let mut partial = tempfile::TempPath::try_from_path(part)?;
     partial.disable_cleanup(true);
     partial
@@ -284,7 +300,7 @@ impl<'a> PartialDownload<'a> {
         let content_length = response
             .headers()
             .get("content-length")
-            .map(|v| decimal(v.to_str()?, "Content-Length"))
+            .map(|value| decimal(value.to_str()?, "Content-Length"))
             .transpose()?;
         ensure!(
             status != StatusCode::OK || !response.headers().contains_key("content-range"),
@@ -306,7 +322,7 @@ impl<'a> PartialDownload<'a> {
             let (start, end, length) = content_range(range)?;
             ensure!(start == self.total, "firmware resume offset mismatch");
             ensure!(
-                content_length.is_none_or(|n| n == end - start + 1),
+                content_length.is_none_or(|length| length == end - start + 1),
                 "firmware Content-Length disagrees with Content-Range"
             );
             (Some(end + 1), Some(length))
@@ -323,21 +339,21 @@ impl<'a> PartialDownload<'a> {
         }
         let mut reader = response.body_mut().as_reader();
         // Coalesce TLS records into disk writes across Windows filesystem bridges.
-        let mut output = std::io::BufWriter::with_capacity(4 * 1024 * 1024, &mut self.file);
-        let mut buffer = vec![0; 1024 * 1024];
+        let mut output = std::io::BufWriter::with_capacity(WRITE_BUFFER, &mut self.file);
+        let mut buffer = vec![0; HASH_BUFFER];
         let mut progress =
             crate::progress::Progress::new("IPSW download", expected_length, self.total);
         let read_error = loop {
             if let Err(error) = crate::progress::check_cancelled() {
                 break Some(error);
             }
-            let n = match reader.read(&mut buffer) {
-                Ok(n) => n,
+            let read = match reader.read(&mut buffer) {
+                Ok(read) => read,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => break Some(error),
             };
-            if n == 0 {
-                break expected_end.filter(|&end| end != self.total).map(|_| {
+            if read == 0 {
+                break expected_end.filter(|end| *end != self.total).map(|_| {
                     std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "truncated firmware download",
@@ -346,16 +362,16 @@ impl<'a> PartialDownload<'a> {
             }
             let next = self
                 .total
-                .checked_add(n as u64)
+                .checked_add(read as u64)
                 .context("firmware size overflow")?;
             ensure!(
                 expected_end.is_none_or(|end| next <= end),
                 "firmware response exceeds its declared range"
             );
-            output.write_all(&buffer[..n])?;
-            self.hash.update(&buffer[..n]);
+            output.write_all(&buffer[..read])?;
+            self.hash.update(&buffer[..read]);
             self.total = next;
-            progress.advance(n as u64);
+            progress.advance(read as u64);
         };
         // Persist the bytes already hashed before the outer loop retries a read.
         output.flush()?;
@@ -387,11 +403,9 @@ fn content_range(value: &str) -> Result<(u64, u64, u64)> {
     let (start, end) = range
         .split_once('-')
         .context("invalid Content-Range interval")?;
-    let (start, end, length) = (
-        decimal(start, "Content-Range start")?,
-        decimal(end, "Content-Range end")?,
-        decimal(length, "Content-Range length")?,
-    );
+    let start = decimal(start, "Content-Range start")?;
+    let end = decimal(end, "Content-Range end")?;
+    let length = decimal(length, "Content-Range length")?;
     ensure!(start <= end && end < length, "invalid Content-Range bounds");
     Ok((start, end, length))
 }
