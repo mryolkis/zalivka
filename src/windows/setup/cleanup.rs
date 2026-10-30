@@ -5,6 +5,7 @@ use anyhow::{Context, Result, ensure};
 use std::{
     io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    path::{Path, PathBuf},
     ptr,
 };
 use windows_sys::Win32::{
@@ -18,7 +19,10 @@ use windows_sys::Win32::{
     UI::Shell::IsUserAnAdmin,
 };
 
-// Match whole hardware ID fields. Interface devnodes are removed with their parent.
+const MAX_INSTANCE_ID: usize = 512;
+const RESTORE_PRODUCTS: [u16; 2] = [0x12ac, 0x1881];
+
+/// Match whole hardware ID fields. Interface devnodes are removed with their parent.
 fn is_restore_device(instance: &str) -> bool {
     let mut parts = instance.split('\\');
     let (Some(bus), Some(hardware), Some(serial)) = (parts.next(), parts.next(), parts.next())
@@ -35,7 +39,7 @@ fn is_restore_device(instance: &str) -> bool {
     };
     pid.len() == 4
         && u16::from_str_radix(pid, 16).is_ok_and(|pid| {
-            crate::device::Mode::from_pid(pid).is_some() || matches!(pid, 0x12ac | 0x1881)
+            crate::device::Mode::from_pid(pid).is_some() || RESTORE_PRODUCTS.contains(&pid)
         })
 }
 
@@ -43,6 +47,7 @@ struct DriverPrivilege {
     token: OwnedHandle,
     previous: TOKEN_PRIVILEGES,
 }
+
 impl DriverPrivilege {
     fn enable() -> Result<Self> {
         let mut token = ptr::null_mut();
@@ -57,6 +62,7 @@ impl DriverPrivilege {
             "Opening token for device rescan: {}",
             io::Error::last_os_error()
         );
+        // SAFETY: OpenProcessToken returned a fresh owned handle.
         let token = unsafe { OwnedHandle::from_raw_handle(token) };
         let mut requested: TOKEN_PRIVILEGES = unsafe { std::mem::zeroed() };
         requested.PrivilegeCount = 1;
@@ -94,6 +100,7 @@ impl DriverPrivilege {
         Ok(Self { token, previous })
     }
 }
+
 impl Drop for DriverPrivilege {
     fn drop(&mut self) {
         if unsafe {
@@ -144,32 +151,29 @@ fn devices() -> Result<(DeviceInfoSet, Vec<(String, SP_DEVINFO_DATA)>)> {
             }
             return Err(error).context("Enumerating USB devices before reset");
         }
-        let mut id = [0u16; 512];
-        let mut length = 0;
-        ensure!(
-            unsafe {
-                SetupDiGetDeviceInstanceIdW(
-                    set.0,
-                    &data,
-                    id.as_mut_ptr(),
-                    id.len() as u32,
-                    &mut length,
-                )
-            } != 0,
-            "Reading USB device identifier: {}",
-            io::Error::last_os_error()
-        );
-        ensure!(
-            (1..=id.len() as u32).contains(&length),
-            "Invalid USB identifier length: {length}"
-        );
-        let instance =
-            String::from_utf16(&id[..length as usize - 1]).context("UTF-16 USB identifier")?;
+        let instance = instance_id(set.0, &data)?;
         if is_restore_device(&instance) {
             devices.push((instance, data));
         }
     }
     Ok((set, devices))
+}
+
+fn instance_id(set: HDEVINFO, data: &SP_DEVINFO_DATA) -> Result<String> {
+    let mut id = [0u16; MAX_INSTANCE_ID];
+    let mut length = 0;
+    ensure!(
+        unsafe {
+            SetupDiGetDeviceInstanceIdW(set, data, id.as_mut_ptr(), id.len() as u32, &mut length)
+        } != 0,
+        "Reading USB device identifier: {}",
+        io::Error::last_os_error()
+    );
+    ensure!(
+        (1..=id.len() as u32).contains(&length),
+        "Invalid USB identifier length: {length}"
+    );
+    String::from_utf16(&id[..length as usize - 1]).context("UTF-16 USB identifier")
 }
 
 fn rescan() -> Result<()> {
@@ -190,9 +194,9 @@ fn with_rescan(
     change: impl FnOnce() -> Result<()>,
     scan: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    let result = change();
+    let changed = change();
     let scanned = scan();
-    match (result, scanned) {
+    match (changed, scanned) {
         (Err(error), Err(scan)) => {
             Err(error.context(format!("Device rescan also failed: {scan:#}")))
         }
@@ -216,13 +220,7 @@ pub(super) fn reset_elevated(reboot: &mut bool) -> Result<()> {
     let directory = tempfile::Builder::new()
         .prefix("zalivka-apple-reset-")
         .tempdir()?;
-    let arch = architecture()?;
-    let mut infs = Vec::new();
-    for driver in crate::windows::package::DRIVERS {
-        let path = directory.path().join(format!("{driver:?}"));
-        std::fs::create_dir(&path)?;
-        infs.push(driver.unpack(&path, arch)?);
-    }
+    let infs = unpack_drivers(directory.path())?;
     let (set, targets) = devices()?;
     crate::log!(
         Info,
@@ -257,6 +255,18 @@ pub(super) fn reset_elevated(reboot: &mut bool) -> Result<()> {
     )?;
     crate::log!(Info, "drivers:reset", "Complete; reboot={reboot}");
     Ok(())
+}
+
+/// Unpack the bundled signed driver packages into `directory`.
+fn unpack_drivers(directory: &Path) -> Result<Vec<PathBuf>> {
+    let arch = architecture()?;
+    let mut infs = Vec::new();
+    for driver in crate::windows::package::DRIVERS {
+        let path = directory.join(format!("{driver:?}"));
+        std::fs::create_dir(&path)?;
+        infs.push(driver.unpack(&path, arch)?);
+    }
+    Ok(infs)
 }
 
 #[cfg(test)]
