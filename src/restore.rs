@@ -31,7 +31,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use plist::Value;
-use std::{fs::File, path::Path, sync::Arc};
+use std::{collections::BTreeSet, fs::File, path::Path, sync::Arc};
 
 pub const RESTORED_PORT: u16 = 62078;
 
@@ -61,7 +61,7 @@ pub struct RestoreSession {
 /// This is shared by the offline plan and the restore path, before any upload.
 pub fn preflight(ipsw: &mut Ipsw, identity: &mut Identity) -> Result<[Vec<IBootStep>; 2]> {
     ipsw.validate_identity(identity)?;
-    let mut components = std::collections::BTreeSet::new();
+    let mut components = BTreeSet::new();
     for tag in [b"ibss", b"ibec", b"rdsk", b"rdtr", b"rkrn"] {
         components.insert(identity.require_component_type(tag)?);
     }
@@ -146,7 +146,7 @@ pub(crate) fn run(
         img4::restore_info(&ticket, name, &identity.value, identity.payload_type(name)?)?;
     }
     let log = transcript
-        .map(|p| File::options().write(true).create_new(true).open(p))
+        .map(|path| File::options().write(true).create_new(true).open(path))
         .transpose()?;
     let mut restore = SignedIdentity { identity, ticket };
     let (device, bootx_error) = restore.boot(&mut ipsw, usb, &stages)?;
