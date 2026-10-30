@@ -11,11 +11,18 @@ use std::{
     time::Duration,
 };
 
+const CONTROL_PORT: u16 = 1082;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Connect FDR's control channel and negotiate the protocol version.
 pub(super) fn control_handshake(session: &Session, version: u8) -> Result<(MuxStream, u16)> {
-    let mut control = session.connect(1082).context("connecting FDR control")?;
+    let mut control = session
+        .connect(CONTROL_PORT)
+        .context("connecting FDR control")?;
     control.set_log_source("fdr:control");
     crate::log!(Debug, "fdr:control", "Negotiating v{version}");
-    control.set_read_timeout(Duration::from_secs(20));
+    control.set_read_timeout(HANDSHAKE_TIMEOUT);
     let port = if version == 2 {
         control.write_all(b"BeginCtrl\0")?;
         wire::send_binary_le(
@@ -39,7 +46,7 @@ pub(super) fn control_handshake(session: &Session, version: u8) -> Result<(MuxSt
         u16::from_le_bytes(port)
     };
     ensure!(port != 0, "FDR returned zero connection port");
-    control.set_read_timeout(Duration::from_secs(1));
+    control.set_read_timeout(IDLE_TIMEOUT);
     crate::log!(Debug, "fdr:control", "v{version}; port={port}");
     Ok((control, port))
 }
@@ -66,12 +73,12 @@ pub(super) fn read_exact_idle(
                 ));
             }
             Ok(n) => done += n,
-            Err(e)
+            Err(error)
                 if matches!(
-                    e.kind(),
+                    error.kind(),
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
                 ) => {}
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         }
     }
     Ok(true)
@@ -94,11 +101,13 @@ pub(super) fn connection_handshake(connection: &mut MuxStream, version: u8) -> R
     }
     Ok(())
 }
+
 fn receive(input: &mut impl Read) -> Result<Value> {
     let mut length = [0; 4];
     input.read_exact(&mut length)?;
     wire::receive_body(input, u32::from_le_bytes(length))
 }
+
 pub(super) fn ping(stream: &mut (impl Read + Write)) -> Result<()> {
     let command = receive(stream)?;
     ensure!(
@@ -126,7 +135,6 @@ pub(super) fn proxy_handshake<S>(
         stream.write_all(&[5, 0xff])?;
         bail!("FDR SOCKS client did not offer the no-authentication method");
     }
-    let mut zero = [0];
     stream.write_all(&[5, 0])?;
     crate::log!(Trace, "fdr:socks", "Method=00");
 
@@ -138,13 +146,18 @@ pub(super) fn proxy_handshake<S>(
         method_count == 1 || address_type == [5, 1],
         "expected FDR SOCKS CONNECT after greeting"
     );
+    // A one-method greeting and a legacy direct CONNECT look identical. The
+    // legacy form already consumed 05 01 00, so only the greeting sends CONNECT.
     let greeting = address_type == [5, 1];
     if greeting {
-        // The first command was a greeting; this is the actual CONNECT.
+        let mut reserved = [0];
         stream
-            .read_exact(&mut zero)
+            .read_exact(&mut reserved)
             .context("reading FDR proxy CONNECT reserved byte")?;
-        ensure!(zero == [0], "unsupported FDR proxy CONNECT reserved byte");
+        ensure!(
+            reserved == [0],
+            "unsupported FDR proxy CONNECT reserved byte"
+        );
         crate::log!(Trace, "fdr:socks", "CONNECT");
         stream
             .read_exact(&mut address_type)
@@ -158,15 +171,16 @@ pub(super) fn proxy_handshake<S>(
     stream
         .read_exact(&mut address)
         .context("reading FDR proxy address")?;
-    let n = address.len();
-    let host = std::str::from_utf8(&address[..n - 2])?.trim_end_matches('\0');
-    let port = u16::from_be_bytes(address[n - 2..].try_into()?);
+    let length = address.len();
+    let host = std::str::from_utf8(&address[..length - 2])?.trim_end_matches('\0');
+    let port = u16::from_be_bytes(address[length - 2..].try_into()?);
     validate_proxy_target(host, port)?;
     crate::log!(
         Trace,
         "fdr:socks",
         "CONNECT {host}:{port}; greeting={greeting}"
     );
+
     let socket = match connect(host, port) {
         Ok(socket) => socket,
         Err(error) => {
