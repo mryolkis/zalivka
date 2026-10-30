@@ -26,6 +26,12 @@ type Dictionary = CFDictionary<CFString, CFType>;
 type Proxies = CFArray<Dictionary>;
 type Callback = extern "C" fn(*mut c_void, CFArrayRef, CFErrorRef);
 
+const MAX_DEPTH: usize = 3;
+const MAX_ROUTES: usize = 32;
+const PAC_TIMEOUT: Duration = Duration::from_secs(30);
+const RUN_LOOP_SLICE: Duration = Duration::from_millis(50);
+const DHCP_PAC_OPTION: u8 = 252;
+
 #[repr(C)]
 struct ClientContext {
     version: CFIndex,
@@ -72,6 +78,7 @@ fn url(text: &str) -> Result<CFURL> {
     let value =
         unsafe { CFURLCreateWithString(ptr::null(), text.as_concrete_TypeRef(), ptr::null()) };
     ensure!(!value.is_null(), "invalid macOS proxy URL");
+    // SAFETY: CFURLCreateWithString returned a new retained URL.
     Ok(unsafe { CFURL::wrap_under_create_rule(value) })
 }
 
@@ -81,14 +88,27 @@ fn value(dictionary: &Dictionary, key: CFStringRef) -> Option<CFType> {
     let key = unsafe { CFString::wrap_under_get_rule(key) };
     dictionary.find(&key).map(|value| (*value).clone())
 }
+
 fn string(dictionary: &Dictionary, key: CFStringRef) -> Result<String> {
     value(dictionary, key)
-        .and_then(|v| v.downcast::<CFString>())
-        .map(|v| v.to_string())
+        .and_then(|value| value.downcast::<CFString>())
+        .map(|value| value.to_string())
         .context("missing or invalid CFNetwork proxy string")
 }
+
 fn kind_is(kind: &CFString, expected: CFStringRef) -> bool {
     *kind == unsafe { CFString::wrap_under_get_rule(expected) }
+}
+
+fn proxy_kind(proxy: &Dictionary) -> Result<CFString> {
+    value(proxy, unsafe { kCFProxyTypeKey })
+        .and_then(|value| value.downcast::<CFString>())
+        .context("invalid CFNetwork proxy type")
+}
+
+fn is_pac(kind: &CFString) -> bool {
+    kind_is(kind, unsafe { kCFProxyTypeAutoConfigurationURL })
+        || kind_is(kind, unsafe { kCFProxyTypeAutoConfigurationJavaScript })
 }
 
 pub(super) fn for_url(uri: &Uri) -> Result<Vec<Option<Proxy>>> {
@@ -97,14 +117,10 @@ pub(super) fn for_url(uri: &Uri) -> Result<Vec<Option<Proxy>>> {
     ensure!(!settings.is_null(), "reading macOS system proxy settings");
     let settings = unsafe { Dictionary::wrap_under_create_rule(settings) };
     let proxies = system_proxies(&target, &settings)?;
-    let has_pac = proxies.iter().any(|proxy| {
-        value(&proxy, unsafe { kCFProxyTypeKey })
-            .and_then(|value| value.downcast::<CFString>())
-            .is_some_and(|kind| {
-                kind_is(&kind, unsafe { kCFProxyTypeAutoConfigurationURL })
-                    || kind_is(&kind, unsafe { kCFProxyTypeAutoConfigurationJavaScript })
-            })
-    });
+    let has_pac = proxies
+        .iter()
+        .filter_map(|proxy| proxy_kind(&proxy).ok())
+        .any(|kind| is_pac(&kind));
     // Prefer a referral already discovered by the OS. If none was supplied,
     // try the active DHCP lease before DNS, preserving native bypass semantics.
     if !has_pac
@@ -135,6 +151,7 @@ fn setting(dictionary: &Dictionary, key: &str) -> Option<CFType> {
         .find(CFString::new(key))
         .map(|value| (*value).clone())
 }
+
 fn setting_enabled(dictionary: &Dictionary, key: &str) -> bool {
     setting(dictionary, key).is_some_and(|value| {
         value
@@ -144,6 +161,7 @@ fn setting_enabled(dictionary: &Dictionary, key: &str) -> bool {
             || value.downcast::<CFBoolean>().is_some_and(bool::from)
     })
 }
+
 fn bypassed(settings: &Dictionary, target: &CFURL) -> Result<bool> {
     // Ask CFNetwork to apply its own exceptions (including CIDR and simple
     // hostnames) to an otherwise unconditional dummy proxy.
@@ -169,18 +187,15 @@ fn bypassed(settings: &Dictionary, target: &CFURL) -> Result<bool> {
 }
 
 fn pac_routes(pac: &CFURL, target: &CFURL) -> Result<Vec<Option<Proxy>>> {
-    resolve(
-        &execute_pac(|callback, context| unsafe {
-            CFNetworkExecuteProxyAutoConfigurationURL(
-                pac.as_concrete_TypeRef(),
-                target.as_concrete_TypeRef(),
-                callback,
-                context,
-            )
-        })?,
-        target,
-        1,
-    )
+    let proxies = execute_pac(|callback, context| unsafe {
+        CFNetworkExecuteProxyAutoConfigurationURL(
+            pac.as_concrete_TypeRef(),
+            target.as_concrete_TypeRef(),
+            callback,
+            context,
+        )
+    })?;
+    resolve(&proxies, target, 1)
 }
 
 #[link(name = "SystemConfiguration", kind = "framework")]
@@ -235,7 +250,7 @@ fn dhcp_pac() -> Result<Option<String>> {
         return Ok(None);
     }
     let dhcp = unsafe { Dictionary::wrap_under_create_rule(dhcp) };
-    let data = unsafe { DHCPInfoGetOptionData(dhcp.as_concrete_TypeRef(), 252) };
+    let data = unsafe { DHCPInfoGetOptionData(dhcp.as_concrete_TypeRef(), DHCP_PAC_OPTION) };
     if data.is_null() {
         return Ok(None);
     }
@@ -273,93 +288,90 @@ fn proxies_for_settings(target: &CFURL, settings: &Dictionary) -> Result<Vec<Opt
 
 fn resolve(proxies: &Proxies, target: &CFURL, depth: usize) -> Result<Vec<Option<Proxy>>> {
     ensure!(
-        depth < 3 && !proxies.is_empty() && proxies.len() <= 32,
+        depth < MAX_DEPTH && !proxies.is_empty() && proxies.len() <= MAX_ROUTES,
         "invalid CFNetwork proxy route list"
     );
     let mut routes = Vec::new();
     for proxy in proxies.iter() {
-        let kind = value(&proxy, unsafe { kCFProxyTypeKey })
-            .and_then(|v| v.downcast::<CFString>())
-            .context("invalid CFNetwork proxy type")?;
+        let kind = proxy_kind(&proxy)?;
         if kind_is(&kind, unsafe { kCFProxyTypeNone }) {
             routes.push(None);
         } else if kind_is(&kind, unsafe { kCFProxyTypeAutoConfigurationURL }) {
             let value = value(&proxy, unsafe { kCFProxyAutoConfigurationURLKey })
                 .context("missing PAC URL")?;
-            let pac = if let Some(url) = value.downcast::<CFURL>() {
-                url
-            } else {
-                url(&value
+            let pac = match value.downcast::<CFURL>() {
+                Some(url) => url,
+                None => url(&value
                     .downcast::<CFString>()
                     .context("invalid PAC URL")?
-                    .to_string())?
+                    .to_string())?,
             };
-            routes.extend(resolve(
-                &execute_pac(|callback, context| unsafe {
-                    CFNetworkExecuteProxyAutoConfigurationURL(
-                        pac.as_concrete_TypeRef(),
-                        target.as_concrete_TypeRef(),
-                        callback,
-                        context,
-                    )
-                })?,
-                target,
-                depth + 1,
-            )?);
+            let found = execute_pac(|callback, context| unsafe {
+                CFNetworkExecuteProxyAutoConfigurationURL(
+                    pac.as_concrete_TypeRef(),
+                    target.as_concrete_TypeRef(),
+                    callback,
+                    context,
+                )
+            })?;
+            routes.extend(resolve(&found, target, depth + 1)?);
         } else if kind_is(&kind, unsafe { kCFProxyTypeAutoConfigurationJavaScript }) {
             let script = value(&proxy, unsafe { kCFProxyAutoConfigurationJavaScriptKey })
-                .and_then(|v| v.downcast::<CFString>())
+                .and_then(|value| value.downcast::<CFString>())
                 .context("missing PAC script")?;
-            routes.extend(resolve(
-                &execute_pac(|callback, context| unsafe {
-                    CFNetworkExecuteProxyAutoConfigurationScript(
-                        script.as_concrete_TypeRef(),
-                        target.as_concrete_TypeRef(),
-                        callback,
-                        context,
-                    )
-                })?,
-                target,
-                depth + 1,
-            )?);
+            let found = execute_pac(|callback, context| unsafe {
+                CFNetworkExecuteProxyAutoConfigurationScript(
+                    script.as_concrete_TypeRef(),
+                    target.as_concrete_TypeRef(),
+                    callback,
+                    context,
+                )
+            })?;
+            routes.extend(resolve(&found, target, depth + 1)?);
         } else {
-            let protocols: &[ProxyProtocol] = if kind_is(&kind, unsafe { kCFProxyTypeSOCKS }) {
-                &[ProxyProtocol::Socks5h, ProxyProtocol::Socks4A]
-            } else if kind_is(&kind, unsafe { kCFProxyTypeHTTP })
-                || kind_is(&kind, unsafe { kCFProxyTypeHTTPS })
-            {
-                // macOS's Secure Web Proxy is an HTTP CONNECT proxy for HTTPS
-                // destinations. It does not imply TLS to the proxy itself.
-                &[ProxyProtocol::Http]
-            } else {
-                bail!("unsupported CFNetwork proxy type {kind}");
-            };
-            let host = string(&proxy, unsafe { kCFProxyHostNameKey })?;
-            let port = value(&proxy, unsafe { kCFProxyPortNumberKey })
-                .and_then(|v| v.downcast::<CFNumber>())
-                .and_then(|v| v.to_i64())
-                .context("invalid CFNetwork proxy port")?;
-            let port = u16::try_from(port).context("CFNetwork proxy port out of range")?;
-            ensure!(
-                !host.is_empty() && port != 0,
-                "invalid CFNetwork proxy address"
-            );
-            for protocol in protocols {
-                let mut builder = Proxy::builder(*protocol).host(&host).port(port);
-                if let Ok(user) = string(&proxy, unsafe { kCFProxyUsernameKey }) {
-                    builder = builder.username(&user);
-                }
-                if let Ok(password) = string(&proxy, unsafe { kCFProxyPasswordKey }) {
-                    builder = builder.password(&password);
-                }
-                routes.push(Some(builder.build()?));
-            }
+            routes.extend(concrete_routes(&proxy, &kind)?);
         }
     }
     ensure!(
         !routes.is_empty(),
         "macOS proxy resolver returned no routes"
     );
+    Ok(routes)
+}
+
+fn concrete_routes(proxy: &Dictionary, kind: &CFString) -> Result<Vec<Option<Proxy>>> {
+    let protocols: &[ProxyProtocol] = if kind_is(kind, unsafe { kCFProxyTypeSOCKS }) {
+        &[ProxyProtocol::Socks5h, ProxyProtocol::Socks4A]
+    } else if kind_is(kind, unsafe { kCFProxyTypeHTTP })
+        || kind_is(kind, unsafe { kCFProxyTypeHTTPS })
+    {
+        // macOS's Secure Web Proxy is an HTTP CONNECT proxy for HTTPS
+        // destinations. It does not imply TLS to the proxy itself.
+        &[ProxyProtocol::Http]
+    } else {
+        bail!("unsupported CFNetwork proxy type {kind}");
+    };
+    let host = string(proxy, unsafe { kCFProxyHostNameKey })?;
+    let port = value(proxy, unsafe { kCFProxyPortNumberKey })
+        .and_then(|value| value.downcast::<CFNumber>())
+        .and_then(|value| value.to_i64())
+        .context("invalid CFNetwork proxy port")?;
+    let port = u16::try_from(port).context("CFNetwork proxy port out of range")?;
+    ensure!(
+        !host.is_empty() && port != 0,
+        "invalid CFNetwork proxy address"
+    );
+    let mut routes = Vec::with_capacity(protocols.len());
+    for protocol in protocols {
+        let mut builder = Proxy::builder(*protocol).host(&host).port(port);
+        if let Ok(user) = string(proxy, unsafe { kCFProxyUsernameKey }) {
+            builder = builder.username(&user);
+        }
+        if let Ok(password) = string(proxy, unsafe { kCFProxyPasswordKey }) {
+            builder = builder.password(&password);
+        }
+        routes.push(Some(builder.build()?));
+    }
     Ok(routes)
 }
 
@@ -374,6 +386,7 @@ extern "C" fn pac_finished(info: *mut c_void, proxies: CFArrayRef, error: CFErro
     } else {
         Ok(unsafe { Proxies::wrap_under_get_rule(proxies) })
     };
+    // SAFETY: info points at the live slot in execute_pac.
     unsafe {
         *info.cast::<Option<Result<Proxies>>>() = Some(result);
     }
@@ -396,7 +409,7 @@ fn execute_pac(
     let run_loop = CFRunLoop::get_current();
     let mode = unsafe { kCFRunLoopDefaultMode };
     run_loop.add_source(&source, mode);
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + PAC_TIMEOUT;
     let waited = (|| {
         while result.is_none() {
             crate::progress::check_cancelled()?;
@@ -404,7 +417,7 @@ fn execute_pac(
                 Instant::now() < deadline,
                 "macOS PAC/WPAD resolution timed out"
             );
-            CFRunLoop::run_in_mode(mode, Duration::from_millis(50), true);
+            CFRunLoop::run_in_mode(mode, RUN_LOOP_SLICE, true);
         }
         Ok(())
     })();
