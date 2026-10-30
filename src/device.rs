@@ -1,3 +1,4 @@
+//! Identification metadata exposed by Apple's USB DFU and recovery transports.
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
@@ -39,67 +40,80 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
-    /// Port DFU identifies the USB controller. Its board word also encodes
-    /// the SoC's CPID and BDID, used only for firmware selection.
+    /// Port DFU identifies the USB controller; its board word also encodes the
+    /// SoC's CPID and BDID, which are the values firmware selection needs.
     pub fn hardware_ids(&self) -> (u32, u32) {
-        if self.mode == Mode::PortDfu {
-            ((self.board_id >> 8) & 0xffff, self.board_id >> 24)
-        } else {
-            (self.chip_id, self.board_id)
+        match self.mode {
+            Mode::PortDfu => ((self.board_id >> 8) & 0xffff, self.board_id >> 24),
+            Mode::Dfu | Mode::Recovery => (self.chip_id, self.board_id),
         }
     }
 
     pub(crate) fn serial_hex(&self, name: &str) -> Result<u64> {
-        hex_number(field(&self.serial, name)?.with_context(|| format!("USB serial has no {name}"))?)
+        parse_hex(
+            serial_field(&self.serial, name)?
+                .with_context(|| format!("USB serial has no {name}"))?,
+        )
     }
 
     pub fn parse(serial: &str, mode: Mode) -> Result<Self> {
-        let hex_field = |name: &str| -> Result<Option<u64>> {
-            field(serial, name)?
-                .map(|raw| hex_number(raw).with_context(|| format!("invalid {name}: {raw}")))
+        let required =
+            |name| serial_field(serial, name)?.with_context(|| format!("USB serial has no {name}"));
+        let number = |name| {
+            required(name)
+                .and_then(parse_hex)
+                .with_context(|| format!("invalid {name}"))
+        };
+        let optional = |name| {
+            serial_field(serial, name)?
+                .map(|value| parse_hex(value).with_context(|| format!("invalid {name}: {value}")))
                 .transpose()
         };
-        let required =
-            |name: &str| hex_field(name)?.with_context(|| format!("USB serial has no {name}"));
-        let ecid = required("ECID")?;
+        let ecid = number("ECID")?;
         ensure!(ecid != 0, "device returned zero ECID");
         Ok(Self {
             ecid,
-            chip_id: u32::try_from(required("CPID")?)?,
-            board_id: u32::try_from(required("BDID")?)?,
-            security_domain: hex_field("SDOM")?.map(u32::try_from).transpose()?,
-            iboot_flags: hex_field("IBFL")?.map(u32::try_from).transpose()?,
-            chip_fuse_mode: hex_field("CPFM")?.map(u32::try_from).transpose()?,
+            chip_id: u32::try_from(number("CPID")?)?,
+            board_id: u32::try_from(number("BDID")?)?,
+            security_domain: optional("SDOM")?.map(u32::try_from).transpose()?,
+            iboot_flags: optional("IBFL")?.map(u32::try_from).transpose()?,
+            chip_fuse_mode: optional("CPFM")?.map(u32::try_from).transpose()?,
             mode,
-            serial: serial.into(),
-            ap_nonce: vec![],
-            sep_nonce: vec![],
+            serial: serial.to_owned(),
+            ap_nonce: Vec::new(),
+            sep_nonce: Vec::new(),
         })
     }
 
-    pub fn set_nonces(&mut self, s: &str) -> Result<()> {
+    /// Replace both nonces only after both values parsed successfully.
+    pub fn set_nonces(&mut self, serial: &str) -> Result<()> {
         let nonce = |name| {
-            field(s, name)?
+            serial_field(serial, name)?
                 .map(decode_hex)
                 .transpose()
                 .map(Option::unwrap_or_default)
         };
-        (self.ap_nonce, self.sep_nonce) = (nonce("NONC")?, nonce("SNON")?);
+        let (ap, sep) = (nonce("NONC")?, nonce("SNON")?);
+        self.ap_nonce = ap;
+        self.sep_nonce = sep;
         Ok(())
     }
 }
 
-fn field<'a>(s: &'a str, key: &str) -> Result<Option<&'a str>> {
-    let mut values = s.split_ascii_whitespace().filter_map(|s| {
-        let (k, v) = s.split_once(':')?;
-        (k == key).then_some(v)
-    });
-    let value = values.next();
-    ensure!(values.next().is_none(), "duplicate USB serial field {key}");
+/// One whitespace-separated `KEY:VALUE` field in a USB serial string.
+fn serial_field<'a>(serial: &'a str, key: &str) -> Result<Option<&'a str>> {
+    let mut matches = serial
+        .split_ascii_whitespace()
+        .filter_map(|token| token.split_once(':'))
+        .filter(|(name, _)| *name == key)
+        .map(|(_, value)| value);
+    let value = matches.next();
+    ensure!(matches.next().is_none(), "duplicate USB serial field {key}");
     Ok(value)
 }
 
-fn hex_number(value: &str) -> Result<u64> {
+/// Unsigned hexadecimal, with an optional `0x` prefix and no surrounding space.
+fn parse_hex(value: &str) -> Result<u64> {
     let digits = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
@@ -116,9 +130,40 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>> {
 }
 
 pub fn parse_ecid(s: &str) -> std::result::Result<u64, String> {
-    let n = hex_number(s).map_err(|error| error.to_string())?;
-    if n == 0 {
+    let ecid = parse_hex(s).map_err(|error| error.to_string())?;
+    if ecid == 0 {
         return Err("ECID must be nonzero".into());
     }
-    Ok(n)
+    Ok(ecid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_fields_accept_only_optional_prefix_and_digits() {
+        for (text, value) in [("10", 0x10), ("0x10", 0x10), ("0Xff", 0xff)] {
+            assert_eq!(parse_hex(text).unwrap(), value);
+        }
+        for text in ["", "0x", "+1", "-1", " 1", "1 ", "0x0x1", "gg"] {
+            assert!(parse_hex(text).is_err(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn serial_fields_reject_duplicates_and_missing_identifiers() {
+        assert!(DeviceInfo::parse("CPID:8103 BDID:0A ECID:12 ECID:13", Mode::Dfu).is_err());
+        assert!(DeviceInfo::parse("CPID:8103 BDID:0A", Mode::Dfu).is_err());
+        assert!(DeviceInfo::parse("CPID:8103 BDID:0A ECID:0", Mode::Dfu).is_err());
+        assert!(DeviceInfo::parse("CPID:8103 BDID:0A ECID:12", Mode::Dfu).is_ok());
+    }
+
+    #[test]
+    fn port_dfu_reports_soc_identity_inside_its_board_word() {
+        let controller =
+            DeviceInfo::parse("ECID:2a CPID:0022 BDID:22813200", Mode::PortDfu).unwrap();
+        assert_eq!(controller.hardware_ids(), (0x8132, 0x22));
+        assert_eq!(controller.serial_hex("ECID").unwrap(), 0x2a);
+    }
 }

@@ -1,13 +1,18 @@
-//! Bounded metadata reads and portable free-space checks for firmware files.
+//! Bounded metadata reads and portable application/configuration locations.
 use anyhow::{Context, Result, ensure};
 use std::{
     io::Read,
     path::{Path, PathBuf},
 };
 
-pub(crate) fn read_limited(reader: impl Read, limit: u64, error: &str) -> Result<Vec<u8>> {
+/// Read at most `limit` bytes, reporting the caller's message when it overflows.
+///
+/// One byte past the limit is consumed so the error is detected without
+/// trusting the reader's reported length.
+pub(crate) fn read_limited(mut reader: impl Read, limit: u64, error: &str) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     reader
+        .by_ref()
         .take(limit.saturating_add(1))
         .read_to_end(&mut data)?;
     ensure!(data.len() as u64 <= limit, "{error}");
@@ -29,29 +34,34 @@ pub fn require(path: &Path, bytes: u64) -> Result<()> {
     Ok(())
 }
 
-fn absolute_env(name: &str) -> Option<PathBuf> {
+/// An environment directory, accepted only when absolute.
+fn environment(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
 }
 
-/// Root shared by firmware cache, diagnostic logs and USB driver backups.
-pub fn app_directory() -> Result<PathBuf> {
+/// The user cache root, falling back to a directory in the working directory.
+fn cache_root() -> Result<PathBuf> {
     let root = if cfg!(windows) {
-        absolute_env("LOCALAPPDATA")
-            .or_else(|| absolute_env("USERPROFILE").map(|path| path.join("AppData").join("Local")))
+        environment("LOCALAPPDATA")
+            .or_else(|| environment("USERPROFILE").map(|path| path.join("AppData").join("Local")))
     } else {
-        absolute_env("XDG_CACHE_HOME")
-            .or_else(|| absolute_env("HOME").map(|path| path.join(".cache")))
+        environment("XDG_CACHE_HOME")
+            .or_else(|| environment("HOME").map(|path| path.join(".cache")))
     };
-    let root = root.map_or_else(
-        || std::env::current_dir().map(|path| path.join(".cache")),
-        Ok,
-    )?;
-    Ok(root.join("zalivka"))
+    match root {
+        Some(path) => Ok(path),
+        None => Ok(std::env::current_dir()?.join(".cache")),
+    }
 }
 
-/// Create the existing application log directory without changing its location.
+/// Root shared by firmware cache, diagnostic logs and USB driver backups.
+pub fn app_directory() -> Result<PathBuf> {
+    Ok(cache_root()?.join("zalivka"))
+}
+
+/// Create the application log directory without relocating it.
 pub fn log_directory() -> Result<PathBuf> {
     let directory = app_directory()?.join("logs");
     std::fs::create_dir_all(&directory)?;
@@ -60,11 +70,11 @@ pub fn log_directory() -> Result<PathBuf> {
 
 pub fn config_directory() -> Result<PathBuf> {
     let root = if cfg!(windows) {
-        absolute_env("LOCALAPPDATA")
-            .or_else(|| absolute_env("USERPROFILE").map(|path| path.join("AppData/Local")))
+        environment("LOCALAPPDATA")
+            .or_else(|| environment("USERPROFILE").map(|path| path.join("AppData/Local")))
     } else {
-        absolute_env("XDG_CONFIG_HOME")
-            .or_else(|| absolute_env("HOME").map(|path| path.join(".config")))
+        environment("XDG_CONFIG_HOME")
+            .or_else(|| environment("HOME").map(|path| path.join(".config")))
     };
     Ok(root
         .context("could not locate the settings folder")?
