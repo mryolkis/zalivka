@@ -15,6 +15,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+const RECONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+const RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
+const RAMDISK_SETTLE: Duration = Duration::from_secs(2);
+
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum IBootStep {
@@ -41,17 +45,10 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>>
     let has_dcp = dcp.is_some_and(|dcp| firmware.iter().any(|name| name == dcp));
     let restore_logo = id.component_by_type(b"rlgo")?;
     let mut steps = Vec::new();
-    let logo = |steps: &mut Vec<IBootStep>| {
-        if let Some(name) = restore_logo {
-            steps.push(IBootStep::Component(name.into()));
-            steps.push(IBootStep::Command("setpicture 4"));
-            steps.push(IBootStep::Command("bgcolor 0 0 0"));
-        }
-    };
     // The caller displays the logo before stage 2 when DCP is not in this stage.
     // With DCP, the firmware helper displays it after DCP has initialized graphics.
     if !stage1 && !has_dcp {
-        logo(&mut steps);
+        logo(&mut steps, restore_logo);
     }
     if let Some(ans) = id.component_by_type(b"rans")?
         && let Some(index) = firmware.iter().position(|name| name == ans)
@@ -73,7 +70,7 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>>
         }
     }
     if has_dcp {
-        logo(&mut steps);
+        logo(&mut steps, restore_logo);
     }
     for name in firmware {
         steps.push(IBootStep::Component(name));
@@ -81,6 +78,55 @@ pub(super) fn iboot_stage(id: &Identity, stage1: bool) -> Result<Vec<IBootStep>>
     }
     Ok(steps)
 }
+
+fn logo(steps: &mut Vec<IBootStep>, restore_logo: Option<&str>) {
+    if let Some(name) = restore_logo {
+        steps.push(IBootStep::Component(name.into()));
+        steps.push(IBootStep::Command("setpicture 4"));
+        steps.push(IBootStep::Command("bgcolor 0 0 0"));
+    }
+}
+
+/// Variables reported by the boot-state probe.
+const BOOT_STATE_VARIABLES: &[&str] = &[
+    "auto-boot",
+    "auto-boot-once",
+    "bootdelay",
+    "boot-image",
+    "iboot1-precommitted",
+    "anid",
+    "is-tethered",
+    "darkboot",
+    "idle-off",
+    "BootPreference",
+    "disable-boot-breadcrumbs",
+    "recovery-reason",
+    "preserve-debuggability",
+    "upgrade-retry",
+    "boot-command",
+    "one-time-boot-command",
+    "recovery-boot-mode",
+    "iboot-failure-reason",
+    "iboot-failure-reason-str",
+    "iboot-failure-volume",
+    "boot-fail-count",
+    "boot-breadcrumbs",
+    "failboot-breadcrumbs",
+    "recovery-breadcrumbs",
+    "boot-picker-bringup-reason",
+    "boot-volume",
+    "alt-boot-volume",
+    "upgrade-boot-volume",
+    "update-volume",
+    "upgrade-fallback-boot-command",
+    "apfs-preboot-uuid",
+    "panicmedic-timestamps",
+    "usbcfwflasherResult",
+    "boot-stage",
+    "build-version",
+    "build-style",
+    "boot-args",
+];
 
 /// Query iBoot's environment, optionally loading only a signed iBSS into RAM.
 /// No local policy, firmware, setenv/saveenv, kernel or StartRestore is sent.
@@ -114,51 +160,13 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         usb = boot_ibss(usb, &bytes, Some(Mode::Recovery))?;
     }
     let mut variables = serde_json::Map::new();
-    for name in [
-        "auto-boot",
-        "auto-boot-once",
-        "bootdelay",
-        "boot-image",
-        "iboot1-precommitted",
-        "anid",
-        "is-tethered",
-        "darkboot",
-        "idle-off",
-        "BootPreference",
-        "disable-boot-breadcrumbs",
-        "recovery-reason",
-        "preserve-debuggability",
-        "upgrade-retry",
-        "boot-command",
-        "one-time-boot-command",
-        "recovery-boot-mode",
-        "iboot-failure-reason",
-        "iboot-failure-reason-str",
-        "iboot-failure-volume",
-        "boot-fail-count",
-        "boot-breadcrumbs",
-        "failboot-breadcrumbs",
-        "recovery-breadcrumbs",
-        "boot-picker-bringup-reason",
-        "boot-volume",
-        "alt-boot-volume",
-        "upgrade-boot-volume",
-        "update-volume",
-        "upgrade-fallback-boot-command",
-        "apfs-preboot-uuid",
-        "panicmedic-timestamps",
-        "usbcfwflasherResult",
-        "boot-stage",
-        "build-version",
-        "build-style",
-        "boot-args",
-    ] {
+    for name in BOOT_STATE_VARIABLES {
         crate::log!(Debug, "boot:env", "getenv {name}");
         let value = match dfu::getenv(&mut usb, name) {
             Ok(value) => serde_json::json!({"value": value}),
             Err(error) => serde_json::json!({"error": format!("{error:#}")}),
         };
-        variables.insert(name.into(), value);
+        variables.insert((*name).into(), value);
     }
     Ok(serde_json::json!({
         "ecid": format!("{ecid:016x}"), "initial_mode": original_mode,
@@ -248,7 +256,7 @@ impl SignedIdentity {
         self.send_iboot_firmware(ipsw, &mut usb, false, &stages[1])?;
         self.send_boot_object(ipsw, &mut usb, b"rdsk")?;
         dfu::command(&mut usb, "ramdisk", false)?;
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(RAMDISK_SETTLE);
         self.send_boot_object(ipsw, &mut usb, b"rdtr")?;
         dfu::command(&mut usb, "devicetree", false)?;
         if self.identity.component_by_type(b"rsep")?.is_some() {
@@ -274,9 +282,7 @@ impl SignedIdentity {
         );
         for step in steps {
             match step {
-                IBootStep::Component(name) => {
-                    self.send_component(ipsw, usb, name, None)?;
-                }
+                IBootStep::Component(name) => self.send_component(ipsw, usb, name, None)?,
                 IBootStep::Command(command) => {
                     crate::log!(Debug, "boot:cmd", "{command}");
                     dfu::command(usb, command, false)?;
@@ -349,17 +355,16 @@ pub(super) fn reconnect_after_ibss<T>(
 
 pub(super) fn wait_recovery(ecid: u64, mode: Option<Mode>) -> Result<RecoveryUsb> {
     std::thread::sleep(Duration::from_secs(1));
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut error;
+    let deadline = Instant::now() + RECONNECT_TIMEOUT;
     loop {
-        error = match RecoveryUsb::open(ecid) {
-            Ok(usb) if mode.is_none_or(|m| usb.info.mode == m) => return Ok(usb),
+        let error = match RecoveryUsb::open(ecid) {
+            Ok(usb) if mode.is_none_or(|expected| usb.info.mode == expected) => return Ok(usb),
             Ok(_) => anyhow::anyhow!("device is in an unexpected mode"),
-            Err(e) => e,
+            Err(error) => error,
         };
         if Instant::now() >= deadline {
             return Err(error.context("device did not reconnect after boot stage"));
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(RECONNECT_INTERVAL);
     }
 }
