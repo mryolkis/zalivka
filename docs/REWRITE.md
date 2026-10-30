@@ -89,7 +89,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 5 | `tss` (transport + requests) | done |
 | 6 | `firmware` (updater/containers/canary/request) | done (containers moved to ipsw; updater/canary/request rewritten) |
 | 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | done (usb.rs/backend/descriptors/KIS + dfu) |
-| 8 | `mux` (flatten packet/channel/stream) | `packet` + `channel` + `stream` done; `mux.rs` pending |
+| 8 | `mux` (flatten packet/channel/stream) | done (packet/channel/stream/session) |
 | 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | pending |
 | 10 | `restored` services (data/images/keys/FDR/ASR) | pending |
 | 11 | `net` (+ catalog; break proxy cycle) | catalog done; net pending |
@@ -124,6 +124,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `33063fc` | `usb.rs` enumeration/transport rewrite (USB domain complete) | 552 tests, clippy clean |
 | `96ba27d` | `mux/packet` + `mux/channel` rewrites | 552 tests, clippy clean |
 | `c45df02` | `mux/stream` rewrite | 552 tests, clippy clean |
+| `8452045` | `mux.rs` session rewrite (mux domain complete) | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
