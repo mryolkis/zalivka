@@ -1,3 +1,8 @@
+//! Apple USB enumeration and the two transport shapes used by restore.
+//!
+//! Recovery/DFU devices use control and bulk endpoints. KIS ROM DFU devices use
+//! Apple Debug USB portals instead, and the mux interface wraps a distinct pair
+//! of bulk endpoints for the restored/FDR tunnel.
 mod backend;
 mod descriptors;
 mod kis;
@@ -15,15 +20,17 @@ use std::{sync::atomic::AtomicBool, time::Duration};
 
 pub const APPLE_VENDOR: u16 = 0x05ac;
 pub(crate) const MUX_INTERFACE: (u8, u8, u8) = (0xff, 0xfe, 2);
+const KIS_PRODUCT: u16 = 0x1881;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Apple devices that expose a restore or DFU USB interface.
 fn recovery_devices() -> Result<impl Iterator<Item = (nusb::DeviceInfo, Mode)>> {
     Ok(nusb::list_devices()
         .wait()
         .context("enumerating USB devices")?
         .filter(|usb| usb.vendor_id() == APPLE_VENDOR)
         .filter_map(|usb| {
-            let mode = if usb.product_id() == 0x1881 {
+            let mode = if usb.product_id() == KIS_PRODUCT {
                 Some(Mode::Dfu)
             } else {
                 Mode::from_pid(usb.product_id())
@@ -134,11 +141,12 @@ enum RecoveryConnection {
         interface: UsbInterface,
         bulk: Option<BulkOutput>,
     },
-    Kis(kis::Kis),
+    Kis(Kis),
 }
 
+/// Decode a DFU/iBoot `bmRequestType` byte into nusb's control type/recipient.
 fn control_kind(kind: u8) -> Result<(ControlType, Recipient)> {
-    let ty = match (kind >> 5) & 3 {
+    let control_type = match (kind >> 5) & 3 {
         0 => ControlType::Standard,
         1 => ControlType::Class,
         2 => ControlType::Vendor,
@@ -151,7 +159,7 @@ fn control_kind(kind: u8) -> Result<(ControlType, Recipient)> {
         3 => Recipient::Other,
         _ => bail!("invalid USB recipient"),
     };
-    Ok((ty, recipient))
+    Ok((control_type, recipient))
 }
 
 impl RecoveryUsb {
@@ -159,6 +167,7 @@ impl RecoveryUsb {
         &self.topology
     }
 
+    /// Wait for SoC DFU to reappear on the same physical port after an Ace3 boot.
     pub(crate) fn wait_at_port(previous: &nusb::DeviceInfo, hardware: (u32, u32)) -> Result<Self> {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let mut last_error = anyhow::anyhow!("SoC DFU has not appeared on the original USB port");
@@ -177,8 +186,7 @@ impl RecoveryUsb {
                 {
                     continue;
                 }
-                let opened = Self::open_candidate(candidate, mode);
-                match opened {
+                match Self::open_candidate(candidate, mode) {
                     Ok(usb) => {
                         anyhow::ensure!(
                             usb.info.hardware_ids() == hardware
@@ -205,9 +213,10 @@ impl RecoveryUsb {
         }
         Ok(())
     }
+
     pub fn open(ecid: u64) -> Result<Self> {
         let devices = recovery_devices()?.map(|(usb, mode)| {
-            let cached = (usb.product_id() != 0x1881)
+            let cached = (usb.product_id() != KIS_PRODUCT)
                 .then(|| usb.serial_number())
                 .flatten()
                 .and_then(|serial| DeviceInfo::parse(serial, mode).ok())
@@ -229,26 +238,34 @@ impl RecoveryUsb {
 
     fn open_candidate(usb: nusb::DeviceInfo, mode: Mode) -> Result<Self> {
         let device = usb.open().wait().context("opening Apple USB device (Linux: udev permissions; Windows: compatible USB driver required)")?;
-        if usb.product_id() == 0x1881 {
-            let mut kis = kis::Kis::open(&device, &usb)?;
-            let info = kis.info()?;
-            return Ok(Self {
-                #[cfg(not(windows))]
-                device,
-                connection: RecoveryConnection::Kis(kis),
-                info,
-                topology: usb,
-            });
+        if usb.product_id() == KIS_PRODUCT {
+            return Self::open_kis(device, usb);
         }
+        Self::open_standard(device, usb, mode)
+    }
+
+    fn open_kis(device: Device, usb: nusb::DeviceInfo) -> Result<Self> {
+        let mut kis = Kis::open(&device, &usb)?;
+        let info = kis.info()?;
+        Ok(Self {
+            #[cfg(not(windows))]
+            device,
+            connection: RecoveryConnection::Kis(kis),
+            info,
+            topology: usb,
+        })
+    }
+
+    fn open_standard(device: Device, usb: nusb::DeviceInfo, mode: Mode) -> Result<Self> {
         let mut info = DeviceInfo::parse(&serial_number(&device)?, mode)?;
-        let selected = if info.mode == Mode::Recovery {
+        let (number, alternate) = if info.mode == Mode::Recovery {
             recovery_interface(device.active_configuration()?)?
         } else {
             (0, 0)
         };
-        let interface = UsbInterface::claim(&device, &usb, selected.0)
+        let interface = UsbInterface::claim(&device, &usb, number)
             .context("claiming Apple USB interface; another process or driver may own it")?;
-        interface.set_alt_setting(selected.1)?;
+        interface.set_alt_setting(alternate)?;
         let bulk = if info.mode == Mode::Recovery {
             Some(interface.bulk_out(0x04)?)
         } else {
@@ -276,6 +293,7 @@ impl RecoveryTransport for RecoveryUsb {
         }
         Ok(false)
     }
+
     fn control_in(
         &mut self,
         kind: u8,
@@ -308,6 +326,7 @@ impl RecoveryTransport for RecoveryUsb {
         );
         Ok(bytes)
     }
+
     fn control_out(
         &mut self,
         kind: u8,
@@ -341,16 +360,17 @@ impl RecoveryTransport for RecoveryUsb {
         )?;
         Ok(())
     }
+
     fn bulk_out(&mut self, data: &[u8]) -> Result<()> {
         crate::logging::bytes("usb:bulk", format_args!("OUT"), data);
         let RecoveryConnection::Standard { bulk, .. } = &mut self.connection else {
             bail!("KIS has no Recovery bulk endpoint")
         };
-        let ep = bulk
-            .as_mut()
-            .context("device has no recovery bulk endpoint")?;
-        ep.write(data)
+        bulk.as_mut()
+            .context("device has no recovery bulk endpoint")?
+            .write(data)
     }
+
     fn reset(&mut self) -> Result<()> {
         crate::log!(Trace, "usb", "Resetting device");
         #[cfg(windows)]
@@ -369,22 +389,23 @@ impl RecoveryTransport for RecoveryUsb {
 
 pub fn detect() -> Result<Vec<DeviceInfo>> {
     crate::log!(Trace, "usb:detect", "Scanning for Apple USB devices");
-    let out = collect_devices(recovery_devices()?.map(|(usb, mode)| {
-        if usb.product_id() == 0x1881 {
+    let found = collect_devices(recovery_devices()?.map(|(usb, mode)| {
+        if usb.product_id() == KIS_PRODUCT {
             return Ok(RecoveryUsb::open_candidate(usb, mode)?.info);
         }
-        let serial = if let Some(s) = usb.serial_number() {
-            s.to_owned()
-        } else {
-            let d = usb.open().wait().context("reading DFU serial descriptor")?;
-            serial_number(&d)?
+        let serial = match usb.serial_number() {
+            Some(serial) => serial.to_owned(),
+            None => {
+                let device = usb.open().wait().context("reading DFU serial descriptor")?;
+                serial_number(&device)?
+            }
         };
         let info = DeviceInfo::parse(&serial, mode)?;
         crate::log!(Trace, "usb:detect", "{info:?}");
         Ok(info)
     }))?;
-    crate::log!(Trace, "usb:detect", "Found={}", out.len());
-    Ok(out)
+    crate::log!(Trace, "usb:detect", "Found={}", found.len());
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -404,10 +425,10 @@ impl MuxUsb {
     pub fn candidates() -> Result<Vec<nusb::DeviceInfo>> {
         Ok(nusb::list_devices()
             .wait()?
-            .filter(|d| {
-                d.vendor_id() == APPLE_VENDOR
-                    && Mode::from_pid(d.product_id()).is_none()
-                    && d.product_id() != 0x1881
+            .filter(|usb| {
+                usb.vendor_id() == APPLE_VENDOR
+                    && Mode::from_pid(usb.product_id()).is_none()
+                    && usb.product_id() != KIS_PRODUCT
             })
             .collect())
     }
@@ -417,7 +438,7 @@ impl MuxUsb {
         let active = device
             .active_configuration()
             .ok()
-            .map(|c| c.configuration_value());
+            .map(|configuration| configuration.configuration_value());
         let selected = mux_interface(&device)?;
         if active != Some(selected.configuration) {
             device.set_configuration(selected.configuration).wait().context("selecting USB multiplex configuration (Windows requires an active WinUSB configuration)")?;
@@ -454,13 +475,13 @@ impl MuxUsb {
         Ok(())
     }
 
+    /// Keep each mux packet in its own USB request, including a zero-length
+    /// terminator when it ends on a physical packet boundary.
     pub(crate) fn write_packets(
         &mut self,
         packets: &[Vec<u8>],
         cancelled: &AtomicBool,
     ) -> Result<()> {
-        // Keep each mux packet in its own USB request, including the existing
-        // zero-length terminator when it ends on a physical packet boundary.
         let mut transfers = Vec::with_capacity(packets.len() * 2);
         for packet in packets {
             transfers.push(packet.as_slice());
