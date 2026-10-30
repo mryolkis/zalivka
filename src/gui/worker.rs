@@ -304,8 +304,9 @@ impl Job {
         tx: &Sender<Event>,
         ctx: &egui::Context,
         reboot_required: bool,
+        directory: Option<&std::path::Path>,
     ) -> Result<(Self, PathBuf)> {
-        let (journal, path, transcript) = create_journal(action, &setup)?;
+        let (journal, path, transcript) = create_journal(action, &setup, directory)?;
         let (context, completion) = Self::worker_context(id, &journal, tx, ctx, reboot_required)?;
         let job = Self::new(id, action, context.clone(), journal.clone());
         let started = job.started;
@@ -348,8 +349,13 @@ impl Job {
 fn create_journal(
     action: Action,
     setup: &Setup,
+    directory: Option<&std::path::Path>,
 ) -> Result<(Arc<Mutex<Journal>>, PathBuf, PathBuf)> {
-    let directory = zalivka::storage::log_directory()?;
+    let directory = match directory {
+        Some(directory) => directory.to_path_buf(),
+        None => zalivka::storage::log_directory()?,
+    };
+    std::fs::create_dir_all(&directory)?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let name = format!("{}-{stamp}", action.log_name());
     let path = directory.join(format!("{name}.log"));

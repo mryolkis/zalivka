@@ -988,6 +988,8 @@ fn gui_verifies_an_ipsw_directly_and_keeps_trace_hidden_by_default() {
     zip.finish().unwrap();
     let mut app = english_app();
     app.setup.ipsw = file.path().display().to_string();
+    let logs = tempfile::tempdir().unwrap();
+    app.log_directory = Some(logs.path().to_path_buf());
     let ctx = egui::Context::default();
     app.start(Action::Verify, &ctx);
     assert!(app.job.is_some());

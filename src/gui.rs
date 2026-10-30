@@ -144,6 +144,8 @@ struct App {
     logs: VecDeque<Record>,
     log_details: bool,
     log_path: Option<PathBuf>,
+    /// Overrides the journal directory in tests; production uses the user's log folder.
+    log_directory: Option<PathBuf>,
     notice: Option<Notice>,
     journal_open: bool,
     settings_open: bool,
@@ -174,6 +176,7 @@ impl App {
             logs: VecDeque::new(),
             log_details: false,
             log_path: None,
+            log_directory: None,
             notice: None,
             journal_open: false,
             settings_open: false,
@@ -410,6 +413,7 @@ impl App {
             &self.tx,
             ctx,
             self.windows_reboot_required,
+            self.log_directory.as_deref(),
         );
         match result {
             Ok((job, path)) => {

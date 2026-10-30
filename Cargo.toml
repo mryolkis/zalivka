@@ -32,7 +32,7 @@ hkdf = "0.13"
 hmac = "0.13"
 httparse = "1.10"
 p256 = { version = "0.14", default-features = false, features = ["pem", "std"] }
-ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "socks-proxy"] }
+ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "socks-proxy", "platform-verifier"] }
 uuid = { version = "1", features = ["v4"] }
 oxitls-rustcrypto-provider = "0.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
@@ -52,7 +52,6 @@ libproxy = "0.1.1"
 libgssapi = "0.11"
 
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
-ureq = { version = "3.5", default-features = false, features = ["platform-verifier"] }
 rustls-platform-verifier = { version = "0.7", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
