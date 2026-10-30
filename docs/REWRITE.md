@@ -82,8 +82,8 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | # | Slice | Status |
 | --- | --- | --- |
 | 0 | Baseline, checkpoint tag, audits, green recipe | done |
-| 1 | `support` (device/storage first; logging/progress next) | device + storage done; logging/progress pending |
-| 2 | `wire` (+ digest factory) | wire done; digest factory pending |
+| 1 | `support` (device/storage first; logging/progress next) | done (device, storage, logging, progress) |
+| 2 | `wire` (+ digest factory) | done (wire + checksum/digest) |
 | 3 | `ipsw` (flatten identity/verify/digest/stream) | done (all files rewritten; final flatten deferred to cleanup) |
 | 4 | `crypto` (img4 + aea) | done |
 | 5 | `tss` (transport + requests) | done |
@@ -91,14 +91,14 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | done (usb.rs/backend/descriptors/KIS + dfu) |
 | 8 | `mux` (flatten packet/channel/stream) | done (packet/channel/stream/session) |
 | 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | done (all 16 files rewritten) |
-| 10 | `restored` services (data/images/keys/FDR/ASR) | FDR + ASR done; restored data services pending |
+| 10 | `restored` services (data/images/keys/FDR/ASR) | done (all restore modules and FDR/ASR) |
 | 11 | `net` (+ catalog; break proxy cycle) | done (catalog/net/assets/download/request; TLS moved to crate root; cycle broken) |
-| 12 | `proxy` (one route model; unify framing) | core + Windows done; `macos.rs` pending |
+| 12 | `proxy` (one route model; unify framing) | done, including the macOS CFNetwork resolver (review-only on Windows) |
 | 13 | `host` (drivers/Windows/Linux) | done (drivers + linux + entire Windows tree rewritten) |
 | 14 | `app` (CLI + operations) | done |
 | 15 | `gui` (+ localization) | done (all gui modules and localization rewritten) |
 | — | cross-cutting `logging`/`progress` | done |
-| 16 | Cleanup: Cargo dependencies, dead cfg, docs, final full verification | pending |
+| 16 | Cleanup: Cargo dependencies, dead cfg, docs, final full verification | in progress (structural pass next) |
 
 ## Progress log
 
@@ -162,6 +162,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `951bb92` | `gui/worker` rewrite | 552 tests, clippy clean |
 | `aca05a3` | `gui.rs` rewrite (GUI domain complete) | 552 tests, clippy clean |
 | `9bd9895` | `logging` + `progress` rewrites | 552 tests, clippy clean |
+| `7ba1945` | `proxy/macos` rewrite (all production files now rewritten) | 552 tests, clippy clean; macOS compile-only elsewhere |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
