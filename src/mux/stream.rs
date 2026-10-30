@@ -7,17 +7,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+const ACK_AFTER_BYTES: usize = 16_384;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(300);
+const WINDOW_POLL_LIMIT: usize = 64;
+
 #[derive(Default)]
 struct WriteProfile {
     bytes: u64,
     calls: u64,
     errors: u64,
     elapsed: Duration,
-
     usb_out: Duration,
-
     window_stalls: u64,
-
     event_waits: u64,
     event_wakeups: u64,
 }
@@ -39,6 +40,7 @@ pub struct MuxStream {
     received: u64,
     profile: WriteProfile,
 }
+
 impl MuxStream {
     pub(super) fn new(session: Session, source: u16, destination: u16) -> Self {
         Self {
@@ -57,8 +59,9 @@ impl MuxStream {
         Ok(link
             .channels
             .get(&self.source)
-            .is_some_and(|c| !c.input.is_empty()))
+            .is_some_and(|channel| !channel.input.is_empty()))
     }
+
     pub fn set_read_timeout(&mut self, timeout: Duration) {
         crate::log!(
             Trace,
@@ -69,19 +72,22 @@ impl MuxStream {
         );
         self.read_timeout = timeout;
     }
+
     pub(crate) fn set_log_source(&mut self, source: &'static str) {
         self.log_source = source;
     }
+
     pub(crate) fn local_port(&self) -> u16 {
         self.source
     }
+
     pub fn read_timeout(&self) -> Duration {
         self.read_timeout
     }
 
-    // A write() remains one packet so its error cannot discard a partial
-    // success. write_all() may send a bounded batch under one lock: its API
-    // already reports an error after a partially written buffer.
+    /// A write() remains one packet so its error cannot discard a partial
+    /// success. write_all() may send a bounded batch under one lock: its API
+    /// already reports an error after a partially written buffer.
     fn write_packets(
         &mut self,
         data: &[u8],
@@ -91,39 +97,48 @@ impl MuxStream {
         if data.is_empty() {
             return Ok(Some(0));
         }
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + WRITE_TIMEOUT;
         let mut pending_polls = 0;
         loop {
             let mut link = self.session.lock()?;
             if link.cancelled.load(Ordering::Acquire) {
                 return Err(std::io::Error::other("USB mux session cancelled"));
             }
-            let c = link
-                .channels
-                .get_mut(&self.source)
-                .ok_or_else(|| std::io::Error::other("mux channel closed"))?;
-            c.firmware_transfer = crate::logging::firmware_transfer_active();
-            if c.state == State::Closed {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "device closed service",
-                ));
-            }
-            let outstanding = c.seq.wrapping_sub(c.peer_ack);
-            let available = c.window.saturating_sub(outstanding) as usize;
-            if stop_on_input && available == 0 && !c.input.is_empty() {
+            let window = {
+                let channel = link
+                    .channels
+                    .get_mut(&self.source)
+                    .ok_or_else(|| std::io::Error::other("mux channel closed"))?;
+                channel.firmware_transfer = crate::logging::firmware_transfer_active();
+                if channel.state == State::Closed {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "device closed service",
+                    ));
+                }
+                let outstanding = channel.seq.wrapping_sub(channel.peer_ack);
+                Window {
+                    available: channel.window.saturating_sub(outstanding) as usize,
+                    outstanding,
+                    has_input: !channel.input.is_empty(),
+                    seq: channel.seq,
+                    peer_ack: channel.peer_ack,
+                    size: channel.window,
+                }
+            };
+            if stop_on_input && window.available == 0 && window.has_input {
                 return Ok(None);
             }
-            if available == 0 && pending_polls == 0 {
+            if window.available == 0 && pending_polls == 0 {
                 crate::log!(
                     Trace,
                     "usbmux:tcp",
                     "{} -> {}: waiting for window; seq={}, ack={}, window={}",
                     self.source,
                     self.destination,
-                    c.seq,
-                    c.peer_ack,
-                    c.window
+                    window.seq,
+                    window.peer_ack,
+                    window.size
                 );
             }
             // The available window may be based on an old ACK while newer ACKs
@@ -131,21 +146,20 @@ impl MuxStream {
             // so a stale window does not reduce it to one synchronous packet.
             // Never wait for more space when some is available: small windows
             // and peers delaying their next ACK must still make progress.
-            if available != 0
-                && available < data.len().min(limit)
-                && outstanding != 0
-                && pending_polls < 64
+            if window.available != 0
+                && window.available < data.len().min(limit)
+                && window.outstanding != 0
+                && pending_polls < WINDOW_POLL_LIMIT
             {
                 pending_polls += 1;
-                let pumped = link.pump();
-                if pumped.map_err(std::io::Error::other)? {
+                if link.pump().map_err(std::io::Error::other)? {
                     drop(link);
                     std::thread::yield_now();
                     continue;
                 }
             }
-            if available != 0 {
-                let n = data.len().min(available).min(limit);
+            if window.available != 0 {
+                let n = data.len().min(window.available).min(limit);
                 // Keep intermediate batches on packet boundaries. A short tail
                 // here would create another USB transfer at every window edge.
                 // Small windows and the caller's final tail still go out now.
@@ -164,8 +178,7 @@ impl MuxStream {
                     &data[..n],
                 );
                 let sent = link.send_data(self.source, &data[..n]);
-                let usb = link.usb_write_time - usb_before;
-                self.profile.usb_out += usb;
+                self.profile.usb_out += link.usb_write_time - usb_before;
                 if let Err(error) = sent {
                     crate::log!(
                         Trace,
@@ -186,15 +199,14 @@ impl MuxStream {
                 ));
             }
             self.profile.window_stalls += 1;
-            let pumped = link.pump();
-            let progressed = pumped.map_err(std::io::Error::other)?;
+            let progressed = link.pump().map_err(std::io::Error::other)?;
             let ready = if progressed {
                 None
             } else {
                 link.usb.input_ready()
             };
             drop(link);
-            let waited = if let Some(ready) = ready {
+            if let Some(ready) = ready {
                 self.profile.event_waits += 1;
                 let waited = ready.wait(Duration::from_millis(1));
                 if let Ok(true) = waited {
@@ -203,13 +215,10 @@ impl MuxStream {
                 // Other channels still get a chance to acquire the link. Idle
                 // readers retain their existing backoff against starvation.
                 std::thread::yield_now();
-                waited.map(|_| ()).map_err(std::io::Error::other)
+                waited.map(|_| ()).map_err(std::io::Error::other)?;
             } else {
                 yield_link(progressed);
-                Ok(())
-            };
-
-            waited?;
+            }
         }
     }
 
@@ -222,6 +231,17 @@ impl MuxStream {
         result
     }
 }
+
+/// The channel values needed to decide how much a write may send.
+struct Window {
+    available: usize,
+    outstanding: u32,
+    has_input: bool,
+    seq: u32,
+    peer_ack: u32,
+    size: u32,
+}
+
 impl Read for MuxStream {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         if out.is_empty() {
@@ -233,13 +253,13 @@ impl Read for MuxStream {
             if link.cancelled.load(Ordering::Acquire) {
                 return Err(std::io::Error::other("USB mux session cancelled"));
             }
-            let c = link
+            let channel = link
                 .channels
                 .get_mut(&self.source)
                 .ok_or_else(|| std::io::Error::other("mux channel closed"))?;
-            c.firmware_transfer = crate::logging::firmware_transfer_active();
-            if !c.input.is_empty() {
-                let n = c.input.read(out)?;
+            channel.firmware_transfer = crate::logging::firmware_transfer_active();
+            if !channel.input.is_empty() {
+                let n = channel.input.read(out)?;
                 crate::logging::bytes(
                     self.log_source,
                     format_args!(
@@ -249,16 +269,17 @@ impl Read for MuxStream {
                     &out[..n],
                 );
                 self.received += n as u64;
-                c.consumed += n;
-                if c.consumed >= 16384 {
-                    c.consumed = 0;
+                channel.consumed += n;
+                if channel.consumed >= ACK_AFTER_BYTES {
+                    channel.consumed = 0;
                     // The bytes are already in the caller's buffer. Report
                     // that success; a failed ACK cancels the next operation.
                     let _ = link.send_tcp(self.source, ACK, &[]);
                 }
                 return Ok(n);
             }
-            if c.state == State::Closed {
+            let closed = channel.state == State::Closed;
+            if closed {
                 crate::log!(
                     Trace,
                     "usbmux:io",
@@ -280,6 +301,7 @@ impl Read for MuxStream {
         }
     }
 }
+
 impl Write for MuxStream {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         let started = Instant::now();
@@ -289,6 +311,7 @@ impl Write for MuxStream {
         self.profile.record(started, sent.is_err());
         sent
     }
+
     fn write_all(&mut self, mut data: &[u8]) -> std::io::Result<()> {
         let started = Instant::now();
         let result = (|| {
@@ -303,10 +326,12 @@ impl Write for MuxStream {
         self.profile.record(started, result.is_err());
         result
     }
+
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
+
 impl Drop for MuxStream {
     fn drop(&mut self) {
         crate::log!(
@@ -323,21 +348,21 @@ impl Drop for MuxStream {
             link.channels.remove(&self.source);
         }
         if self.profile.bytes >= 1024 * 1024 || self.profile.errors != 0 {
-            let p = &self.profile;
+            let profile = &self.profile;
             crate::log!(
                 Trace,
                 "usbmux:stats",
                 "Profile {} -> {}: bytes={}, calls={}, errors={}, elapsed={:.3}s, usb={:.3}s, stalls={}, event_waits={}, wakeups={}",
                 self.source,
                 self.destination,
-                p.bytes,
-                p.calls,
-                p.errors,
-                p.elapsed.as_secs_f64(),
-                p.usb_out.as_secs_f64(),
-                p.window_stalls,
-                p.event_waits,
-                p.event_wakeups
+                profile.bytes,
+                profile.calls,
+                profile.errors,
+                profile.elapsed.as_secs_f64(),
+                profile.usb_out.as_secs_f64(),
+                profile.window_stalls,
+                profile.event_waits,
+                profile.event_wakeups
             );
         }
     }
