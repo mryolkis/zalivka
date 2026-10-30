@@ -14,6 +14,8 @@ use windows_sys::Win32::{
     System::IO::DeviceIoControl,
 };
 
+const MAX_HUB_PATHS: u32 = 65_536;
+
 fn parent_hub(device: &nusb::DeviceInfo) -> Result<OwnedHandle> {
     ensure!(
         device.port_number() != 0,
@@ -22,7 +24,7 @@ fn parent_hub(device: &nusb::DeviceInfo) -> Result<OwnedHandle> {
     let paths = super::interface_paths(
         &GUID_DEVINTERFACE_USB_HUB,
         Some(device.parent_instance_id()),
-        65536,
+        MAX_HUB_PATHS,
     )?;
     let path = paths
         .first()
