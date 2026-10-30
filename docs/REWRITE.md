@@ -95,7 +95,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 11 | `net` (+ catalog; break proxy cycle) | done (catalog/net/assets/download/request; TLS moved to crate root; cycle broken) |
 | 12 | `proxy` (one route model; unify framing) | core + Windows done; `macos.rs` pending |
 | 13 | `host` (drivers/Windows/Linux) | Windows proxy/SSPI moved under this domain's umbrella; drivers/setup/packages pending |
-| 14 | `app` (CLI + operations) | pending |
+| 14 | `app` (CLI + operations) | done |
 | 15 | `gui` (+ localization) | pending |
 | 16 | Cleanup: Cargo dependencies, dead cfg, docs, final full verification | pending |
 
@@ -145,6 +145,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `f0bedeb` | `proxy/connect` rewrite | 552 tests, clippy clean |
 | `ada9032` | `proxy.rs` policy/connector rewrite | 552 tests, clippy clean |
 | `95dfa22` | `windows/proxy` + `windows/negotiate` rewrites | 552 tests, clippy clean |
+| `649b5ba` | `operations` + `cli` rewrites (app domain) | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
