@@ -31,6 +31,7 @@ pub(super) struct FileDataWriter<'a> {
     pub(super) key_requests: usize,
     failed: bool,
 }
+
 impl<'a> FileDataWriter<'a> {
     pub(super) fn new(
         stream: &'a mut MuxStream,
@@ -51,6 +52,7 @@ impl<'a> FileDataWriter<'a> {
             failed: false,
         }
     }
+
     fn write_chunk(&mut self, data: &[u8]) -> Result<usize> {
         let first = self.progress.completed() == 0;
         let n = data.len().min(FILE_DATA_CHUNK);
@@ -75,6 +77,7 @@ impl<'a> FileDataWriter<'a> {
         }
         Ok(n)
     }
+
     fn exchange_keys(&mut self) -> Result<()> {
         self.progress.report();
         key_exchange(
@@ -85,70 +88,70 @@ impl<'a> FileDataWriter<'a> {
             |request| self.prefix.response(request, self.assets),
         )
     }
+
     fn flush_pending(&mut self, complete: bool) -> Result<()> {
         let mut n = if complete {
             self.pending.len()
         } else {
             self.pending.len() / crate::mux::MAX_PAYLOAD * crate::mux::MAX_PAYLOAD
         };
-        if n != 0 {
-            let _trace = crate::logging::firmware_transfer();
-
-            let sent = (|| -> Result<()> {
-                if !self.prefix.is_aea() {
-                    self.stream.write_all(&self.pending[..n])?;
-                    return Ok(());
-                }
-                let mut written = 0;
-                while written < n {
-                    match self.stream.write_until_input(&self.pending[written..n])? {
-                        Some(sent) => written += sent,
-                        None => {
-                            self.progress.report();
-                            key_exchange(
-                                self.stream,
-                                self.session,
-                                &mut self.key_requests,
-                                |stream| {
-                                    // An inline reply follows complete plist
-                                    // frames. A separate DataPort needs no flush
-                                    // and can reopen a blocked image window.
-                                    let end = self.pending.len();
-                                    stream.write_all(&self.pending[written..end])?;
-                                    written = end;
-                                    n = end;
-                                    Ok(())
-                                },
-                                |request| self.prefix.response(request, self.assets),
-                            )?;
-                        }
+        if n == 0 {
+            return Ok(());
+        }
+        let _trace = crate::logging::firmware_transfer();
+        let sent = (|| -> Result<()> {
+            if !self.prefix.is_aea() {
+                self.stream.write_all(&self.pending[..n])?;
+                return Ok(());
+            }
+            let mut written = 0;
+            while written < n {
+                match self.stream.write_until_input(&self.pending[written..n])? {
+                    Some(count) => written += count,
+                    None => {
+                        self.progress.report();
+                        key_exchange(
+                            self.stream,
+                            self.session,
+                            &mut self.key_requests,
+                            |stream| {
+                                // An inline reply follows complete plist frames. A
+                                // separate DataPort needs no flush and can reopen a
+                                // blocked image window.
+                                let end = self.pending.len();
+                                stream.write_all(&self.pending[written..end])?;
+                                written = end;
+                                n = end;
+                                Ok(())
+                            },
+                            |request| self.prefix.response(request, self.assets),
+                        )?;
                     }
                 }
-                Ok(())
-            })();
-
-            // write_all may fail after partial success. Never replay that batch.
-            if let Err(error) = sent {
-                self.pending.clear();
-                self.pending_payload = 0;
-                return Err(error);
             }
-            drop(self.pending.drain(..n));
-            // Remaining wire bytes bound the unsent payload from above. This
-            // keeps progress conservative without storing per-frame metadata;
-            // a full flush reports the exact payload count, including the tail.
-            let payload = self
-                .pending_payload
-                .saturating_sub(self.pending.len() as u64);
-            self.pending_payload -= payload;
-            self.progress.advance(payload);
+            Ok(())
+        })();
+        // write_all may fail after partial success. Never replay that batch.
+        if let Err(error) = sent {
+            self.pending.clear();
+            self.pending_payload = 0;
+            return Err(error);
         }
+        drop(self.pending.drain(..n));
+        // Remaining wire bytes bound the unsent payload from above. This keeps
+        // progress conservative without storing per-frame metadata; a full
+        // flush reports the exact payload count, including the tail.
+        let payload = self
+            .pending_payload
+            .saturating_sub(self.pending.len() as u64);
+        self.pending_payload -= payload;
+        self.progress.advance(payload);
         Ok(())
     }
+
     pub(super) fn finish(mut self) -> Result<()> {
         ensure!(!self.failed, "file transfer already failed");
         self.flush_pending(true)?;
-
         if self.prefix.is_aea() && self.stream.has_pending_input()? {
             self.exchange_keys()?;
         }
@@ -174,6 +177,7 @@ impl Write for FileDataWriter<'_> {
         self.failed = result.is_err();
         result.map_err(std::io::Error::other)
     }
+
     fn flush(&mut self) -> std::io::Result<()> {
         if self.failed {
             return Err(std::io::Error::other("file transfer already failed"));
@@ -185,6 +189,7 @@ impl Write for FileDataWriter<'_> {
         result.map_err(std::io::Error::other)
     }
 }
+
 pub(super) fn send_file_data(
     out: &mut MuxStream,
     session: &Session,

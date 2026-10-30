@@ -8,6 +8,10 @@ use anyhow::{Context, Result, ensure};
 use plist::Value;
 use std::time::Duration;
 
+const KEY_READ_TIMEOUT: Duration = Duration::from_secs(3);
+const KEY_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_KEY_REQUESTS: usize = 64;
+
 pub(super) enum ImagePrefix {
     Collecting(Vec<u8>),
     Plain,
@@ -53,10 +57,9 @@ impl ImagePrefix {
         if let Self::Public { fcs, key } = self
             && net::wrapped_key_request(request)?
         {
-            let archive_key = if let Some(key) = *key {
-                key
-            } else {
-                match fcs.fetch_key() {
+            let archive_key = match *key {
+                Some(key) => key,
+                None => match fcs.fetch_key() {
                     Ok(found) => {
                         *key = Some(found);
                         found
@@ -66,7 +69,7 @@ impl ImagePrefix {
                             format!("public FCS failed ({error:#}); WKMS fallback failed")
                         });
                     }
-                }
+                },
             };
             return Ok(wire::dict([
                 ("KeyData", Value::Data(archive_key.to_vec())),
@@ -85,11 +88,14 @@ pub(super) fn key_exchange(
     mut reply: impl FnMut(&Value) -> Result<Value>,
 ) -> Result<()> {
     let timeout = stream.read_timeout();
-    stream.set_read_timeout(Duration::from_secs(3));
+    stream.set_read_timeout(KEY_READ_TIMEOUT);
     let result = (|| {
         while let Some(request) = wire::try_receive(stream)? {
             *key_requests += 1;
-            ensure!(*key_requests <= 64, "too many AEA key requests");
+            ensure!(
+                *key_requests <= MAX_KEY_REQUESTS,
+                "too many AEA key requests"
+            );
             let name = wire::data_type(&request)?;
             let data_type = DataType::parse(name)
                 .with_context(|| format!("unexpected AEA data type {name}"))?;
@@ -103,7 +109,7 @@ pub(super) fn key_exchange(
             crate::log!(Debug, "aea:keys", "{name}; port={port}");
             let response = reply(&request)?;
             if port != 0 {
-                let mut service = session.connect_retry(port, Duration::from_secs(60))?;
+                let mut service = session.connect_retry(port, KEY_CONNECT_TIMEOUT)?;
                 wire::send_binary(&mut service, &response)?;
             } else {
                 finish_inline(stream)?;
