@@ -9,6 +9,8 @@ use std::{
     sync::Mutex,
 };
 
+const BUFFER: usize = 256 * 1024;
+
 pub(super) struct Journal {
     pub(super) log: BufWriter<File>,
     started_ms: u64,
@@ -19,7 +21,7 @@ pub(super) struct Journal {
 impl Journal {
     pub(super) fn new(log: File) -> Self {
         Self {
-            log: BufWriter::with_capacity(256 * 1024, log),
+            log: BufWriter::with_capacity(BUFFER, log),
             started_ms: zalivka::logging::elapsed_ms(),
             error: None,
             pending: VecDeque::new(),
@@ -80,21 +82,22 @@ pub(super) fn save_log(
         .and_then(|source| source.canonicalize().ok())
         .zip(path.canonicalize().ok())
         .is_some_and(|(source, destination)| source == destination);
-    let source = if let Some(source) = source {
-        let file = File::open(source)?;
-        // Capture a complete record boundary, then release writers while the
-        // potentially large snapshot is copied in the background.
-        let mut journal = journal.map(|journal| journal.lock().unwrap_or_else(|e| e.into_inner()));
-        if let Some(journal) = &mut journal {
-            let _ = journal.flush();
-            if let Some(error) = journal.error() {
-                anyhow::bail!("Disk journal incomplete: {error}");
+    // Capture a complete record boundary, then release writers while the
+    // potentially large snapshot is copied in the background.
+    let source = match source {
+        Some(source) => {
+            let file = File::open(source)?;
+            if let Some(journal) = journal {
+                let mut journal = journal.lock().unwrap_or_else(|error| error.into_inner());
+                let _ = journal.flush();
+                if let Some(error) = journal.error() {
+                    anyhow::bail!("Disk journal incomplete: {error}");
+                }
             }
+            let length = file.metadata()?.len();
+            Some((file, length))
         }
-        let length = file.metadata()?.len();
-        Some((file, length))
-    } else {
-        None
+        None => None,
     };
     if same {
         return Ok(path);
@@ -107,11 +110,14 @@ pub(super) fn save_log(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let mut saved = tempfile::NamedTempFile::new_in(directory)?;
-    if let Some((file, length)) = source {
-        std::io::copy(&mut file.take(length), &mut saved)?;
-    } else {
-        saved.write_all(text.as_bytes())?;
-    }
+    match source {
+        Some((file, length)) => {
+            std::io::copy(&mut file.take(length), &mut saved)?;
+        }
+        None => {
+            saved.write_all(text.as_bytes())?;
+        }
+    };
     saved.persist(&path).context("saving operation log")?;
     Ok(path)
 }

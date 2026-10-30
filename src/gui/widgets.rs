@@ -34,6 +34,7 @@ pub(super) fn card(ctx: &egui::Context) -> egui::Frame {
         .corner_radius(14)
         .inner_margin(16)
 }
+
 pub(super) fn section(ui: &mut egui::Ui, number: &str, title: &str) {
     ui.allocate_ui_with_layout(
         Vec2::new(ui.available_width(), 18.0),
@@ -45,6 +46,7 @@ pub(super) fn section(ui: &mut egui::Ui, number: &str, title: &str) {
     );
     ui.add_space(6.0);
 }
+
 pub(super) fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     let galley = ui.painter().layout_no_wrap(
         zalivka::localization::text(text),
@@ -58,31 +60,37 @@ pub(super) fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     ui.painter()
         .galley(rect.center() - galley.size() * 0.5, galley, color);
 }
+
 pub(super) fn tint(color: Color32, background: Color32) -> Color32 {
-    let channel = |c: u8, base: u8| ((u16::from(c) * 8 + u16::from(base) * 92) / 100) as u8;
+    let channel = |color: u8, base: u8| ((u16::from(color) * 8 + u16::from(base) * 92) / 100) as u8;
     Color32::from_rgb(
         channel(color.r(), background.r()),
         channel(color.g(), background.g()),
         channel(color.b(), background.b()),
     )
 }
+
 pub(super) fn metric(ui: &mut egui::Ui, label: &str, value: &str) {
     caption(ui, label);
     ui.label(RichText::new(tr(value)).size(20.0).strong());
 }
+
 pub(super) fn progress_bar(ui: &mut egui::Ui, fraction: Option<f32>) {
     let bar = egui::ProgressBar::new(fraction.unwrap_or_default())
         .fill(super::theme::BLUE)
         .desired_height(10.0);
     ui.add(bar);
-    if let Some(value) = fraction {
-        ui.label(
-            RichText::new(trf("{:.0}%", &[&format!("{:.0}", value * 100.0)]))
-                .small()
-                .strong(),
-        );
-    } else {
-        caption(ui, "Percentage unavailable");
+    match fraction {
+        Some(value) => {
+            ui.label(
+                RichText::new(trf("{:.0}%", &[&format!("{:.0}", value * 100.0)]))
+                    .small()
+                    .strong(),
+            );
+        }
+        None => {
+            caption(ui, "Percentage unavailable");
+        }
     }
 }
 
@@ -110,9 +118,10 @@ pub(super) fn laptop(ui: &mut egui::Ui, connected: bool) {
         Stroke::new(2.0_f32, color),
     );
 }
+
 pub(super) fn human_bytes(bytes: u64) -> String {
     let value = zalivka::progress::human_bytes(bytes);
-    let (number, unit) = value.split_once(' ').unwrap();
+    let (number, unit) = value.split_once(' ').expect("formatted byte value");
     let template = match unit {
         "GiB" => "{:.2} GiB",
         "MiB" => "{:.1} MiB",
@@ -133,6 +142,7 @@ pub(super) fn transfer_stage(stage: &str) -> String {
     }
     tr(stage)
 }
+
 pub(super) fn elapsed_text(seconds: u64) -> String {
     format!(
         "{:02}:{:02}:{:02}",
