@@ -12,6 +12,12 @@ use super::negotiate::Negotiate;
 #[cfg(windows)]
 use crate::windows::negotiate::Negotiate;
 
+const MAX_HEADER: usize = 128 * 1024;
+const MAX_BODY: usize = 1024 * 1024;
+const MAX_LINE: usize = 8192;
+const MAX_ROUNDS: usize = 8;
+const MAX_TRAILERS: usize = 64;
+
 pub(super) trait Connection: Read + Write {
     fn timeout(&mut self, remaining: Duration) -> Result<()>;
 }
@@ -37,7 +43,7 @@ pub(super) fn connect<S: Connection>(
                 if auth.is_none() {
                     auth = Some(Negotiate::new(scheme, proxy.host())?);
                 }
-                auth.as_mut().unwrap().step(challenge)
+                auth.as_mut().expect("initialized").step(challenge)
             }
             #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
             {
@@ -63,7 +69,7 @@ fn header(stream: &mut impl Connection, deadline: Instant) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     while !bytes.ends_with(b"\r\n\r\n") {
         ensure!(
-            bytes.len() < 131072,
+            bytes.len() < MAX_HEADER,
             "proxy response header exceeds 128 KiB"
         );
         stream.timeout(remaining(deadline)?)?;
@@ -106,7 +112,7 @@ fn challenges(value: &str) -> Vec<(&str, Option<&str>)> {
 
 fn discard(stream: &mut impl Connection, mut length: usize, deadline: Instant) -> Result<()> {
     ensure!(
-        length <= 1024 * 1024,
+        length <= MAX_BODY,
         "proxy authentication response body exceeds 1 MiB"
     );
     let mut buffer = [0; 8192];
@@ -124,7 +130,10 @@ fn discard(stream: &mut impl Connection, mut length: usize, deadline: Instant) -
 fn line(stream: &mut impl Connection, deadline: Instant) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     while !bytes.ends_with(b"\r\n") {
-        ensure!(bytes.len() < 8192, "proxy chunk/trailer line exceeds 8 KiB");
+        ensure!(
+            bytes.len() < MAX_LINE,
+            "proxy chunk/trailer line exceeds 8 KiB"
+        );
         stream.timeout(remaining(deadline)?)?;
         let mut byte = [0];
         stream.read_exact(&mut byte)?;
@@ -143,12 +152,9 @@ fn discard_chunked(stream: &mut impl Connection, deadline: Instant) -> Result<()
         total = total
             .checked_add(size)
             .context("proxy chunk length overflow")?;
-        ensure!(
-            total <= 1024 * 1024,
-            "proxy authentication body exceeds 1 MiB"
-        );
+        ensure!(total <= MAX_BODY, "proxy authentication body exceeds 1 MiB");
         if size == 0 {
-            for _ in 0..64 {
+            for _ in 0..MAX_TRAILERS {
                 if line(stream, deadline)? == b"\r\n" {
                     return Ok(());
                 }
@@ -161,6 +167,73 @@ fn discard_chunked(stream: &mut impl Connection, deadline: Instant) -> Result<()
             "invalid proxy chunk terminator"
         );
     }
+}
+
+fn write_connect_request(
+    stream: &mut impl Connection,
+    target: (&str, u16),
+    authorization: Option<&str>,
+) -> Result<()> {
+    write!(
+        stream,
+        "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\nProxy-Connection: Keep-Alive\r\n",
+        target.0, target.1, target.0, target.1
+    )?;
+    if let Some(authorization) = authorization {
+        write!(stream, "Proxy-Authorization: {authorization}\r\n")?;
+    }
+    stream.write_all(b"\r\n")?;
+    stream.flush()?;
+    Ok(())
+}
+
+/// Connection framing declared by the proxy's 407 response.
+fn response_framing(response: &httparse::Response<'_, '_>) -> Result<(bool, Option<usize>, bool)> {
+    let mut close = false;
+    let mut keep_alive = false;
+    for value in response
+        .headers
+        .iter()
+        .filter(|header| {
+            header.name.eq_ignore_ascii_case("connection")
+                || header.name.eq_ignore_ascii_case("proxy-connection")
+        })
+        .flat_map(|header| header.value.split(|byte| *byte == b','))
+    {
+        close |= value.trim_ascii().eq_ignore_ascii_case(b"close");
+        keep_alive |= value.trim_ascii().eq_ignore_ascii_case(b"keep-alive");
+    }
+    let close = close || (response.version == Some(0) && !keep_alive);
+    let mut length = None;
+    for header in response
+        .headers
+        .iter()
+        .filter(|header| header.name.eq_ignore_ascii_case("content-length"))
+    {
+        let value = std::str::from_utf8(header.value)?.trim().parse::<usize>()?;
+        ensure!(
+            length
+                .replace(value)
+                .is_none_or(|previous| previous == value),
+            "conflicting proxy Content-Length values"
+        );
+    }
+    let mut encodings = response
+        .headers
+        .iter()
+        .filter(|header| header.name.eq_ignore_ascii_case("transfer-encoding"));
+    let chunked = if let Some(encoding) = encodings.next() {
+        ensure!(
+            encodings.next().is_none()
+                && encoding.value.eq_ignore_ascii_case(b"chunked")
+                && length.is_none(),
+            "unsupported proxy authentication body framing"
+        );
+        true
+    } else {
+        false
+    };
+    Ok((close, length, chunked))
 }
 
 fn handshake<S: Connection>(
@@ -184,7 +257,7 @@ fn handshake<S: Connection>(
         )
     });
     let mut selected: Option<&str> = None;
-    for round in 0..8 {
+    for round in 0..MAX_ROUNDS {
         crate::log!(
             Trace,
             "proxy:connect",
@@ -197,19 +270,10 @@ fn handshake<S: Connection>(
             selected.unwrap_or(if explicit { "Basic" } else { "none" })
         );
         stream.timeout(remaining(deadline)?)?;
-        write!(
-            stream,
-            "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\nProxy-Connection: Keep-Alive\r\n",
-            target.0, target.1, target.0, target.1
-        )?;
-        if let Some(authorization) = &authorization {
-            write!(stream, "Proxy-Authorization: {authorization}\r\n")?;
-        }
-        stream.write_all(b"\r\n")?;
-        stream.flush()?;
+        write_connect_request(stream, target, authorization.as_deref())?;
         let bytes = header(stream, deadline)?;
         let mut fields =
-            vec![httparse::EMPTY_HEADER; bytes.iter().filter(|b| **b == b'\n').count() - 2];
+            vec![httparse::EMPTY_HEADER; bytes.iter().filter(|byte| **byte == b'\n').count() - 2];
         let mut response = httparse::Response::new(&mut fields);
         ensure!(
             matches!(response.parse(&bytes)?, httparse::Status::Complete(end) if end == bytes.len())
@@ -225,11 +289,11 @@ fn handshake<S: Connection>(
             proxy.port(),
             bytes.len()
         );
-        let offered: Vec<_> = response
+        let offered: Vec<String> = response
             .headers
             .iter()
-            .filter(|h| h.name.eq_ignore_ascii_case("proxy-authenticate"))
-            .map(|h| String::from_utf8_lossy(h.value).into_owned())
+            .filter(|header| header.name.eq_ignore_ascii_case("proxy-authenticate"))
+            .map(|header| String::from_utf8_lossy(header.value).into_owned())
             .collect();
         let offered: Vec<_> = offered.iter().flat_map(|value| challenges(value)).collect();
         if (200..300).contains(&code) {
@@ -258,8 +322,17 @@ fn handshake<S: Connection>(
             code == 407 && !explicit,
             "proxy refused CONNECT (HTTP {code}; schemes={schemes:?}); direct fallback is disabled"
         );
-        let scheme = selected.or_else(|| ["Negotiate", "NTLM"].into_iter().find(|scheme| offered.iter().any(|(name, _)| name.eq_ignore_ascii_case(scheme))))
-            .context("HTTP 407: proxy does not offer Negotiate or NTLM; current-user authentication is unavailable")?;
+        let scheme = selected
+            .or_else(|| {
+                ["Negotiate", "NTLM"].into_iter().find(|scheme| {
+                    offered
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case(scheme))
+                })
+            })
+            .context(
+                "HTTP 407: proxy does not offer Negotiate or NTLM; current-user authentication is unavailable",
+            )?;
         let (_, challenge) = offered
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(scheme))
@@ -277,50 +350,7 @@ fn handshake<S: Connection>(
             proxy.host(),
             proxy.port()
         );
-        let mut close = false;
-        let mut keep_alive = false;
-        for value in response
-            .headers
-            .iter()
-            .filter(|h| {
-                h.name.eq_ignore_ascii_case("connection")
-                    || h.name.eq_ignore_ascii_case("proxy-connection")
-            })
-            .flat_map(|h| h.value.split(|byte| *byte == b','))
-        {
-            close |= value.trim_ascii().eq_ignore_ascii_case(b"close");
-            keep_alive |= value.trim_ascii().eq_ignore_ascii_case(b"keep-alive");
-        }
-        let close = close || (response.version == Some(0) && !keep_alive);
-        let mut length = None;
-        for header in response
-            .headers
-            .iter()
-            .filter(|h| h.name.eq_ignore_ascii_case("content-length"))
-        {
-            let value = std::str::from_utf8(header.value)?.trim().parse::<usize>()?;
-            ensure!(
-                length
-                    .replace(value)
-                    .is_none_or(|previous| previous == value),
-                "conflicting proxy Content-Length values"
-            );
-        }
-        let mut encodings = response
-            .headers
-            .iter()
-            .filter(|h| h.name.eq_ignore_ascii_case("transfer-encoding"));
-        let chunked = if let Some(encoding) = encodings.next() {
-            ensure!(
-                encodings.next().is_none()
-                    && encoding.value.eq_ignore_ascii_case(b"chunked")
-                    && length.is_none(),
-                "unsupported proxy authentication body framing"
-            );
-            true
-        } else {
-            false
-        };
+        let (close, length, chunked) = response_framing(&response)?;
         if close || (length.is_none() && !chunked) {
             crate::log!(
                 Trace,
@@ -350,7 +380,7 @@ fn handshake<S: Connection>(
             !token.is_empty()
                 && token
                     .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)),
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"+/=".contains(&byte)),
             "invalid proxy authentication output token"
         );
         authorization = Some(format!("{scheme} {token}"));
