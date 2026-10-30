@@ -6,6 +6,12 @@ use plist::Value;
 use std::collections::HashSet;
 
 const FIRMWARE: &str = "USBPortController1,USBFirmware";
+const MAX_UARP: usize = 32 * 1024 * 1024;
+const UARP_HEADER: usize = 44;
+const UARP_ROW: usize = 40;
+const MAX_ARCHIVE_OBJECTS: usize = 65_536;
+const MAX_ARCHIVE_DEPTH: usize = 32;
+const MAX_ARCHIVE_EXPANSION: usize = 8 * 1024 * 1024;
 
 pub(super) fn boot(
     ipsw: &mut crate::ipsw::Ipsw,
@@ -59,6 +65,7 @@ pub(super) fn boot(
     Ok(usb)
 }
 
+/// Build the controller signing request; every field is checked against firmware.
 fn request(device: &crate::device::DeviceInfo, identity: &Identity) -> Result<Value> {
     ensure!(device.mode == Mode::PortDfu, "expected Port DFU");
     ensure!(!device.ap_nonce.is_empty(), "Port DFU nonce is unavailable");
@@ -110,7 +117,7 @@ fn request(device: &crate::device::DeviceInfo, identity: &Identity) -> Result<Va
         component
             .get("Digest")
             .and_then(Value::as_data)
-            .is_some_and(|d| !d.is_empty()),
+            .is_some_and(|digest| !digest.is_empty()),
         "Port DFU firmware has no Digest"
     );
     fields.insert(FIRMWARE.into(), Value::Dictionary(component));
@@ -135,37 +142,47 @@ fn unarchive(archive: &Value) -> Result<Value> {
     let objects = wire::get(archive, &["$objects"])?
         .as_array()
         .context("invalid archive objects")?;
-    ensure!(objects.len() <= 65536, "too many UARP archive objects");
-    fn resolve(
-        value: &Value,
-        objects: &[Value],
-        active: &mut HashSet<usize>,
-        remaining: &mut usize,
-        depth: usize,
-    ) -> Result<Value> {
-        ensure!(depth <= 32, "UARP archive nested too deeply");
+    ensure!(
+        objects.len() <= MAX_ARCHIVE_OBJECTS,
+        "too many UARP archive objects"
+    );
+    Resolver {
+        objects,
+        active: HashSet::new(),
+        remaining: MAX_ARCHIVE_EXPANSION,
+    }
+    .value(wire::get(archive, &["$top", "root"])?, 0)
+}
+
+struct Resolver<'a> {
+    objects: &'a [Value],
+    active: HashSet<usize>,
+    remaining: usize,
+}
+
+impl Resolver<'_> {
+    fn value(&mut self, value: &Value, depth: usize) -> Result<Value> {
+        ensure!(depth <= MAX_ARCHIVE_DEPTH, "UARP archive nested too deeply");
         let size = 64
             + match value {
-                Value::String(s) => s.len(),
+                Value::String(text) => text.len(),
                 Value::Data(data) => data.len(),
                 _ => 0,
             };
-        *remaining = remaining
+        self.remaining = self
+            .remaining
             .checked_sub(size)
             .context("UARP archive expansion exceeds limit")?;
         if let Some(uid) = value.as_uid() {
             let index = usize::try_from(uid.get())?;
-            ensure!(active.insert(index), "cyclic UARP archive reference");
-            let value = resolve(
-                objects
+            ensure!(self.active.insert(index), "cyclic UARP archive reference");
+            let value = self.value(
+                self.objects
                     .get(index)
                     .context("UARP archive reference outside object table")?,
-                objects,
-                active,
-                remaining,
                 depth + 1,
             )?;
-            active.remove(&index);
+            self.active.remove(&index);
             return Ok(value);
         }
         if let Some(fields) = value.as_dictionary() {
@@ -173,32 +190,33 @@ fn unarchive(archive: &Value) -> Result<Value> {
                 .get("NS.objects")
                 .and_then(Value::as_array)
                 .context("unsupported UARP archive object")?;
-            if let Some(keys) = fields.get("NS.keys") {
-                let keys = keys
-                    .as_array()
-                    .context("invalid archived dictionary keys")?;
+            let Some(keys) = fields.get("NS.keys") else {
+                return values
+                    .iter()
+                    .map(|value| self.value(value, depth + 1))
+                    .collect::<Result<Vec<_>>>()
+                    .map(Value::Array);
+            };
+            let keys = keys
+                .as_array()
+                .context("invalid archived dictionary keys")?;
+            ensure!(
+                keys.len() == values.len(),
+                "UARP archived dictionary size mismatch"
+            );
+            let mut out = plist::Dictionary::new();
+            for (key, value) in keys.iter().zip(values) {
+                let key = self
+                    .value(key, depth + 1)?
+                    .into_string()
+                    .context("non-string UARP dictionary key")?;
                 ensure!(
-                    keys.len() == values.len(),
-                    "UARP archived dictionary size mismatch"
+                    !out.contains_key(&key),
+                    "duplicate UARP dictionary key {key}"
                 );
-                let mut out = plist::Dictionary::new();
-                for (key, value) in keys.iter().zip(values) {
-                    let key = resolve(key, objects, active, remaining, depth + 1)?
-                        .into_string()
-                        .context("non-string UARP dictionary key")?;
-                    ensure!(
-                        !out.contains_key(&key),
-                        "duplicate UARP dictionary key {key}"
-                    );
-                    out.insert(key, resolve(value, objects, active, remaining, depth + 1)?);
-                }
-                return Ok(Value::Dictionary(out));
+                out.insert(key, self.value(value, depth + 1)?);
             }
-            return values
-                .iter()
-                .map(|v| resolve(v, objects, active, remaining, depth + 1))
-                .collect::<Result<Vec<_>>>()
-                .map(Value::Array);
+            return Ok(Value::Dictionary(out));
         }
         ensure!(
             !matches!(value, Value::Array(_)),
@@ -206,13 +224,6 @@ fn unarchive(archive: &Value) -> Result<Value> {
         );
         Ok(value.clone())
     }
-    resolve(
-        wire::get(archive, &["$top", "root"])?,
-        objects,
-        &mut HashSet::new(),
-        &mut (8 * 1024 * 1024),
-        0,
-    )
 }
 
 struct Payloads<'a> {
@@ -223,12 +234,31 @@ struct Payloads<'a> {
 }
 
 fn payloads(bytes: &[u8], board: u64, revision: u64) -> Result<Payloads<'_>> {
+    ensure!(bytes.len() <= MAX_UARP, "Ace3 UARP exceeds size limit");
+    let (start, end, metadata_offset) = layout(bytes)?;
+    // Reuse the container validator for row sizes, payload bounds and overlap.
+    crate::ipsw::payload_ranges(bytes, bytes.len() as u64)?;
+    let archive = wire::decode_plist(&bytes[metadata_offset..])?;
+    let metadata = unarchive(&archive)?;
+    let (patch, config, digest) = matching_tags(&metadata, board, revision)?;
+    let Selected {
+        payloads: selected,
+        version,
+    } = select_rows(bytes, start, end, metadata_offset, [patch, config, digest])?;
+    let [patch, config, digest_list] =
+        selected.map(|payload| payload.context("missing Ace3 payload"));
+    Ok(Payloads {
+        patch: patch?,
+        config: config?,
+        digest_list: digest_list?,
+        version: version.context("missing Ace3 version")?,
+    })
+}
+
+/// Locate the SuperBinary index and its plist metadata.
+fn layout(bytes: &[u8]) -> Result<(usize, usize, usize)> {
     ensure!(
-        bytes.len() <= 32 * 1024 * 1024,
-        "Ace3 UARP exceeds size limit"
-    );
-    ensure!(
-        be32(bytes, 0)? == 2 && be32(bytes, 4)? == 44,
+        be32(bytes, 0)? == 2 && be32(bytes, 4)? == UARP_HEADER,
         "unsupported Ace3 UARP format"
     );
     let start = be32(bytes, 36)?;
@@ -237,15 +267,16 @@ fn payloads(bytes: &[u8], board: u64, revision: u64) -> Result<Payloads<'_>> {
         .context("UARP index overflow")?;
     let metadata_offset = be32(bytes, 8)?;
     ensure!(
-        start >= 44 && end <= metadata_offset && metadata_offset <= bytes.len(),
+        start >= UARP_HEADER && end <= metadata_offset && metadata_offset <= bytes.len(),
         "invalid UARP index or metadata range"
     );
-    // Reuse the container validator for row sizes, payload bounds and overlap.
-    crate::ipsw::payload_ranges(bytes, bytes.len() as u64)?;
-    let archive = wire::decode_plist(&bytes[metadata_offset..])?;
-    let metadata = unarchive(&archive)?;
+    Ok((start, end, metadata_offset))
+}
+
+/// Choose the payload tags for this board and product revision.
+fn matching_tags(metadata: &Value, board: u64, revision: u64) -> Result<(&str, &str, &str)> {
     let mut selection = None;
-    for payload in wire::get(&metadata, &["SuperBinary Payloads"])?
+    for payload in wire::get(metadata, &["SuperBinary Payloads"])?
         .as_array()
         .context("invalid SuperBinary Payloads")?
     {
@@ -281,68 +312,87 @@ fn payloads(bytes: &[u8], board: u64, revision: u64) -> Result<Payloads<'_>> {
             let (patch, config) = tags
                 .split_once(',')
                 .context("unsupported Ace3 payload composition")?;
-            let dl = wire::string(payload, &["Payload 4CC"])?;
+            let digest = wire::string(payload, &["Payload 4CC"])?;
             ensure!(
-                [patch, config, dl]
+                [patch, config, digest]
                     .iter()
-                    .all(|s| s.len() == 4 && s.is_ascii()),
+                    .all(|tag| tag.len() == 4 && tag.is_ascii()),
                 "invalid Ace3 payload tags"
             );
             ensure!(
-                patch != config && patch != dl && config != dl,
+                patch != config && patch != digest && config != digest,
                 "duplicate Ace3 payload roles"
             );
-            selection = Some((patch, config, dl));
+            selection = Some((patch, config, digest));
         }
     }
-    let (patch, config, dl) =
-        selection.context("Ace3 UARP has no matching board and product revision")?;
+    selection.context("Ace3 UARP has no matching board and product revision")
+}
+
+/// The three payload records with the patch version found in the row table.
+struct Selected<'a> {
+    payloads: [Option<&'a [u8]>; 3],
+    version: Option<u32>,
+}
+
+/// Find the three payload records and the patch version in the row table.
+fn select_rows<'a>(
+    bytes: &'a [u8],
+    start: usize,
+    end: usize,
+    metadata_offset: usize,
+    tags: [&str; 3],
+) -> Result<Selected<'a>> {
     let mut selected = [None; 3];
     let mut version = None;
     let mut position = start;
     while position < end {
         let row = &bytes[position..end];
         let size = be32(row, 0)?;
-        ensure!(size >= 40 && size <= row.len(), "invalid Ace3 UARP row");
+        ensure!(
+            size >= UARP_ROW && size <= row.len(),
+            "invalid Ace3 UARP row"
+        );
         let offset = be32(row, 32)?;
         let length = be32(row, 36)?;
-        for (i, tag) in [patch, config, dl].iter().enumerate() {
-            if row.get(4..8) == Some(tag.as_bytes()) {
-                ensure!(selected[i].is_none(), "duplicate Ace3 payload {tag}");
-                let last = offset
-                    .checked_add(length)
-                    .context("Ace3 payload range overflow")?;
-                ensure!(
-                    offset >= end && last <= metadata_offset && length > 0,
-                    "invalid Ace3 payload range"
-                );
-                selected[i] = Some(&bytes[offset..last]);
-                if i == 0 {
-                    let major = be32(row, 8)?;
-                    let minor = be32(row, 12)?;
-                    let patch = be32(row, 16)?;
-                    let release = if major >= 0xe00 { 0xe00 } else { 0 };
-                    let major = major - release;
-                    ensure!(
-                        major <= 99 && minor <= 999 && patch <= 99,
-                        "unsupported Ace3 firmware version"
-                    );
-                    let bcd = |n: usize| (n / 100) * 256 + ((n / 10) % 10) * 16 + n % 10;
-                    version = Some(
-                        (((bcd(major) | release) << 20) | (bcd(minor) << 8) | bcd(patch)) as u32,
-                    );
-                }
+        for (index, tag) in tags.iter().enumerate() {
+            if row.get(4..8) != Some(tag.as_bytes()) {
+                continue;
+            }
+            ensure!(selected[index].is_none(), "duplicate Ace3 payload {tag}");
+            let last = offset
+                .checked_add(length)
+                .context("Ace3 payload range overflow")?;
+            ensure!(
+                offset >= end && last <= metadata_offset && length > 0,
+                "invalid Ace3 payload range"
+            );
+            selected[index] = Some(&bytes[offset..last]);
+            if index == 0 {
+                version = Some(patch_version(row)?);
             }
         }
         position += size;
     }
-    let [patch, config, digest_list] = selected.map(|v| v.context("missing Ace3 payload"));
-    Ok(Payloads {
-        patch: patch?,
-        config: config?,
-        digest_list: digest_list?,
-        version: version.context("missing Ace3 version")?,
+    Ok(Selected {
+        payloads: selected,
+        version,
     })
+}
+
+/// Encode major/minor/patch as the controller's BCD version word.
+fn patch_version(row: &[u8]) -> Result<u32> {
+    let major = be32(row, 8)?;
+    let minor = be32(row, 12)?;
+    let patch = be32(row, 16)?;
+    let release = if major >= 0xe00 { 0xe00 } else { 0 };
+    let major = major - release;
+    ensure!(
+        major <= 99 && minor <= 999 && patch <= 99,
+        "unsupported Ace3 firmware version"
+    );
+    let bcd = |n: usize| (n / 100) * 256 + ((n / 10) % 10) * 16 + n % 10;
+    Ok((((bcd(major) | release) << 20) | (bcd(minor) << 8) | bcd(patch)) as u32)
 }
 
 fn binary(payloads: Payloads<'_>, ticket: &[u8]) -> Result<Vec<u8>> {
@@ -352,8 +402,8 @@ fn binary(payloads: Payloads<'_>, ticket: &[u8]) -> Result<Vec<u8>> {
         ticket,
         payloads.digest_list,
     ];
-    let size = parts.iter().try_fold(64usize, |n, p| {
-        n.checked_add(p.len()).context("Ace3 size overflow")
+    let size = parts.iter().try_fold(64usize, |size, part| {
+        size.checked_add(part.len()).context("Ace3 size overflow")
     })?;
     ensure!(
         !ticket.is_empty() && size.div_ceil(64) <= usize::from(u16::MAX),
