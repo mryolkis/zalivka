@@ -28,12 +28,8 @@ impl App {
                 Vec2::new((ui.available_width() - 100.0).max(220.0), 54.0),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    let title = self
-                        .target()
-                        .map(|device| {
-                            trf("Mac (CPID {:04x})", &[&format!("{:04x}", device.chip_id)])
-                        })
-                        .unwrap_or_else(|| {
+                    let title = self.target().map_or_else(
+                        || {
                             if self.scan_error.is_some() {
                                 "Could not check USB"
                             } else if self.devices.is_empty() {
@@ -42,7 +38,9 @@ impl App {
                                 "Select a Mac"
                             }
                             .into()
-                        });
+                        },
+                        |device| trf("Mac (CPID {:04x})", &[&format!("{:04x}", device.chip_id)]),
+                    );
                     ui.label(RichText::new(tr(title)).size(19.0).strong());
                     if let Some(device) = self.target() {
                         ui.label(
@@ -59,15 +57,11 @@ impl App {
                     }
                 },
             );
-            if let Some(d) = self.target() {
+            if let Some(device) = self.target() {
                 pill(
                     ui,
-                    match d.mode {
-                        Mode::Dfu => "DFU",
-                        Mode::PortDfu => "Port DFU",
-                        Mode::Recovery => "Recovery",
-                    },
-                    if d.mode.can_restore() {
+                    mode_name(device.mode),
+                    if device.mode.can_restore() {
                         Tone::Success.color(ui.visuals())
                     } else {
                         ui.visuals().weak_text_color()
@@ -81,13 +75,9 @@ impl App {
                 .selected_text(tr("Select a device"))
                 .width(ui.available_width())
                 .show_ui(ui, |ui| {
-                    for d in &self.devices {
-                        let ecid = format!("{:016x}", d.ecid);
-                        ui.selectable_value(
-                            &mut self.setup.ecid,
-                            ecid.clone(),
-                            trf("Mac, {ecid}, {:?}", &[&ecid, &tr(format!("{:?}", d.mode))]),
-                        );
+                    for device in &self.devices {
+                        let ecid = format!("{:016x}", device.ecid);
+                        ui.selectable_value(&mut self.setup.ecid, ecid, device_label(device));
                     }
                 });
         }
@@ -108,6 +98,7 @@ impl App {
         }
         frame
     }
+
     pub(super) fn prepare_firmware_card(
         &mut self,
         ui: &mut egui::Ui,
@@ -176,19 +167,7 @@ impl App {
                 }
             }
         } else {
-            let path = Path::new(self.setup.ipsw.trim());
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| tr("Drop an IPSW file here"));
-            ui.add(egui::Label::new(RichText::new(name).strong()).truncate())
-                .on_hover_text(&self.setup.ipsw);
-            let detail = path
-                .metadata()
-                .ok()
-                .map(|m| human_bytes(m.len()))
-                .unwrap_or_else(|| "Apple firmware file".into());
-            caption(ui, detail);
+            self.local_firmware_summary(ui);
         }
         ui.add_space(5.0);
         ui.allocate_ui_with_layout(
@@ -236,6 +215,23 @@ impl App {
         );
         frame
     }
+
+    fn local_firmware_summary(&self, ui: &mut egui::Ui) {
+        let path = Path::new(self.setup.ipsw.trim());
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| tr("Drop an IPSW file here"));
+        ui.add(egui::Label::new(RichText::new(name).strong()).truncate())
+            .on_hover_text(&self.setup.ipsw);
+        let detail = path
+            .metadata()
+            .ok()
+            .map(|metadata| human_bytes(metadata.len()))
+            .unwrap_or_else(|| "Apple firmware file".into());
+        caption(ui, detail);
+    }
+
     pub(super) fn actions(&mut self, ui: &mut egui::Ui) {
         card(ui.ctx()).show(ui, |ui| {
             section(ui, "03", "Action");
@@ -298,6 +294,7 @@ impl App {
             }
         });
     }
+
     pub(super) fn active_job(&mut self, ui: &mut egui::Ui) {
         card(ui.ctx()).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -333,9 +330,9 @@ impl App {
                     )
                     .clicked()
                 && let Some(job) = &mut self.job
-                && let Err(e) = job.stop()
+                && let Err(error) = job.stop()
             {
-                self.error("Could not stop the operation", e);
+                self.error("Could not stop the operation", error);
             }
             if idle > Duration::from_secs(5) {
                 caption(
@@ -351,45 +348,10 @@ impl App {
         let now = Instant::now();
         for (id, transfer) in &job.transfers {
             ui.add_space(12.0);
-            ui.push_id(id, |ui| {
-                card(ui.ctx()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(
-                        RichText::new(super::widgets::transfer_stage(&transfer.update.stage))
-                            .size(16.0)
-                            .strong(),
-                    );
-                    progress_bar(ui, transfer.update.fraction());
-                    let size = format!(
-                        "{}{}",
-                        human_bytes(transfer.update.completed),
-                        transfer
-                            .update
-                            .total
-                            .map(|total| trf(" of {}", &[&human_bytes(total)]))
-                            .unwrap_or_default()
-                    );
-                    caption(ui, trf("Transferred: {size}", &[&size]));
-                    ui.add_space(8.0);
-                    ui.columns(2, |columns| {
-                        metric(
-                            &mut columns[0],
-                            "Speed",
-                            &trf(
-                                "{:.1} MiB/s",
-                                &[&format!("{:.1}", transfer.speed(now) / 1048576.0)],
-                            ),
-                        );
-                        let remaining = transfer
-                            .remaining(now)
-                            .map(elapsed_text)
-                            .unwrap_or_else(|| "—".into());
-                        metric(&mut columns[1], "Time remaining", &remaining);
-                    });
-                });
-            });
+            ui.push_id(id, |ui| transfer_card(ui, transfer, now));
         }
     }
+
     pub(super) fn windows_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let host = match &self.host {
             Ok(Some(host)) => host,
@@ -462,4 +424,58 @@ impl App {
         }
         ui.add_space(12.0);
     }
+}
+
+fn mode_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Dfu => "DFU",
+        Mode::PortDfu => "Port DFU",
+        Mode::Recovery => "Recovery",
+    }
+}
+
+fn device_label(device: &zalivka::device::DeviceInfo) -> String {
+    let ecid = format!("{:016x}", device.ecid);
+    trf(
+        "Mac, {ecid}, {:?}",
+        &[&ecid, &tr(format!("{:?}", device.mode))],
+    )
+}
+
+fn transfer_card(ui: &mut egui::Ui, transfer: &super::worker::Transfer, now: Instant) {
+    card(ui.ctx()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            RichText::new(super::widgets::transfer_stage(&transfer.update.stage))
+                .size(16.0)
+                .strong(),
+        );
+        progress_bar(ui, transfer.update.fraction());
+        let size = format!(
+            "{}{}",
+            human_bytes(transfer.update.completed),
+            transfer
+                .update
+                .total
+                .map(|total| trf(" of {}", &[&human_bytes(total)]))
+                .unwrap_or_default()
+        );
+        caption(ui, trf("Transferred: {size}", &[&size]));
+        ui.add_space(8.0);
+        ui.columns(2, |columns| {
+            metric(
+                &mut columns[0],
+                "Speed",
+                &trf(
+                    "{:.1} MiB/s",
+                    &[&format!("{:.1}", transfer.speed(now) / 1048576.0)],
+                ),
+            );
+            let remaining = transfer
+                .remaining(now)
+                .map(elapsed_text)
+                .unwrap_or_else(|| "—".into());
+            metric(&mut columns[1], "Time remaining", &remaining);
+        });
+    });
 }
