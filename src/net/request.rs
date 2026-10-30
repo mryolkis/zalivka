@@ -6,7 +6,7 @@ use plist::Value;
 use ureq::http::{Method, Request};
 
 const MAX_BODY: usize = 16 * 1024 * 1024;
-const MAX_HEADERS: usize = 65536;
+const MAX_HEADERS: usize = 65_536;
 const TRANSPORT_HEADERS: &[&str] = &[
     "host",
     "connection",
@@ -19,6 +19,18 @@ const TRANSPORT_HEADERS: &[&str] = &[
     "te",
     "trailer",
     "upgrade",
+];
+const FORBIDDEN_TRAILERS: &[&str] = &[
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "trailer",
+    "authorization",
+    "proxy-authorization",
+    "content-encoding",
+    "content-type",
+    "content-range",
 ];
 
 pub(super) fn asset_request(args: &Value) -> Result<Request<Vec<u8>>> {
@@ -107,19 +119,21 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
         bytes.len() <= wire::MAX_PLIST,
         "serialized HTTP request too large"
     );
-    let end = bytes[..bytes.len().min(MAX_HEADERS)]
+    let body_start = bytes[..bytes.len().min(MAX_HEADERS)]
         .windows(4)
         .position(|part| part == b"\r\n\r\n")
-        .context("SerializedRequest has missing or oversized HTTP headers")?;
-    let raw = &bytes[..end + 4];
+        .context("SerializedRequest has missing or oversized HTTP headers")?
+        + 4;
+    let raw = &bytes[..body_start];
     ensure!(
         !raw.starts_with(b"\r\n")
             && raw
-                .split_inclusive(|b| *b == b'\n')
+                .split_inclusive(|byte| *byte == b'\n')
                 .all(|line| line.ends_with(b"\r\n")),
         "serialized HTTP requires CRLF line endings"
     );
-    let mut headers = vec![httparse::EMPTY_HEADER; raw.iter().filter(|b| **b == b'\n').count() - 2];
+    let mut headers =
+        vec![httparse::EMPTY_HEADER; raw.iter().filter(|byte| **byte == b'\n').count() - 2];
     let mut parsed = httparse::Request::new(&mut headers);
     ensure!(
         parsed.parse(raw)?.is_complete(),
@@ -130,7 +144,7 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
     let version = parsed
         .version
         .context("serialized request has no version")?;
-    let body = &bytes[end + 4..];
+    let body = &bytes[body_start..];
     ensure!(
         matches!(method, "GET" | "POST") && matches!(version, 0 | 1),
         "unsupported SerializedRequest HTTP request line"
@@ -142,14 +156,13 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
     for header in parsed.headers.iter() {
         let name: ureq::http::HeaderName = header.name.parse()?;
         let value = std::str::from_utf8(header.value)?;
-        let checked: ureq::http::HeaderValue = value.parse()?;
         match name.as_str() {
             "host" => {
                 ensure!(host.replace(value).is_none(), "duplicate serialized Host");
             }
             "content-length" => {
                 ensure!(
-                    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()),
+                    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
                     "invalid serialized Content-Length"
                 );
                 ensure!(
@@ -164,7 +177,7 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
                 );
                 chunked = true;
             }
-            _ => request = request.header(name, checked),
+            _ => request = request.header(name, value.parse::<ureq::http::HeaderValue>()?),
         }
     }
     let body = if chunked {
@@ -177,11 +190,26 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
     } else {
         ensure!(body.len() <= MAX_BODY, "asset request body too large");
         ensure!(
-            length.is_none_or(|n| n == body.len()),
+            length.is_none_or(|length| length == body.len()),
             "serialized HTTP body length mismatch"
         );
         body.to_vec()
     };
+    let url = request_target(host, target)?;
+    let uri = apple_url(&url)?;
+    if let Some(host) = host {
+        let destination = uri.host().context("serialized request URL has no host")?;
+        ensure!(
+            host.eq_ignore_ascii_case(destination)
+                || host.eq_ignore_ascii_case(&format!("{destination}:443")),
+            "serialized Host differs from the Apple HTTPS URL"
+        );
+    }
+    finish_request(request.uri(uri).body(body)?)
+}
+
+/// Resolve an origin-form target against the request's Host header.
+fn request_target(host: Option<&str>, target: &str) -> Result<String> {
     let url = if target.starts_with('/') && !target.starts_with("//") {
         format!(
             "https://{}{}",
@@ -195,16 +223,7 @@ pub(super) fn serialized_asset_request(bytes: &[u8]) -> Result<Request<Vec<u8>>>
         !url.contains('#'),
         "serialized request URL contains a fragment"
     );
-    let uri = apple_url(&url)?;
-    if let Some(host) = host {
-        let destination = uri.host().context("serialized request URL has no host")?;
-        ensure!(
-            host.eq_ignore_ascii_case(destination)
-                || host.eq_ignore_ascii_case(&format!("{destination}:443")),
-            "serialized Host differs from the Apple HTTPS URL"
-        );
-    }
-    finish_request(request.uri(uri).body(body)?)
+    Ok(url)
 }
 
 fn http_line<'a>(input: &mut &'a [u8]) -> Result<&'a [u8]> {
@@ -224,23 +243,31 @@ fn http_token(byte: u8) -> bool {
 fn http_ows(input: &[u8]) -> &[u8] {
     &input[input
         .iter()
-        .take_while(|b| matches!(b, b' ' | b'\t'))
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
         .count()..]
 }
 
 fn http_chunk_size(line: &[u8]) -> Result<usize> {
-    let digits = line.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+    let digits = line
+        .iter()
+        .take_while(|byte| byte.is_ascii_hexdigit())
+        .count();
     ensure!(digits != 0, "invalid HTTP chunk size");
     let size = usize::from_str_radix(std::str::from_utf8(&line[..digits])?, 16)
         .context("HTTP chunk size overflow")?;
-    let mut rest = &line[digits..];
+    skip_chunk_extensions(&line[digits..])?;
+    Ok(size)
+}
+
+/// Validate chunk extensions, including quoted strings and escapes, and ignore them.
+fn skip_chunk_extensions(mut rest: &[u8]) -> Result<()> {
     // RFC 9112 section 7.1.1: unknown extensions are ignored, but their
     // syntax must still be valid (including quoted strings and escapes).
     while !rest.is_empty() {
         rest = http_ows(rest);
         ensure!(rest.first() == Some(&b';'), "invalid HTTP chunk extension");
         rest = http_ows(&rest[1..]);
-        let name = rest.iter().take_while(|b| http_token(**b)).count();
+        let name = rest.iter().take_while(|byte| http_token(**byte)).count();
         ensure!(name != 0, "missing HTTP chunk extension name");
         rest = &rest[name..];
         let value = http_ows(rest);
@@ -249,31 +276,34 @@ fn http_chunk_size(line: &[u8]) -> Result<usize> {
         }
         rest = http_ows(&value[1..]);
         if rest.first() == Some(&b'"') {
-            rest = &rest[1..];
-            loop {
-                let byte = *rest.first().context("unterminated HTTP chunk extension")?;
-                rest = &rest[1..];
-                match byte {
-                    b'"' => break,
-                    b'\\' => {
-                        let escaped = *rest.first().context("truncated HTTP chunk escape")?;
-                        ensure!(
-                            escaped == b'\t' || escaped >= b' ' && escaped != 127,
-                            "invalid HTTP chunk escape"
-                        );
-                        rest = &rest[1..];
-                    }
-                    b'\t' | b' ' | b'!' | b'#'..=b'[' | b']'..=b'~' | 128..=255 => {}
-                    _ => anyhow::bail!("invalid quoted HTTP chunk extension"),
-                }
-            }
+            rest = quoted_chunk_value(&rest[1..])?;
         } else {
-            let value = rest.iter().take_while(|b| http_token(**b)).count();
+            let value = rest.iter().take_while(|byte| http_token(**byte)).count();
             ensure!(value != 0, "missing HTTP chunk extension value");
             rest = &rest[value..];
         }
     }
-    Ok(size)
+    Ok(())
+}
+
+fn quoted_chunk_value(mut rest: &[u8]) -> Result<&[u8]> {
+    loop {
+        let byte = *rest.first().context("unterminated HTTP chunk extension")?;
+        rest = &rest[1..];
+        match byte {
+            b'"' => return Ok(rest),
+            b'\\' => {
+                let escaped = *rest.first().context("truncated HTTP chunk escape")?;
+                ensure!(
+                    escaped == b'\t' || escaped >= b' ' && escaped != 127,
+                    "invalid HTTP chunk escape"
+                );
+                rest = &rest[1..];
+            }
+            b'\t' | b' ' | b'!' | b'#'..=b'[' | b']'..=b'~' | 128..=255 => {}
+            _ => anyhow::bail!("invalid quoted HTTP chunk extension"),
+        }
+    }
 }
 
 pub(super) fn decode_http_chunks(mut input: &[u8]) -> Result<Vec<u8>> {
@@ -281,42 +311,8 @@ pub(super) fn decode_http_chunks(mut input: &[u8]) -> Result<Vec<u8>> {
     loop {
         let size = http_chunk_size(http_line(&mut input)?)?;
         if size == 0 {
-            let start = input.len();
-            loop {
-                let trailer = http_line(&mut input)?;
-                ensure!(
-                    start - input.len() <= MAX_HEADERS,
-                    "HTTP trailers too large"
-                );
-                if trailer.is_empty() {
-                    ensure!(input.is_empty(), "data after the terminal HTTP chunk");
-                    return Ok(decoded);
-                }
-                let colon = trailer
-                    .iter()
-                    .position(|b| *b == b':')
-                    .context("invalid HTTP trailer")?;
-                let name = ureq::http::HeaderName::from_bytes(&trailer[..colon])?;
-                ensure!(
-                    ![
-                        "host",
-                        "content-length",
-                        "transfer-encoding",
-                        "connection",
-                        "trailer",
-                        "authorization",
-                        "proxy-authorization",
-                        "content-encoding",
-                        "content-type",
-                        "content-range"
-                    ]
-                    .contains(&name.as_str()),
-                    "forbidden HTTP trailer field"
-                );
-                ureq::http::HeaderValue::from_bytes(&trailer[colon + 1..])?;
-                // Unknown trailer fields can be discarded under RFC 9112
-                // section 7.1.2; do not promote them to request headers.
-            }
+            skip_trailers(&mut input)?;
+            return Ok(decoded);
         }
         ensure!(
             size <= MAX_BODY - decoded.len(),
@@ -329,5 +325,32 @@ pub(super) fn decode_http_chunks(mut input: &[u8]) -> Result<Vec<u8>> {
         );
         decoded.extend_from_slice(data);
         input = &input[size + 2..];
+    }
+}
+
+/// Validate and discard the trailer section; no fields are promoted.
+fn skip_trailers(input: &mut &[u8]) -> Result<()> {
+    let start = input.len();
+    loop {
+        let trailer = http_line(input)?;
+        ensure!(
+            start - input.len() <= MAX_HEADERS,
+            "HTTP trailers too large"
+        );
+        if trailer.is_empty() {
+            ensure!(input.is_empty(), "data after the terminal HTTP chunk");
+            return Ok(());
+        }
+        let colon = trailer
+            .iter()
+            .position(|byte| *byte == b':')
+            .context("invalid HTTP trailer")?;
+        let name = ureq::http::HeaderName::from_bytes(&trailer[..colon])?;
+        ensure!(
+            !FORBIDDEN_TRAILERS.contains(&name.as_str()),
+            "forbidden HTTP trailer field"
+        );
+        ureq::http::HeaderValue::from_bytes(&trailer[colon + 1..])?;
+        // Unknown trailer fields can be discarded under RFC 9112 section 7.1.2.
     }
 }
