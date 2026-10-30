@@ -17,7 +17,7 @@ pub(super) fn for_url(uri: &Uri) -> Result<Vec<Option<Proxy>>> {
         }
         let values = slot
             .as_ref()
-            .unwrap()
+            .expect("libproxy factory initialized")
             .get_proxies(&uri.to_string())
             .map_err(|error| anyhow::anyhow!("resolving Linux system proxy/PAC/WPAD: {error:?}"))?;
         super::routes_from_strings(values)

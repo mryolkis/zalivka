@@ -7,6 +7,9 @@ use libgssapi::{
     oid::{GSS_MECH_SPNEGO, GSS_NT_HOSTBASED_SERVICE, Oid},
 };
 
+const MAX_TOKEN: usize = 64 * 1024;
+const NTLM_MECHANISM: &[u8] = b"\x2b\x06\x01\x04\x01\x82\x37\x02\x02\x0a";
+
 pub(super) struct Negotiate {
     context: ClientCtx,
 }
@@ -22,9 +25,9 @@ impl Negotiate {
             Some(GSS_NT_HOSTBASED_SERVICE),
         )
         .context("creating GSSAPI proxy service name")?;
+        // GSS-NTLMSSP, if installed, provides the standard NTLM mechanism.
         let mechanism = if scheme == "NTLM" {
-            // GSS-NTLMSSP, if installed, provides the standard NTLM mechanism.
-            Oid::from_slice(b"\x2b\x06\x01\x04\x01\x82\x37\x02\x02\x0a")
+            Oid::from_slice(NTLM_MECHANISM)
         } else {
             GSS_MECH_SPNEGO
         };
@@ -44,13 +47,17 @@ impl Negotiate {
             .transpose()
             .context("invalid proxy authentication token encoding")?;
         ensure!(
-            token.as_ref().map_or(0, Vec::len) <= 65536,
+            token.as_ref().map_or(0, Vec::len) <= MAX_TOKEN,
             "proxy authentication token exceeds 64 KiB"
         );
-        let output = self.context.step(token.as_deref(), None)
-            .context("GSSAPI proxy authentication failed; check the current user's Kerberos ticket / SSO credentials and proxy service principal")?;
+        let output = self.context.step(token.as_deref(), None).context(
+            "GSSAPI proxy authentication failed; check the current user's Kerberos ticket / SSO credentials and proxy service principal",
+        )?;
         let output = output.as_deref().unwrap_or_default();
-        ensure!(output.len() <= 65536, "GSSAPI output token exceeds 64 KiB");
+        ensure!(
+            output.len() <= MAX_TOKEN,
+            "GSSAPI output token exceeds 64 KiB"
+        );
         Ok(BASE64_STANDARD.encode(output))
     }
 
