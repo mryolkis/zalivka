@@ -21,18 +21,22 @@ pub(super) fn log_progress(
     output(Record::new(
         Level::Debug,
         "restored:op",
-        if progress == -1 {
-            format!("Operation {operation}: no percentage")
-        } else if progress < 0 {
-            format!("Operation {operation}: percentage unavailable ({progress})")
-        } else {
-            format!("Operation {operation}: {progress}%")
-        },
+        progress_text(operation, progress),
     ));
     Ok(crate::progress::Event::OperationProgress {
         operation,
         progress,
     })
+}
+
+fn progress_text(operation: u64, progress: i64) -> String {
+    if progress == -1 {
+        format!("Operation {operation}: no percentage")
+    } else if progress < 0 {
+        format!("Operation {operation}: percentage unavailable ({progress})")
+    } else {
+        format!("Operation {operation}: {progress}%")
+    }
 }
 
 /// These optional weights are progress hints, not a condition for restoring.
@@ -85,7 +89,6 @@ pub(super) fn log_checkpoint(
         .as_signed_integer()
         .context("invalid checkpoint result")?;
     let complete = wire::flag(message, &["CHECKPOINT_COMPLETE"])?;
-    let phase = if complete { "completed" } else { "started" };
     // Checkpoints describe individual steps; only StatusMsg decides the final result.
     output(Record::new(
         if result == 0 {
@@ -94,7 +97,7 @@ pub(super) fn log_checkpoint(
             Level::Warning
         },
         "restored:cp",
-        format!("{name}: {phase}; id=0x{id:x}, result={result}"),
+        format!("{name}: {}; id=0x{id:x}, result={result}", state(complete)),
     ));
     let error = wire::string(message, &["CHECKPOINT_ERROR"]).ok();
     for (text, level) in [
@@ -129,6 +132,10 @@ pub(super) fn log_checkpoint(
         },
         provisioning_failed,
     ))
+}
+
+fn state(complete: bool) -> &'static str {
+    if complete { "completed" } else { "started" }
 }
 
 /// Once firmware is running, a diagnostic write must not interrupt the device

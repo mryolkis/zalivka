@@ -29,6 +29,7 @@ pub(super) enum DataType {
 }
 
 impl DataType {
+    /// The single vocabulary used by dispatch, async capabilities and options.
     const TYPES: &[(&str, Self)] = &[
         ("BuildIdentityDict", Self::BuildIdentity),
         ("BuildIdentityDictV2", Self::BuildIdentity),
@@ -82,7 +83,7 @@ impl DataType {
     pub(super) fn async_types() -> Dictionary {
         Self::TYPES
             .iter()
-            .map(|(name, _)| (*name, plist::Value::Boolean(true)))
+            .map(|(name, _)| (*name, Value::Boolean(true)))
             .collect()
     }
 
