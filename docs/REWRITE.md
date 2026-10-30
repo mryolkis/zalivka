@@ -82,22 +82,35 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | # | Slice | Status |
 | --- | --- | --- |
 | 0 | Baseline, checkpoint tag, audits, green recipe | done |
-| 1 | `support` (device/storage first; logging/progress next) | in progress |
-| 2 | `wire` (+ digest factory) | pending |
+| 1 | `support` (device/storage first; logging/progress next) | device + storage done; logging/progress pending |
+| 2 | `wire` (+ digest factory) | wire done; digest factory pending |
 | 3 | `ipsw` (flatten identity/verify/digest/stream) | pending |
-| 4 | `crypto` (img4 + aea) | pending |
+| 4 | `crypto` (img4 + aea) | aea done; img4 pending |
 | 5 | `tss` (transport + requests) | pending |
 | 6 | `firmware` (flatten updater/containers/canary/request) | pending |
 | 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | pending |
 | 8 | `mux` (flatten packet/channel/stream) | pending |
 | 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | pending |
 | 10 | `restored` services (data/images/keys/FDR/ASR) | pending |
-| 11 | `net` (+ catalog; break proxy cycle) | pending |
+| 11 | `net` (+ catalog; break proxy cycle) | catalog done; net pending |
 | 12 | `proxy` (one route model; unify framing) | pending |
 | 13 | `host` (drivers/Windows/Linux) | pending |
 | 14 | `app` (CLI + operations) | pending |
 | 15 | `gui` (+ localization) | pending |
 | 16 | Cleanup: Cargo dependencies, dead cfg, docs, final full verification | pending |
+
+## Progress log
+
+| Commit | Slice | Verification |
+| --- | --- | --- |
+| `976d8ac` | foundation: `device`, `checksum`, `storage` | 269 lib + 216 protocols |
+| `b990b12` | plan and baseline audits | — |
+| `db79a31` | `wire` full rewrite | 552 tests, clippy clean |
+| `35fbf08` | `catalog` and `aea` full rewrites | 552 tests, clippy clean |
+
+Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
+--all-targets --all-features -- -D warnings`, and the full test suite with
+`TEMP`/`LOCALAPPDATA` redirected into `.cache/env`.
 
 ## Verification recipe
 
