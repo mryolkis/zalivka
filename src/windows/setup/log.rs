@@ -13,6 +13,10 @@ use windows_sys::Win32::{
     System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_NOWAIT, PIPE_REJECT_REMOTE_CLIENTS},
 };
 
+const READ_BUFFER: usize = 8192;
+const MAX_READS: usize = 32;
+const MAX_RECORD: usize = 65_536;
+
 pub(super) struct LogPipe {
     pub id: uuid::Uuid,
     pipe: File,
@@ -33,7 +37,7 @@ impl LogPipe {
                 PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 0,
-                65536,
+                MAX_RECORD as u32,
                 0,
                 ptr::null(),
             )
@@ -62,8 +66,8 @@ impl LogPipe {
     pub fn drain(&mut self, mut publish: impl FnMut(Record)) -> Result<()> {
         // Nonblocking reads let the caller also observe helper exit, including
         // failures before it connects. Bound work and incomplete record size.
-        let mut buffer = [0u8; 8192];
-        for _ in 0..32 {
+        let mut buffer = [0u8; READ_BUFFER];
+        for _ in 0..MAX_READS {
             let size = match self.pipe.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(size) => size,
@@ -79,7 +83,7 @@ impl LogPipe {
             self.pending.extend_from_slice(&buffer[..size]);
             while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<_> = self.pending.drain(..=end).collect();
-                ensure!(line.len() <= 65536, "UAC log record too long");
+                ensure!(line.len() <= MAX_RECORD, "UAC log record too long");
                 let line =
                     std::str::from_utf8(&line).context("UAC journal contains invalid UTF-8")?;
                 // Only records are accepted; helper output cannot change worker state.
@@ -88,7 +92,7 @@ impl LogPipe {
                 self.received = true;
                 publish(record);
             }
-            ensure!(self.pending.len() <= 65536, "UAC log record too long");
+            ensure!(self.pending.len() <= MAX_RECORD, "UAC log record too long");
         }
         Ok(())
     }
