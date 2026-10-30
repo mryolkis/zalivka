@@ -2,6 +2,14 @@
 use super::{DEVICE_MAGIC, HOST_MAGIC, MTU};
 use anyhow::{Result, ensure};
 
+const HEADER_V1: usize = 8;
+const HEADER_V2: usize = 16;
+const MAX_PACKET: usize = 65_536;
+
+fn header_size(version: u32) -> usize {
+    if version >= 2 { HEADER_V2 } else { HEADER_V1 }
+}
+
 pub(super) fn encode_header(
     bytes: &mut Vec<u8>,
     protocol: u32,
@@ -10,7 +18,7 @@ pub(super) fn encode_header(
     rx: u16,
     payload_len: usize,
 ) -> Result<()> {
-    let header_size = if version >= 2 { 16 } else { 8 };
+    let header_size = header_size(version);
     ensure!(
         payload_len <= MTU - header_size,
         "USB mux packet exceeds MTU"
@@ -33,11 +41,15 @@ pub struct Packet<'a> {
     pub rx: u16,
     pub payload: &'a [u8],
 }
+
 pub fn decode_packet(bytes: &[u8], version: u32) -> Result<Packet<'_>> {
-    let size = if version >= 2 { 16 } else { 8 };
+    let size = header_size(version);
     ensure!(bytes.len() >= size, "truncated mux packet");
-    let n = u32::from_be_bytes(bytes[4..8].try_into()?) as usize;
-    ensure!(n == bytes.len() && n <= 65536, "invalid mux length {n}");
+    let length = u32::from_be_bytes(bytes[4..8].try_into()?) as usize;
+    ensure!(
+        length == bytes.len() && length <= MAX_PACKET,
+        "invalid mux length {length}"
+    );
     let rx = if version >= 2 {
         let magic = u32::from_be_bytes(bytes[8..12].try_into()?);
         ensure!(
@@ -69,9 +81,9 @@ pub(super) struct TcpPacket<'a> {
 impl<'a> TcpPacket<'a> {
     pub(super) fn parse(bytes: &'a [u8]) -> Result<Self> {
         ensure!(bytes.len() >= 20, "truncated mux TCP header");
-        let header_len = usize::from(bytes[12] >> 4) * 4;
+        let header_length = usize::from(bytes[12] >> 4) * 4;
         ensure!(
-            header_len >= 20 && header_len <= bytes.len(),
+            header_length >= 20 && header_length <= bytes.len(),
             "invalid mux TCP header size"
         );
         Ok(Self {
@@ -81,7 +93,7 @@ impl<'a> TcpPacket<'a> {
             ack: u32::from_be_bytes(bytes[8..12].try_into()?),
             flags: bytes[13],
             window: u32::from(u16::from_be_bytes(bytes[14..16].try_into()?)) << 8,
-            data: &bytes[header_len..],
+            data: &bytes[header_length..],
         })
     }
 }
