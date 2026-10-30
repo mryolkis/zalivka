@@ -1,4 +1,9 @@
 //! Public FCS key unwrapping for AEA profile 1. No AppleConnect credentials.
+//!
+//! An AEA file starts with `AEA1`, a little-endian metadata length, the
+//! key/value metadata, a 32-byte salt and a 112-byte root header. Metadata may
+//! name Apple's public WKMS key service; when it does, the archive key can be
+//! unwrapped with an ordinary P-256 key instead of a WKMS authorization.
 use anyhow::{Context, Result, ensure};
 use base64::{
     Engine,
@@ -10,8 +15,11 @@ use hpke::{Deserializable, Kem, OpModeR, aead::AesGcm256, kdf::HkdfSha256, kem::
 use p256::{SecretKey, elliptic_curve::sec1::ToSec1Point, pkcs8::DecodePrivateKey};
 use sha2::{Digest, Sha256};
 
+const MAGIC: &[u8; 4] = b"AEA1";
+const VERSION: u32 = 1;
 const MAX_AUTH: usize = 1024 * 1024;
-pub const MAX_PREFIX: usize = 12 + MAX_AUTH + 144;
+const TRAILER: usize = 32 + 112;
+pub const MAX_PREFIX: usize = 12 + MAX_AUTH + TRAILER;
 
 pub enum Prefix {
     Incomplete,
@@ -36,7 +44,7 @@ impl PublicFcs {
         if bytes.len() < 12 {
             return Ok(Prefix::Incomplete);
         }
-        if &bytes[..4] != b"AEA1" || u32::from_le_bytes(bytes[4..8].try_into()?) != 1 {
+        if &bytes[..4] != MAGIC || u32::from_le_bytes(bytes[4..8].try_into()?) != VERSION {
             return Ok(Prefix::Unsupported);
         }
         let length = u32::from_le_bytes(bytes[8..12].try_into()?) as usize;
@@ -45,31 +53,10 @@ impl PublicFcs {
             "AEA authentication metadata exceeds 1 MiB"
         );
         let end = 12 + length;
-        if bytes.len() < end + 144 {
+        if bytes.len() < end + TRAILER {
             return Ok(Prefix::Incomplete);
         }
-        let mut fields = std::collections::HashMap::new();
-        let mut remaining = &bytes[12..end];
-        while !remaining.is_empty() {
-            let size = remaining.get(..4).context("truncated AEA metadata field")?;
-            let size = u32::from_le_bytes(size.try_into()?) as usize;
-            ensure!(
-                size >= 5 && size <= remaining.len(),
-                "invalid AEA metadata field size"
-            );
-            let field = &remaining[4..size];
-            let separator = field
-                .iter()
-                .position(|b| *b == 0)
-                .context("AEA metadata field has no name separator")?;
-            let name = std::str::from_utf8(&field[..separator])
-                .context("invalid AEA metadata field name")?;
-            ensure!(
-                !name.is_empty() && fields.insert(name, &field[separator + 1..]).is_none(),
-                "empty or duplicate AEA metadata field"
-            );
-            remaining = &remaining[size..];
-        }
+        let fields = metadata_fields(&bytes[12..end])?;
         let (Some(url), Some(response)) = (
             fields.get("com.apple.wkms.fcs-key-url"),
             fields.get("com.apple.wkms.fcs-response"),
@@ -119,7 +106,7 @@ impl PublicFcs {
             wrapped,
             auth: bytes[12..end].to_vec(),
             salt: bytes[end..end + 32].try_into()?,
-            root: bytes[end + 32..end + 144].try_into()?,
+            root: bytes[end + 32..end + TRAILER].try_into()?,
         })))
     }
 
@@ -134,8 +121,10 @@ impl PublicFcs {
 
     pub fn unwrap_key(&self, pem: &[u8]) -> Result<[u8; 32]> {
         ensure!(pem.len() <= 65536, "public FCS key response exceeds 64 KiB");
-        let pem = std::str::from_utf8(pem).context("FCS key is not UTF-8 PEM")?;
-        let secret = SecretKey::from_pkcs8_pem(pem).context("FCS key is not PKCS#8 P-256")?;
+        let secret = SecretKey::from_pkcs8_pem(
+            std::str::from_utf8(pem).context("FCS key is not UTF-8 PEM")?,
+        )
+        .context("FCS key is not PKCS#8 P-256")?;
         let recipient = secret.public_key().to_sec1_point(false);
         ensure!(
             URL_SAFE.encode(Sha256::digest(recipient.as_bytes())) == self.fingerprint,
@@ -148,14 +137,8 @@ impl PublicFcs {
         // Authenticate this image's encrypted root header before returning
         // LocalUnwrapped. A successful HPKE open alone does not bind the key
         // to the remainder of this file's AEA metadata and root header.
-        let mut main = [0; 32];
-        Hkdf::<Sha256>::new(Some(&self.salt), &key)
-            .expand(b"AEA_AMK\x01\0\0\0", &mut main)
-            .map_err(|_| anyhow::anyhow!("AEA key derivation failed"))?;
-        let mut mac_key = [0; 32];
-        Hkdf::<Sha256>::new(None, &main)
-            .expand(b"AEA_RHEK", &mut mac_key)
-            .map_err(|_| anyhow::anyhow!("AEA header key derivation failed"))?;
+        let main = hkdf_expand(Some(&self.salt), &key, b"AEA_AMK\x01\0\0\0")?;
+        let mac_key = hkdf_expand(None, &main, b"AEA_RHEK")?;
         let mut mac = Hmac::<Sha256>::new_from_slice(&mac_key)?;
         mac.update(&self.root[80..112]);
         mac.update(&self.auth);
@@ -165,6 +148,40 @@ impl PublicFcs {
             .map_err(|_| anyhow::anyhow!("AEA root header authentication failed"))?;
         Ok(key)
     }
+}
+
+fn hkdf_expand(salt: Option<&[u8]>, key: &[u8], info: &[u8]) -> Result<[u8; 32]> {
+    let mut output = [0; 32];
+    Hkdf::<Sha256>::new(salt, key)
+        .expand(info, &mut output)
+        .map_err(|_| anyhow::anyhow!("AEA key derivation failed"))?;
+    Ok(output)
+}
+
+/// Parse the length-prefixed `name\0value` metadata fields.
+fn metadata_fields(mut bytes: &[u8]) -> Result<std::collections::HashMap<&str, &[u8]>> {
+    let mut fields = std::collections::HashMap::new();
+    while !bytes.is_empty() {
+        let size = bytes.get(..4).context("truncated AEA metadata field")?;
+        let size = u32::from_le_bytes(size.try_into()?) as usize;
+        ensure!(
+            size >= 5 && size <= bytes.len(),
+            "invalid AEA metadata field size"
+        );
+        let field = &bytes[4..size];
+        let separator = field
+            .iter()
+            .position(|b| *b == 0)
+            .context("AEA metadata field has no name separator")?;
+        let name =
+            std::str::from_utf8(&field[..separator]).context("invalid AEA metadata field name")?;
+        ensure!(
+            !name.is_empty() && fields.insert(name, &field[separator + 1..]).is_none(),
+            "empty or duplicate AEA metadata field"
+        );
+        bytes = &bytes[size..];
+    }
+    Ok(fields)
 }
 
 // RFC 9180 base mode, DHKEM(P-256, HKDF-SHA256), HKDF-SHA256,

@@ -1,4 +1,4 @@
-//! Apple's IPSW catalogs contain the model lookup and latest restore URL/hash.
+//! Apple's IPSW catalogs: model lookup plus the current restore URL and hash.
 use crate::{
     device::{DeviceInfo, Mode, decode_hex},
     ipsw::{Behavior, Ipsw},
@@ -17,10 +17,6 @@ pub const BRIDGEOS_CATALOG: &str =
     "https://mesu.apple.com/assets/bridgeos/com_apple_bridgeOSIPSW/com_apple_bridgeOSIPSW.xml";
 const MAX_CATALOG: u64 = 8 * 1024 * 1024;
 
-fn valid_build_identifier(build: &str) -> bool {
-    !build.is_empty() && build.len() <= 64 && build.bytes().all(|c| c.is_ascii_alphanumeric())
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
     pub product_type: String,
@@ -30,6 +26,11 @@ pub struct Release {
     pub sha1: [u8; 20],
 }
 
+fn valid_build_identifier(build: &str) -> bool {
+    !build.is_empty() && build.len() <= 64 && build.bytes().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// The catalog is keyed by the board/chip pair advertised over USB.
 fn model_key(device: &DeviceInfo) -> Result<String> {
     let (chip, board) = device.hardware_ids();
     ensure!(
@@ -54,7 +55,7 @@ fn product_type<'a>(catalog: &'a Value, device: &DeviceInfo) -> Result<Option<&'
         .map(|value| {
             value
                 .as_string()
-                .filter(|value| !value.is_empty())
+                .filter(|product| !product.is_empty())
                 .context("invalid catalog product type")
         })
         .transpose()
@@ -71,7 +72,9 @@ fn resolve_product(catalog: &Value, product_type: &str) -> Result<Release> {
         catalog,
         &["MobileDeviceSoftwareVersionsByVersion"],
     )?)?;
-    let mut schemas = BTreeMap::new();
+    // Schema keys are decimal versions. Later schemas supersede earlier ones,
+    // but a duplicated version must not silently change the selected release.
+    let mut schemas: BTreeMap<u64, &Value> = BTreeMap::new();
     for (version, value) in versions {
         let version = version
             .parse::<u64>()
@@ -84,9 +87,9 @@ fn resolve_product(catalog: &Value, product_type: &str) -> Result<Release> {
         }
     }
     let mut selected = None;
-    for value in schemas.values() {
+    for schema in schemas.values() {
         if let Some(release) =
-            wire::optional(value, &["MobileDeviceSoftwareVersions", product_type])?
+            wire::optional(schema, &["MobileDeviceSoftwareVersions", product_type])?
         {
             selected = Some(release);
         }
@@ -114,14 +117,16 @@ fn resolve_product(catalog: &Value, product_type: &str) -> Result<Release> {
         "Apple catalog has an empty product version"
     );
     Ok(Release {
-        product_type: product_type.into(),
-        version: version.into(),
-        build: build.into(),
-        url: url.into(),
+        product_type: product_type.to_owned(),
+        version: version.to_owned(),
+        build: build.to_owned(),
+        url: url.to_owned(),
         sha1,
     })
 }
 
+/// Query both Apple catalogs; a missing model is not an error, but a broken
+/// catalog must not hide a usable one.
 pub fn latest(device: &DeviceInfo) -> Result<Release> {
     latest_with(device, |url| {
         let mut response = net::get(url).context("downloading Apple IPSW catalog")?;
@@ -138,15 +143,15 @@ fn latest_with(
     device: &DeviceInfo,
     mut load: impl FnMut(&str) -> Result<Value>,
 ) -> Result<Release> {
-    let mut selected = None;
-    let mut errors = Vec::new();
+    let mut selected: Option<Release> = None;
+    let mut failures = Vec::new();
     for url in [MACOS_CATALOG, BRIDGEOS_CATALOG] {
-        let loaded = load(url).and_then(|catalog| {
+        let found = load(url).and_then(|catalog| {
             product_type(&catalog, device)?
                 .map(|product| resolve_product(&catalog, product))
                 .transpose()
         });
-        match loaded {
+        match found {
             Ok(Some(release)) => {
                 ensure!(
                     selected
@@ -159,15 +164,15 @@ fn latest_with(
             Ok(None) => {}
             Err(error) => {
                 crate::log!(Warning, "firmware", "Catalog {url}: {error:#}");
-                errors.push(format!("{url}: {error:#}"));
+                failures.push(format!("{url}: {error:#}"));
             }
         }
     }
     let result = selected.context("Apple catalogs have no firmware for this hardware");
-    if errors.is_empty() {
+    if failures.is_empty() {
         result
     } else {
-        result.with_context(|| format!("unavailable Apple catalogs: {}", errors.join("; ")))
+        result.with_context(|| format!("unavailable Apple catalogs: {}", failures.join("; ")))
     }
 }
 
@@ -189,7 +194,10 @@ pub fn obtain(
         device.chip_id,
         device.board_id
     );
-    let release = release.cloned().map_or_else(|| latest(device), Ok)?;
+    let release = match release {
+        Some(release) => release.clone(),
+        None => latest(device)?,
+    };
     crate::log!(
         Info,
         "firmware",
@@ -235,6 +243,12 @@ pub fn ensure_cached(
     }
     let ipsw = Ipsw::open(&path)?;
     ipsw.select_behavior(device, identity, behavior)?;
+    verify_release_metadata(&ipsw, release)?;
+    Ok(ipsw)
+}
+
+/// Confirm that the downloaded image is the release the catalog advertised.
+fn verify_release_metadata(ipsw: &Ipsw, release: &Release) -> Result<()> {
     ensure!(
         wire::get(&ipsw.manifest, &["SupportedProductTypes"])?
             .as_array()
@@ -248,7 +262,7 @@ pub fn ensure_cached(
             && wire::string(&ipsw.manifest, &["ProductBuildVersion"])? == release.build,
         "downloaded IPSW version/build differs from Apple's catalog"
     );
-    Ok(ipsw)
+    Ok(())
 }
 
 #[cfg(test)]
