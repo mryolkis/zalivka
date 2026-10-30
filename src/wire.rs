@@ -92,6 +92,11 @@ pub fn optional_boolean(value: &Value, path: &[&str]) -> Result<Option<bool>> {
         .transpose()
 }
 
+/// An optional boolean whose absence means `false`.
+pub fn flag(value: &Value, path: &[&str]) -> Result<bool> {
+    Ok(optional_boolean(value, path)?.unwrap_or(false))
+}
+
 pub fn string<'a>(value: &'a Value, path: &[&str]) -> Result<&'a str> {
     get(value, path)?
         .as_string()

@@ -1,4 +1,8 @@
-//! Apple's IM4P / IMG4 envelopes, using ASN.1 headers without copying image bodies.
+//! Apple's IM4P / IMG4 envelopes.
+//!
+//! Images are DER sequences. Header parsing accepts only canonical tag and
+//! length encodings, and walking a multi-gigabyte image never copies its body:
+//! callers pass a prefix when they only need the embedded four-byte type.
 use anyhow::{Context, Result, ensure};
 use asn1_rs::{Class, FromDer, Header, Length, Tag, ToDer};
 use std::ops::Range;
@@ -37,14 +41,23 @@ pub struct Der<'a> {
 pub fn parse(data: &[u8]) -> Result<(Der<'_>, &[u8])> {
     let range = content_range(data)?;
     let content = data.get(range.clone()).context("truncated DER value")?;
-    Ok((
-        Der {
-            tag: data[0],
-            content,
-            encoded: &data[..range.end],
-        },
-        &data[range.end..],
-    ))
+    let der = Der {
+        tag: data[0],
+        content,
+        encoded: &data[..range.end],
+    };
+    Ok((der, &data[range.end..]))
+}
+
+fn take<'a>(data: &'a [u8], what: &str) -> Result<(Der<'a>, &'a [u8])> {
+    parse(data).with_context(|| format!("invalid {what}"))
+}
+
+/// Parse one complete value and reject trailing bytes.
+fn complete<'a>(data: &'a [u8], tag: u8, what: &str) -> Result<Der<'a>> {
+    let (value, rest) = take(data, what)?;
+    ensure!(value.tag == tag && rest.is_empty(), "invalid {what}");
+    Ok(value)
 }
 
 /// Parse the complete header even when only a prefix of the body is available.
@@ -55,9 +68,9 @@ fn content_range(data: &[u8]) -> Result<Range<usize>> {
     let length = header.length().definite()?;
     // Header parsing also accepts some BER spellings. Re-encoding enforces
     // minimal tag and length encodings without a second handwritten parser.
-    let mut encoded = [0; 16]; // u32 tag + usize length, including their prefixes.
-    let size = header.write_der_header(&mut encoded.as_mut_slice())?;
-    ensure!(data[..start] == encoded[..size], "noncanonical DER header");
+    let mut canonical = Vec::with_capacity(16);
+    header.write_der_header(&mut canonical)?;
+    ensure!(data[..start] == canonical[..], "noncanonical DER header");
     let end = start.checked_add(length).context("DER length overflow")?;
     Ok(start..end)
 }
@@ -80,20 +93,12 @@ fn personalized_image(
     ticket: &[u8],
     metadata: &[u8],
 ) -> Result<Vec<u8>> {
-    let (outer, rest) = parse(payload)?;
-    ensure!(
-        outer.tag == 0x30 && rest.is_empty(),
-        "component is not a DER sequence"
-    );
+    complete(payload, 0x30, "component DER sequence")?;
     let kind = im4p_type_range(payload)?;
-    let (manifest, rest) = parse(ticket)?;
+    let manifest = complete(ticket, 0x30, "IM4M ticket sequence")?;
+    let (magic, _) = take(manifest.content, "IM4M ticket")?;
     ensure!(
-        manifest.tag == 0x30 && rest.is_empty(),
-        "invalid IM4M ticket sequence"
-    );
-    let (magic_ticket, _) = parse(manifest.content)?;
-    ensure!(
-        magic_ticket.tag == 0x16 && magic_ticket.content == b"IM4M",
+        magic.tag == 0x16 && magic.content == b"IM4M",
         "TSS ticket is not IM4M"
     );
     let tag = tag.unwrap_or(payload[kind.clone()].try_into()?);
@@ -137,38 +142,36 @@ fn private_property(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
     encoded
 }
 
+/// Read one Apple private tag from a manifest property list.
 fn manifest_property<'a>(mut fields: &'a [u8], name: &[u8; 4]) -> Result<Option<Der<'a>>> {
     let mut found = None;
     while !fields.is_empty() {
-        let (rest, property) = asn1_rs::Any::from_der(fields)
+        let (next, property) = asn1_rs::Any::from_der(fields)
             .map_err(|error| anyhow::anyhow!("invalid IMG4 manifest property: {error}"))?;
-        if property.class() == Class::Private && property.tag().0 == u32::from_be_bytes(*name) {
-            ensure!(found.is_none(), "duplicate IMG4 manifest property {name:?}");
-            ensure!(
-                property.header.constructed(),
-                "invalid IMG4 manifest property tag"
-            );
-            let mut header = Vec::new();
-            property.header.write_der_header(&mut header)?;
-            ensure!(
-                fields.starts_with(&header),
-                "noncanonical IMG4 manifest property"
-            );
-            let (sequence, trailing) = parse(property.data)?;
-            ensure!(
-                sequence.tag == 0x30 && trailing.is_empty(),
-                "invalid IMG4 manifest property sequence"
-            );
-            let (key, value) = parse(sequence.content)?;
-            ensure!(
-                key.tag == 0x16 && key.content == name,
-                "IMG4 manifest property name mismatch"
-            );
-            let (value, trailing) = parse(value)?;
-            ensure!(trailing.is_empty(), "trailing IMG4 manifest property data");
-            found = Some(value);
+        if property.class() != Class::Private || property.tag().0 != u32::from_be_bytes(*name) {
+            fields = next;
+            continue;
         }
-        fields = rest;
+        ensure!(found.is_none(), "duplicate IMG4 manifest property {name:?}");
+        ensure!(
+            property.header.constructed(),
+            "invalid IMG4 manifest property tag"
+        );
+        let encoded = encoded_header(property.header.clone());
+        ensure!(
+            fields.starts_with(&encoded),
+            "noncanonical IMG4 manifest property"
+        );
+        let sequence = complete(property.data, 0x30, "IMG4 manifest property sequence")?;
+        let (key, value) = take(sequence.content, "IMG4 manifest property")?;
+        ensure!(
+            key.tag == 0x16 && key.content == name,
+            "IMG4 manifest property name mismatch"
+        );
+        let (value, trailing) = take(value, "IMG4 manifest property value")?;
+        ensure!(trailing.is_empty(), "trailing IMG4 manifest property data");
+        found = Some(value);
+        fields = next;
     }
     Ok(found)
 }
@@ -179,19 +182,15 @@ pub(crate) fn manifest_data<'a>(
     object: &[u8; 4],
     key: &[u8; 4],
 ) -> Result<Option<&'a [u8]>> {
-    let (sequence, trailing) = parse(ticket)?;
-    ensure!(
-        sequence.tag == 0x30 && trailing.is_empty(),
-        "invalid IM4M sequence"
-    );
-    let (magic, rest) = parse(sequence.content)?;
+    let sequence = complete(ticket, 0x30, "IM4M sequence")?;
+    let (magic, rest) = take(sequence.content, "IM4M")?;
     ensure!(
         magic.tag == 0x16 && magic.content == b"IM4M",
         "ticket is not IM4M"
     );
-    let (version, rest) = parse(rest)?;
+    let (version, rest) = take(rest, "IM4M version")?;
     ensure!(version.tag == 0x02, "invalid IM4M version");
-    let (body, _) = parse(rest)?;
+    let (body, _) = take(rest, "IM4M body")?;
     ensure!(body.tag == 0x31, "invalid IM4M body");
     let Some(body) = manifest_property(body.content, b"MANB")? else {
         return Ok(None);
@@ -208,28 +207,29 @@ pub(crate) fn manifest_data<'a>(
     Ok(Some(value.content))
 }
 
+/// The nonce slot a boot component requires, if any.
 pub(crate) fn nonce_slot(
     identity: &plist::Value,
     payload_type: Option<[u8; 4]>,
 ) -> Result<Option<([u8; 4], u64)>> {
     use crate::wire;
-    if wire::optional_boolean(identity, &["Info", "RequiresNonceSlot"])?.unwrap_or(false)
-        && matches!(payload_type, Some(tag) if tag == *b"illb" || tag == *b"sepi" || tag == *b"stg1")
+    if !wire::flag(identity, &["Info", "RequiresNonceSlot"])?
+        || !matches!(payload_type, Some(tag) if tag == *b"illb" || tag == *b"sepi" || tag == *b"stg1")
     {
-        let (tag, key, default) = if payload_type == Some(*b"illb") {
-            (b"anid", "ApNonceSlotID", 0)
-        } else {
-            (b"snid", "SepNonceSlotID", 2)
-        };
-        // DFU's AP/SEP slots are 0/2; normal-mode slots 1/3 are not used by
-        // this boot chain. An explicit slot still takes precedence.
-        let slot = wire::optional(identity, &["Info", key])?
-            .map(wire::number)
-            .transpose()?
-            .unwrap_or(default);
-        return Ok(Some((*tag, slot)));
+        return Ok(None);
     }
-    Ok(None)
+    let (tag, field, default) = if payload_type == Some(*b"illb") {
+        (b"anid", "ApNonceSlotID", 0)
+    } else {
+        (b"snid", "SepNonceSlotID", 2)
+    };
+    // DFU's AP/SEP slots are 0/2; normal-mode slots 1/3 are not used by this
+    // boot chain. An explicit slot still takes precedence.
+    let slot = wire::optional(identity, &["Info", field])?
+        .map(wire::number)
+        .transpose()?
+        .unwrap_or(default);
+    Ok(Some((*tag, slot)))
 }
 
 pub fn restore_info(
