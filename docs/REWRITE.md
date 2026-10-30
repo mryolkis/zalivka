@@ -88,7 +88,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | 4 | `crypto` (img4 + aea) | done |
 | 5 | `tss` (transport + requests) | done |
 | 6 | `firmware` (updater/containers/canary/request) | done (containers moved to ipsw; updater/canary/request rewritten) |
-| 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | `dfu` + `descriptors` + `kis` done; `usb`/backend pending |
+| 7 | `usb` (flatten backend/descriptors/KIS, absorb DFU and Windows USB) | `dfu` + `descriptors` + `kis` + `backend` done; `usb.rs` pending |
 | 8 | `mux` (flatten packet/channel/stream) | pending |
 | 9 | `restore` (orchestrator/boot/port DFU/session/attestation) | pending |
 | 10 | `restored` services (data/images/keys/FDR/ASR) | pending |
@@ -120,6 +120,7 @@ Each slice = rewrite module + adapt/port its tests + delete old files + verify.
 | `50d43df` | `dfu` rewrite | 552 tests, clippy clean |
 | `cb590ff` | `usb/descriptors` rewrite | 552 tests, clippy clean |
 | `276834b` | `usb/kis` portal rewrite | 552 tests, clippy clean |
+| `26e16d7` | `usb/backend` rewrite | 552 tests, clippy clean |
 
 Every entry ran `cargo fmt --check` (or `cargo fmt`), `cargo clippy
 --all-targets --all-features -- -D warnings`, and the full test suite with
