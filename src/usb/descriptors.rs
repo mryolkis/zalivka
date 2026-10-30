@@ -1,37 +1,11 @@
-//! Descriptor selection shared by USB transport and diagnostics.
+//! Descriptor selection shared by the USB transport and diagnostics.
 use super::MUX_INTERFACE;
 use anyhow::{Context, Result};
 use nusb::descriptors::{
     ConfigurationDescriptor, EndpointDescriptor, InterfaceDescriptor, TransferType,
 };
 
-fn bulk_endpoint<'a>(
-    interface: &InterfaceDescriptor<'a>,
-    input: bool,
-) -> Option<EndpointDescriptor<'a>> {
-    interface.endpoints().find(|endpoint| {
-        endpoint.transfer_type() == TransferType::Bulk
-            && endpoint.address() & 0x0f != 0
-            && endpoint.address() & 0x70 == 0
-            && (endpoint.address() & 0x80 != 0) == input
-            && endpoint.max_packet_size() != 0
-    })
-}
-
-pub(crate) fn recovery_interface(config: ConfigurationDescriptor<'_>) -> Result<(u8, u8)> {
-    config
-        .interface_alt_settings()
-        .filter(|interface| {
-            interface.endpoints().any(|endpoint| {
-                endpoint.address() == 0x04
-                    && endpoint.transfer_type() == TransferType::Bulk
-                    && endpoint.max_packet_size() != 0
-            })
-        })
-        .map(|interface| (interface.interface_number(), interface.alternate_setting()))
-        .last()
-        .context("no Apple recovery bulk OUT endpoint 0x04")
-}
+const RECOVERY_OUT_ENDPOINT: u8 = 0x04;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MuxInterface {
@@ -43,6 +17,38 @@ pub(crate) struct MuxInterface {
     pub packet_size: usize,
 }
 
+/// The usable bulk endpoint for one direction, if the interface has one.
+fn bulk_endpoint<'a>(
+    interface: &InterfaceDescriptor<'a>,
+    input: bool,
+) -> Option<EndpointDescriptor<'a>> {
+    interface.endpoints().find(|endpoint| {
+        let address = endpoint.address();
+        endpoint.transfer_type() == TransferType::Bulk
+            && address & 0x0f != 0
+            && address & 0x70 == 0
+            && (address & 0x80 != 0) == input
+            && endpoint.max_packet_size() != 0
+    })
+}
+
+/// The interface that owns Apple's recovery bulk OUT endpoint.
+pub(crate) fn recovery_interface(config: ConfigurationDescriptor<'_>) -> Result<(u8, u8)> {
+    config
+        .interface_alt_settings()
+        .filter(|interface| {
+            interface.endpoints().any(|endpoint| {
+                endpoint.address() == RECOVERY_OUT_ENDPOINT
+                    && endpoint.transfer_type() == TransferType::Bulk
+                    && endpoint.max_packet_size() != 0
+            })
+        })
+        .map(|interface| (interface.interface_number(), interface.alternate_setting()))
+        .last()
+        .context("no Apple recovery bulk OUT endpoint 0x04")
+}
+
+/// Prefer the configuration the OS already selected; WinUSB cannot change it.
 fn select_mux_interface<'a>(
     configurations: impl Iterator<Item = ConfigurationDescriptor<'a>>,
     active: Option<u8>,
@@ -72,7 +78,6 @@ fn select_mux_interface<'a>(
                 input: input.address(),
                 packet_size: output.max_packet_size(),
             };
-            // WinUSB cannot change configurations. Prefer the one selected by the OS.
             if Some(selected.configuration) == active {
                 return Some(selected);
             }
@@ -88,7 +93,7 @@ pub(crate) fn mux_interface(device: &nusb::Device) -> Result<MuxInterface> {
         device
             .active_configuration()
             .ok()
-            .map(|c| c.configuration_value()),
+            .map(|configuration| configuration.configuration_value()),
     )
     .context("no Apple USB multiplex interface")
 }
