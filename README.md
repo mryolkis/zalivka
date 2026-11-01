@@ -91,10 +91,17 @@ Recovery, then connects to restored and its data services through usbmuxd.
 On an Apple silicon host, **Device → Enter DFU mode** restarts a connected Apple
 silicon Mac into DFU without the keyboard sequence. Connect the two Macs directly
 through their DFU ports; see [Apple's connection guide](https://support.apple.com/en-us/108900).
-The action requests macOS administrator authorization, sends the USB-C command,
-and waits for the target to appear in DFU. Firmware and an ECID are not needed.
+The action requests administrator authorization directly through Security.framework,
+starts a short-lived DFU helper as root, sends the USB-C command, and waits for the
+target to appear in DFU. The GUI stays under your normal account. Firmware and an
+ECID are not needed.
 Intel hosts and T2 targets require manual DFU entry. The terminal equivalent is
 `zalivka enter-dfu` on macOS.
+
+The portable binary uses `AuthorizationExecuteWithPrivileges`, which Apple has
+[deprecated in favor of launchd / Service Management](https://developer.apple.com/documentation/security/authorizationexecutewithprivileges).
+This avoids AppleScript and shell execution. Moving to `SMAppService` would require
+an app bundle with a registered privileged helper.
 
 The native USB-C implementation is adapted from
 [macvdmtool](https://github.com/AsahiLinux/macvdmtool), revision
@@ -290,6 +297,19 @@ native CFNetwork PAC resolution. Check jobs cache Cargo downloads and compiled
 dependencies between runs with
 [rust-cache](https://github.com/Swatinem/rust-cache); release builds run
 uncached so they do not compete for the repository cache budget.
+
+After successful checks, branch pushes, pull requests and manual Check runs
+also build release-profile executables with the GUI and CLI for all six targets.
+Download `zalivka-dirty-TARGET` from the run's **Artifacts** section within 14 days.
+Each package includes the executable, JSON build metadata, language packs,
+licenses and archive SHA-256; Linux packages also include the USB access rule.
+Windows uses ZIP archives; Linux and macOS use tar.gz. macOS test builds are
+separate ARM64 and Intel binaries.
+
+These CI builds set `ZALIVKA_DIRTY_BUILD=1`, so versions include the commit,
+`.dirty` and build timestamp even from a clean checkout, for example
+`0.2.3+deadbeef.dirty.TIMESTAMP`. Tag pushes keep release packaging in the
+separate workflow below.
 
 The [Build and release workflow](.github/workflows/release.yml) builds Windows
 and Linux packages for x86_64 and ARM64, plus a universal macOS binary, after

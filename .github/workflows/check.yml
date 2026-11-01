@@ -37,7 +37,7 @@ jobs:
             target: x86_64-apple-darwin
 
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -73,3 +73,49 @@ jobs:
       - name: Kerberos proxy tests
         if: runner.os == 'Linux'
         run: cargo test --locked --target ${{ matrix.target }} --all-features --lib kerberos_authenticates_http_and_fdr_tunnels -- --ignored
+
+      - name: Build and package dirty version
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        shell: pwsh
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          ZALIVKA_DIRTY_BUILD: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $executable = & ./scripts/build.ps1 -Target $env:BUILD_TARGET
+          if (-not $executable) { throw 'Build produced no executable.' }
+          $info = Get-Content -LiteralPath ($executable + '.json') -Raw | ConvertFrom-Json
+          if ($info.version -notmatch '\.dirty\.') {
+              throw 'The CI build must have a dirty version.'
+          }
+
+          Copy-Item README.md, LICENSE -Destination artifacts
+          Copy-Item licenses -Destination artifacts -Recurse -Force
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $name = 'zalivka-' + $info.version + '-' + $env:BUILD_TARGET
+
+          if ($IsWindows) {
+              $archive = Join-Path dist ($name + '.zip')
+              Compress-Archive -Path artifacts/* -DestinationPath $archive
+          } else {
+              if ($IsLinux) {
+                  Copy-Item packaging/70-zalivka.rules -Destination artifacts
+              }
+              $archive = Join-Path dist ($name + '.tar.gz')
+              & tar -czf $archive -C artifacts .
+              if ($LASTEXITCODE -ne 0) { throw 'tar failed.' }
+          }
+
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $([IO.Path]::GetFileName($archive))" |
+              Set-Content -LiteralPath ($archive + '.sha256') -Encoding utf8NoBOM
+
+      - name: Upload dirty build
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zalivka-dirty-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

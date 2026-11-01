@@ -14,6 +14,7 @@ fn git(arguments: &[&str]) -> Option<String> {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=ZALIVKA_RELEASE_VERSION");
+    println!("cargo:rerun-if-env-changed=ZALIVKA_DIRTY_BUILD");
     let package_version = env::var("CARGO_PKG_VERSION").expect("package version");
     let release_version = env::var("ZALIVKA_RELEASE_VERSION").ok();
     if let Some(version) = &release_version {
@@ -73,7 +74,8 @@ fn main() {
     let revision = git(&["rev-parse", "--short=8", "HEAD"]).unwrap_or_else(|| "unknown".into());
     let mut status = vec!["status", "--porcelain", "--untracked-files=normal", "--"];
     status.extend(inputs);
-    let dirty = git(&status).is_some_and(|status| !status.is_empty());
+    let dirty = env::var("ZALIVKA_DIRTY_BUILD").as_deref() == Ok("1")
+        || git(&status).is_some_and(|status| !status.is_empty());
     let built_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("build time before Unix epoch")
