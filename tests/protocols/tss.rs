@@ -36,6 +36,60 @@ fn tss_requests_bind_hardware_nonce_and_component_digests() {
 }
 
 #[test]
+fn ftab_components_are_reserved_for_updater_signing() {
+    let id = identity();
+    let names = [
+        "Timer,RTKitOS,1",
+        "Timer,RTKitOS,2",
+        "Timer,RestoreRTKitOS,1",
+        "Timer,RestoreRTKitOS,2",
+        "FutureController,Firmware",
+    ];
+    let mut entry = id.manifest().unwrap()["iBSS"].clone();
+    let info = entry
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("Info")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap();
+    info.insert("Path".into(), "Firmware/controller/ftab.bin".into());
+    info.remove("Img4PayloadType");
+    for build in [tss::request, tss::recovery_request] {
+        let expected = build(&device_info(), &id).unwrap();
+        for flag in [
+            None,
+            Some(Value::Boolean(false)),
+            Some(Value::Boolean(true)),
+        ] {
+            let mut id = id.clone();
+            let mut entry = entry.clone();
+            if let Some(flag) = &flag {
+                entry
+                    .as_dictionary_mut()
+                    .unwrap()
+                    .get_mut("Info")
+                    .unwrap()
+                    .as_dictionary_mut()
+                    .unwrap()
+                    .insert("IsFTAB".into(), flag.clone());
+            }
+            for name in names {
+                manifest_mut(&mut id).insert(name.into(), entry.clone());
+            }
+            let request = build(&device_info(), &id).unwrap();
+            if flag == Some(true.into()) {
+                assert_eq!(request, expected);
+            } else {
+                for name in names {
+                    assert!(wire::get(&request, &[name]).is_ok(), "{name}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn signing_requires_device_security_metadata_and_never_defaults_to_production() {
     let mut device = device_info();
     for (fuse, production, security) in [

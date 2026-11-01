@@ -136,6 +136,10 @@ fn firmware_request(device: &DeviceInfo, id: &Identity, chain: BootChain) -> Res
 fn component_request(value: &Value, parameters: &Dictionary) -> Result<Option<Dictionary>> {
     let fields = wire::dictionary(value)?;
     let info = fields.get("Info").map(wire::dictionary).transpose()?;
+    // FTAB payloads use separate updater tickets, not the AP boot manifest.
+    if wire::optional_boolean(value, &["Info", "IsFTAB"])?.unwrap_or(false) {
+        return Ok(None);
+    }
     let trusted = fields
         .get("Trusted")
         .map(|value| value.as_boolean().context("invalid Trusted flag"))
