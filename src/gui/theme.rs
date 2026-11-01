@@ -96,10 +96,7 @@ pub(super) fn configure(ctx: &egui::Context) {
                 .insert(text, egui::FontId::proportional(size));
         }
     });
-    #[cfg(windows)]
-    if let Some(windows) = std::env::var_os("WINDIR")
-        && let Ok(bytes) = std::fs::read(PathBuf::from(windows).join("Fonts/segoeui.ttf"))
-    {
+    if let Some(bytes) = zalivka::platform::system_font() {
         let mut fonts = egui::FontDefinitions::default();
         fonts
             .font_data

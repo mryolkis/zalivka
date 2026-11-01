@@ -193,9 +193,12 @@ fn apple_catalog_rejects_unknown_hardware_invalid_hashes_and_untrusted_urls() {
 }
 
 #[test]
-fn automatic_download_reuses_a_verified_compatible_cached_ipsw() {
+fn automatic_download_reuses_compatible_cache_without_rehashing_the_archive() {
     let file = fixture(None, false);
-    let release = fixture_release(file.path());
+    let mut release = fixture_release(file.path());
+    // The catalog hash identifies the cache entry; restore checks its components.
+    release.sha1 = [0xab; 20];
+    assert!(net::verify_file(file.path(), &release.sha1).is_err());
     let directory = tempfile::tempdir().unwrap();
     let expected = directory.path().join(format!(
         "{}-{}.ipsw",
@@ -252,6 +255,62 @@ fn automatic_download_reuses_a_verified_compatible_cached_ipsw() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn cached_firmware_verifies_required_components_without_scanning_other_identities() {
+    let mut other = identity();
+    other
+        .value
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("ApBoardID".into(), "0x0b".into());
+    manifest_mut(&mut other)
+        .get_mut("iBSS")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .get_mut("Info")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("Path".into(), "Firmware/other-iBSS".into());
+
+    for (corrupt_path, required) in [("Firmware/iBSS", true), ("Firmware/other-iBSS", false)] {
+        let file = fixture_files(
+            Some(other.clone()),
+            false,
+            &[("Firmware/other-iBSS", &im4p(b"test"))],
+        );
+        let release = fixture_release(file.path());
+        test_support::corrupt_crc(file.path(), corrupt_path);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(format!(
+            "{}-{}.ipsw",
+            release.build,
+            hex::encode(release.sha1)
+        ));
+        std::fs::copy(file.path(), &path).unwrap();
+        let mut ipsw = catalog::ensure_cached(
+            &release,
+            &device_info(),
+            directory.path(),
+            None,
+            Behavior::Erase,
+        )
+        .unwrap();
+        let mut selected = ipsw
+            .select_behavior(&device_info(), None, Behavior::Erase)
+            .unwrap();
+        assert_eq!(selected.index, 0);
+        assert_eq!(
+            restore::preflight(&mut ipsw, &mut selected).is_err(),
+            required,
+            "{corrupt_path}"
+        );
+        // The explicit full-archive check still diagnoses either corruption.
+        assert!(ipsw.verify_all().is_err(), "{corrupt_path}");
+    }
 }
 
 #[test]

@@ -17,7 +17,6 @@ use eframe::egui;
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    process::{Command, Stdio},
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };
@@ -356,23 +355,7 @@ impl App {
         };
         std::fs::create_dir_all(&directory).context("creating firmware directory")?;
         let directory = std::path::absolute(directory).context("locating firmware directory")?;
-        #[cfg(windows)]
-        let opener = "explorer.exe";
-        #[cfg(target_os = "macos")]
-        let opener = "open";
-        #[cfg(not(any(windows, target_os = "macos")))]
-        let opener = "xdg-open";
-        let mut child = Command::new(opener)
-            .arg(directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("opening firmware directory")?;
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        Ok(())
+        zalivka::platform::open_directory(&directory)
     }
     fn start(&mut self, action: Action, ctx: &egui::Context) {
         if self.job.is_some() {

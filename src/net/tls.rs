@@ -1,8 +1,8 @@
 //! Shared TLS for TSS and HTTPS proxy tunnels, using platform certificate trust.
+use crate::platform::tls::verifier;
 use anyhow::Result;
 use rustls::{
     ClientConfig, ClientConnection, StreamOwned,
-    client::danger::ServerCertVerifier,
     pki_types::{CertificateDer, ServerName},
 };
 use std::{
@@ -13,28 +13,6 @@ use std::{
 use ureq::unversioned::transport::{
     Buffers, ConnectionDetails, LazyBuffers, NextTimeout, Transport, TransportAdapter,
 };
-
-fn verifier(extra: Option<CertificateDer<'static>>) -> Result<Arc<dyn ServerCertVerifier>> {
-    let provider = Arc::new(oxitls_rustcrypto_provider::provider());
-    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-    let verifier = Arc::new(if let Some(root) = extra {
-        rustls_platform_verifier::Verifier::new_with_extra_roots([root], provider)?
-    } else {
-        rustls_platform_verifier::Verifier::new(provider)?
-    });
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    let verifier = {
-        let mut roots = rustls::RootCertStore::empty();
-        if let Some(root) = extra {
-            roots.add(root)?;
-        } else {
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        }
-        rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
-            .build()?
-    };
-    Ok(verifier)
-}
 
 pub(crate) fn config(extra: Option<CertificateDer<'static>>) -> Result<Arc<ClientConfig>> {
     let provider = Arc::new(oxitls_rustcrypto_provider::provider());

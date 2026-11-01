@@ -222,13 +222,14 @@ pub fn ensure_cached(
         hex::encode(release.sha1)
     ));
     if path.exists() {
-        crate::log!(Info, "firmware", "Checking cache: {}", path.display());
-        net::verify_file(&path, &release.sha1).with_context(|| {
-            format!(
-                "cached IPSW is corrupt; remove {} to download it again",
-                path.display()
-            )
-        })?;
+        // Restore verifies the components it uses; do not reread the entire
+        // cached archive just to check its catalog checksum again.
+        crate::log!(
+            Info,
+            "firmware",
+            "Using cached firmware: {}",
+            path.display()
+        );
     } else {
         crate::log!(Info, "firmware", "Downloading firmware: {}", path.display());
         net::download_verified(&release.url, &path, &release.sha1)?;

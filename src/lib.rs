@@ -12,19 +12,17 @@ pub mod ipsw;
 pub mod localization;
 pub mod logging;
 #[cfg(any(target_os = "macos", test))]
-pub mod macos;
+pub use platform::macos;
 pub mod mux;
 pub mod net;
 pub mod operations;
+pub mod platform;
 pub mod progress;
 mod proxy;
 pub mod restore;
 pub mod storage;
 pub mod tss;
 pub mod usb;
-#[cfg(windows)]
-#[allow(unsafe_code)]
-mod windows;
 pub mod wire;
 
 /// Release version, or package version with the revision and timestamp for local builds.

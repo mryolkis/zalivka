@@ -21,22 +21,7 @@ thread_local! {
     static FIRMWARE_TRANSFER: Cell<bool> = const { Cell::new(false) };
 }
 #[cfg(windows)]
-static ELEVATED: OnceLock<std::sync::Mutex<std::fs::File>> = OnceLock::new();
-
-/// Only a local named pipe can receive elevated logs, never an arbitrary file.
-#[cfg(windows)]
-pub fn connect_elevated(id: uuid::Uuid) -> io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
-    let pipe = std::fs::OpenOptions::new()
-        .write(true)
-        // The unprivileged log reader must not impersonate the elevated writer.
-        .security_qos_flags(SECURITY_IDENTIFICATION)
-        .open(format!(r"\\.\pipe\zalivka-elevated-{id}"))?;
-    ELEVATED
-        .set(std::sync::Mutex::new(pipe))
-        .map_err(|_| io::Error::other("elevated logging is already connected"))
-}
+pub use crate::platform::logging::connect_elevated;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -478,12 +463,8 @@ pub fn publish(record: Record) {
 }
 
 fn write_default(record: Record, mut stderr: impl Write) {
-    #[cfg(windows)]
-    if let Some(pipe) = ELEVATED.get() {
-        let mut pipe = pipe.lock().unwrap_or_else(|error| error.into_inner());
-        if record.write_json(&mut *pipe).is_ok() {
-            return;
-        }
+    if crate::platform::logging::write_elevated(&record) {
+        return;
     }
     let _ = record.write_to(&mut stderr);
 }

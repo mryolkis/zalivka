@@ -6,7 +6,6 @@ mod gui;
 
 fn main() -> std::process::ExitCode {
     zalivka::logging::init(zalivka::logging::Level::Trace);
-    #[cfg(windows)]
     if let Some(code) = zalivka::drivers::run_elevated_helper() {
         std::process::exit(code as i32);
     }

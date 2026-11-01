@@ -7,10 +7,7 @@ use std::{
 };
 use ureq::Proxy;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::negotiate::Negotiate;
-#[cfg(windows)]
-use crate::windows::negotiate::Negotiate;
+use crate::platform::proxy::Negotiate;
 
 pub(super) trait Connection: Read + Write {
     fn timeout(&mut self, remaining: Duration) -> Result<()>;
@@ -23,7 +20,6 @@ pub(super) fn connect<S: Connection>(
     timeout: Duration,
     reconnect: impl FnMut(Duration) -> Result<S>,
 ) -> Result<()> {
-    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     let mut auth: Option<Negotiate> = None;
     handshake(
         stream,
@@ -32,21 +28,12 @@ pub(super) fn connect<S: Connection>(
         timeout,
         reconnect,
         |scheme, challenge| {
-            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-            {
-                if auth.is_none() {
-                    auth = Some(Negotiate::new(scheme, proxy.host())?);
-                }
-                auth.as_mut().unwrap().step(challenge)
+            if auth.is_none() {
+                auth = Some(Negotiate::new(scheme, proxy.host())?);
             }
-            #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-            {
-                let _ = challenge;
-                bail!("integrated proxy authentication is unavailable on this platform")
-            }
+            auth.as_mut().unwrap().step(challenge)
         },
     )?;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(auth) = auth {
         auth.finish()?;
     }

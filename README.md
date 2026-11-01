@@ -139,8 +139,11 @@ zalivka restore firmware.ipsw --ecid HEX_ECID --erase
 Omit `firmware.ipsw` from `revive` or `restore` to select and download compatible
 firmware automatically. `--firmware-dir` chooses the automatic download directory
 and cannot be combined with a local IPSW path. Restore and Revive verify the
-selected filesystem images before booting the target; compressed images require
-space in the host's temporary directory.
+required boot components and selected filesystem images before booting the target;
+other components are verified when requested. Cached IPSWs are opened without
+rehashing the entire archive. New downloads check Apple's SHA-1 as bytes arrive.
+Use `verify` for an explicit scan of all ZIP entries and manifest digests.
+Compressed filesystem images require space in the host's temporary directory.
 
 Use `zalivka --help` or `zalivka <command> --help` for additional commands and
 options.
@@ -204,6 +207,14 @@ After restoration, connect the Mac itself to Wi-Fi or Ethernet if it displays
 an activation screen. A successful restore does not confirm activation.
 
 ## Building from source
+
+Host integration lives in `src/platform/`: native Windows, Linux and macOS
+code has separate directories, `unix/` holds shared GSSAPI and usbmuxd support,
+and `usb/` contains the hardware transports. The remaining files in that directory
+select host behavior for drivers, proxy settings, certificate trust, language,
+storage paths and desktop services. Public `drivers`, `usb` and `storage` APIs
+keep callers independent of these implementations. Platform tests mirror this
+layout under `tests/unit/platform/`.
 
 Requirements: Rust 1.99 or newer and native compiler/linker tools for the chosen
 target. Windows MSVC builds need the matching Visual C++ build tools. On Ubuntu,

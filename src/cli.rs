@@ -162,17 +162,8 @@ pub(super) fn run() -> Result<()> {
     if std::env::args_os().len() == 1 {
         return crate::gui::run();
     }
-    #[cfg(all(windows, feature = "gui"))]
-    #[allow(unsafe_code)]
-    {
-        // GUI builds never allocate a console. CLI calls can reuse their parent's
-        // terminal; redirected standard handles remain inherited from the caller.
-        unsafe {
-            windows_sys::Win32::System::Console::AttachConsole(
-                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
-            );
-        }
-    }
+    #[cfg(feature = "gui")]
+    zalivka::platform::attach_parent_console();
     let cli = Cli::parse();
     match cli.command {
         #[cfg(target_os = "macos")]

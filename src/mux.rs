@@ -1,6 +1,6 @@
 //! Service streams: system usbmuxd on Linux/macOS, direct USB on Windows.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod daemon;
+use crate::platform::unix::mux as daemon;
 mod direct;
 
 use anyhow::{Result, ensure};
@@ -9,8 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub use crate::platform::usb::is_device_removal;
 pub(crate) use direct::MAX_PAYLOAD;
-pub use direct::{InputReady, Packet, PacketTransport, decode_packet, is_device_removal};
+pub use direct::{InputReady, Packet, PacketTransport, decode_packet};
 
 #[derive(Clone)]
 pub struct Session(Backend);
@@ -32,7 +33,7 @@ impl Session {
         return daemon::candidates().map(|sessions| {
             sessions
                 .into_iter()
-                .map(|s| Ok(Self(Backend::System(s))))
+                .map(|s| Ok(Self::from_system(s)))
                 .collect()
         });
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -42,6 +43,11 @@ impl Session {
                 .map(|candidate| Self::new(crate::usb::MuxUsb::open(candidate)?))
                 .collect()
         })
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn from_system(session: daemon::Session) -> Self {
+        Self(Backend::System(session))
     }
 
     pub fn connect(&self, destination: u16) -> Result<MuxStream> {
@@ -177,9 +183,4 @@ impl Write for MuxStream {
     fn flush(&mut self) -> io::Result<()> {
         dispatch!(self, s => s.flush())
     }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn check_system_device(info: &nusb::DeviceInfo) -> Result<()> {
-    daemon::check_device(info)
 }

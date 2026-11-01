@@ -990,7 +990,13 @@ fn gui_verifies_an_ipsw_directly_and_keeps_trace_hidden_by_default() {
     app.setup.ipsw = file.path().display().to_string();
     let ctx = egui::Context::default();
     app.start(Action::Verify, &ctx);
-    assert!(app.job.is_some());
+    assert!(
+        app.job.is_some(),
+        "verification did not start: {:?}",
+        app.notice
+            .as_ref()
+            .map(|notice| (&notice.title, &notice.detail))
+    );
     let path = app.log_path.clone().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     while app.job.is_some() && Instant::now() < deadline {

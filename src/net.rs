@@ -14,16 +14,7 @@ pub fn agent() -> ureq::Agent {
     agent_with_body_timeout(Some(Duration::from_secs(120)))
 }
 
-pub(crate) fn public_roots() -> ureq::tls::RootCerts {
-    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-    {
-        ureq::tls::RootCerts::PlatformVerifier
-    }
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    {
-        ureq::tls::RootCerts::WebPki
-    }
-}
+pub(crate) use crate::platform::tls::public_roots;
 
 /// gs.apple.com uses Apple's private PKI, absent from Mozilla's public roots.
 /// Keep this additional trust anchor scoped to TSS, alongside system trust.

@@ -1,4 +1,5 @@
 use super::*;
+use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::UnixTime;
 
 #[test]
