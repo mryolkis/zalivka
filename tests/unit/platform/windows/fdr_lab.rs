@@ -423,15 +423,12 @@ fn curl_through_device(
         .unwrap();
     device.read_wait = Duration::from_millis(5);
     let deadline = Instant::now() + Duration::from_secs(20);
-    let mut prefix = vec![];
     let mut returned = 0;
     let mut buffer = vec![0; 32768];
     while Instant::now() < deadline {
         match socket.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
-                let take = n.min(32 - prefix.len());
-                prefix.extend_from_slice(&buffer[..take]);
                 device.write_all(&buffer[..n]).unwrap();
             }
             Err(error)
@@ -454,7 +451,6 @@ fn curl_through_device(
             Err(error) => panic!("curl bridge mux read: {error}"),
         }
     }
-    println!("FDR_CURL_PREFIX {}", hex::encode(prefix));
     drop(socket);
     curl.join().unwrap();
     device.reply_segments.clone()

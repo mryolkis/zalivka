@@ -381,11 +381,11 @@ Logs and CLI diagnostics use English. CLI logs go to stderr, while JSON reports
 go to stdout. GUI logs are saved under `%LOCALAPPDATA%\zalivka\logs` on Windows
 and `$XDG_CACHE_HOME/zalivka/logs` or `~/.cache/zalivka/logs` on Linux. Use
 **Technical details** to view DEBUG and TRACE entries in the GUI. Diagnostic logs
-can contain device data and protocol dumps; review them before sharing.
+can contain device identifiers; review them before sharing.
 
-Plist log records show key fields, collection sizes and payload lengths. Long
-strings use a marked preview. CLI JSON reports and requested restored JSONL
-transcripts retain their full structured data.
+Logs omit binary payload dumps. Plist records show key fields, collection sizes
+and payload lengths. Long strings use a marked preview. CLI JSON reports and
+requested restored JSONL transcripts retain their full structured data.
 
 ## License
 

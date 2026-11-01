@@ -97,14 +97,6 @@ pub(crate) fn active() -> bool {
     CURRENT.with(|slot| slot.borrow().is_some())
 }
 
-pub(crate) fn log_queue() -> Option<crate::logging::Queue> {
-    CURRENT.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .and_then(|context| context.logs.clone())
-    })
-}
-
 pub(crate) fn log(record: crate::logging::Record) -> Result<(), crate::logging::Record> {
     let context = CURRENT.with(|slot| slot.borrow().clone());
     match context {

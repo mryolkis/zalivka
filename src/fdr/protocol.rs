@@ -120,14 +120,14 @@ pub(super) fn proxy_handshake<S>(
     stream
         .read_exact(&mut methods)
         .context("reading FDR proxy methods")?;
-    crate::log!(Trace, "fdr:socks", "Methods={methods:02x?}");
+    crate::log!(Trace, "fdr:socks", "Methods: {method_count}");
     if !methods.contains(&0) {
         stream.write_all(&[5, 0xff])?;
         bail!("FDR SOCKS client did not offer the no-authentication method");
     }
     let mut zero = [0];
     stream.write_all(&[5, 0])?;
-    crate::log!(Trace, "fdr:socks", "Method=00");
+    crate::log!(Trace, "fdr:socks", "Authentication: none");
 
     let mut address_type = [0; 2];
     stream

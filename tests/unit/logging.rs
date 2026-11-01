@@ -76,7 +76,9 @@ fn diagnostic_overload_is_bounded_reported_and_does_not_discard_important_record
         .unwrap();
     ready.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(queue.budget.bytes.load(Ordering::Acquire), MAX_QUEUED_BYTES);
-    assert!(queue.diagnostic(1024, || panic!("overloaded dumps must not allocate")));
+    queue
+        .record(Record::new(Level::Trace, "test", "omitted diagnostic"))
+        .unwrap();
     let error = Record::new(Level::Error, "restore", "preserve me");
     assert_eq!(queue.record(error.clone()).unwrap_err(), error);
     release.send(()).unwrap();
@@ -155,11 +157,10 @@ fn firmware_trace_suppression_is_scoped_and_preserves_parallel_fdr_and_errors() 
                 formatted = true;
                 "firmware payload"
             });
-            bytes("usbmux:io", format_args!("TX"), b"firmware payload");
+            crate::log!(Trace, "usbmux:io", "TX frame");
             crate::log!(Debug, "transfer", "Transfer progress");
             std::thread::spawn(crate::progress::inherit(|| {
                 crate::log!(Trace, "fdr:conn", "Parallel FDR");
-                bytes("test:bytes", format_args!("RX"), b"parallel payload");
             }))
             .join()
             .unwrap();
@@ -185,12 +186,10 @@ fn firmware_trace_suppression_is_scoped_and_preserves_parallel_fdr_and_errors() 
     ] {
         assert!(records.iter().any(|record| record.message == message));
     }
-    assert!(records.iter().any(|record| record.source == "test:bytes"
-        && record.message.ends_with("706172616c6c656c207061796c6f6164")));
 }
 
 #[test]
-fn queued_dumps_do_not_wait_for_the_sink_and_keep_owned_data_and_timestamps() {
+fn queued_records_do_not_wait_for_the_sink_and_keep_owned_data_and_timestamps() {
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
     let records = Arc::new(Mutex::new(Vec::new()));
@@ -214,15 +213,15 @@ fn queued_dumps_do_not_wait_for_the_sink_and_keep_owned_data_and_timestamps() {
     let producer = std::thread::spawn(move || {
         worker.run(|| {
             crate::log!(Info, "test", "Pause sink");
-            let mut data: Vec<_> = (0..256 * 1024).map(|index| index as u8).collect();
-            bytes("test:bytes", format_args!("RX offset=0"), &data);
-            data.fill(0);
+            let mut message = String::from("Queued diagnostic");
+            crate::log!(Trace, "test:trace", "{message}");
+            message.clear();
             let mut value = crate::wire::dict([("Data", plist::Value::Data(vec![1, 2, 3]))]);
             plist("plist", "TX binary LE", &value);
             value.as_dictionary_mut().unwrap().clear();
             {
                 let _transfer = firmware_transfer();
-                bytes("firmware", format_args!("TX"), &data);
+                crate::log!(Trace, "firmware", "TX frame");
                 plist("plist", "Firmware", &value);
             }
             crate::log!(Info, "test", "Final record");
@@ -230,7 +229,7 @@ fn queued_dumps_do_not_wait_for_the_sink_and_keep_owned_data_and_timestamps() {
         })
     });
     entered.recv_timeout(Duration::from_secs(5)).unwrap();
-    // The sink stays blocked until the producer has queued the complete dump.
+    // The sink stays blocked until the producer has queued every record.
     let produced = done.recv_timeout(Duration::from_secs(5));
     release.send(()).unwrap();
     producer.join().unwrap();
@@ -244,14 +243,10 @@ fn queued_dumps_do_not_wait_for_the_sink_and_keep_owned_data_and_timestamps() {
             .iter()
             .all(|record| record.elapsed_ms <= produced_at)
     );
-    let received: Vec<_> = records
-        .iter()
-        .filter(|record| record.source == "test:bytes")
-        .flat_map(|record| hex::decode(record.message.split_once("]: ").unwrap().1).unwrap())
-        .collect();
-    assert_eq!(
-        received,
-        (0..256 * 1024).map(|index| index as u8).collect::<Vec<_>>()
+    assert!(
+        records
+            .iter()
+            .any(|record| record.source == "test:trace" && record.message == "Queued diagnostic")
     );
     assert!(
         records
@@ -280,55 +275,6 @@ fn background_journal_flushes_while_the_producer_is_idle() {
         .unwrap();
     rx.recv_timeout(Duration::from_secs(5)).unwrap();
     queue.flush().unwrap();
-}
-
-#[test]
-#[ignore = "manual TRACE producer benchmark with temporary disk journals"]
-fn trace_producer_benchmark() {
-    use std::{
-        io::BufWriter,
-        sync::{Arc, Mutex},
-    };
-    let payload = vec![0xa5; 32 * 1024];
-    for mode in ["disabled", "synchronous", "queued"] {
-        let file = tempfile::tempfile().unwrap();
-        let output = Arc::new(Mutex::new(BufWriter::with_capacity(256 * 1024, file)));
-        let records = output.clone();
-        let context = crate::progress::Context::new(move |event| {
-            if let crate::progress::Event::Log(record) = event {
-                record.write_to(&mut *records.lock().unwrap()).unwrap();
-            }
-        });
-        let context = if mode == "queued" {
-            let output = output.clone();
-            context
-                .with_async_logs(move || output.lock().unwrap().flush().unwrap())
-                .unwrap()
-        } else {
-            context
-        };
-        let started = Instant::now();
-        context.run(|| {
-            let _disabled = (mode == "disabled").then(firmware_transfer);
-            for offset in 0..256 {
-                bytes(
-                    "test:bytes",
-                    format_args!("RX offset={}", offset * payload.len()),
-                    &payload,
-                );
-            }
-        });
-        let producer = started.elapsed();
-        context.flush_logs().unwrap();
-        let mut output = output.lock().unwrap();
-        output.flush().unwrap();
-        let disk_bytes = output.get_ref().metadata().unwrap().len();
-        eprintln!(
-            "{mode}: raw=8 MiB; producer={producer:?}; including drain={:?}; journal={disk_bytes} B",
-            started.elapsed()
-        );
-        assert_eq!(disk_bytes == 0, mode == "disabled");
-    }
 }
 
 #[test]
@@ -481,6 +427,9 @@ fn native_operations_trace_fdr_events_without_payload_dumps() {
                 assert!(stderr.contains("info record"));
                 assert_eq!(stderr.contains("Negotiating v2"), level != "info");
                 assert!(!stderr.contains(" offset="));
+                assert!(!stderr.contains(" +00000000 ["));
+                assert!(!stderr.contains("Methods=["));
+                assert_eq!(stderr.contains("Authentication: none"), level == "trace");
                 continue;
             }
             assert!(stderr.is_empty());
@@ -490,6 +439,8 @@ fn native_operations_trace_fdr_events_without_payload_dumps() {
                 ("fdr:control", "Negotiating v2"),
                 ("fdr:control", "Stopped"),
                 ("fdr:proxy", "Connecting to tbsc.apple.com:443"),
+                ("fdr:socks", "Methods: 1"),
+                ("fdr:socks", "Authentication: none"),
             ] {
                 assert!(
                     records
@@ -500,6 +451,9 @@ fn native_operations_trace_fdr_events_without_payload_dumps() {
             assert!(!records.iter().any(|r| {
                 (r.source == "usbmux:io" || r.source.starts_with("fdr:"))
                     && r.message.contains(" offset=")
+            }));
+            assert!(!records.iter().any(|r| {
+                r.message.contains(" +00000000 [") || r.message.starts_with("Methods=[")
             }));
         }
     }

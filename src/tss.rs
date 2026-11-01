@@ -112,7 +112,7 @@ pub fn send_raw(request: &Value) -> Result<Value> {
         16 * 1024 * 1024,
         "TSS response too large",
     )?;
-    crate::logging::bytes("tss", format_args!("RX"), &data);
+    crate::log!(Trace, "tss", "RX: {} B", data.len());
     parse_response(&data)
 }
 

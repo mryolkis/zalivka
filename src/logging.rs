@@ -133,24 +133,17 @@ pub fn init(level: Level) {
     MIN_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
-/// Monotonic timestamp captured by producers, before asynchronous formatting.
+/// Monotonic timestamp captured by producers, before asynchronous delivery.
 pub fn elapsed_ms() -> u64 {
     STARTED.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 enum Pending {
     Record(Record),
-    Bytes {
-        elapsed_ms: u64,
-        source: String,
-        context: String,
-        data: Vec<u8>,
-    },
     Flush(mpsc::Sender<()>),
 }
 
-/// Producers copy raw bytes once; only this consumer expands them into hex rows.
-/// Diagnostics use a bounded byte budget; overload is reported explicitly.
+/// Buffer records within a bounded byte budget and report diagnostic overload.
 #[derive(Clone)]
 pub(crate) struct Queue {
     sender: mpsc::Sender<(Pending, usize)>,
@@ -199,16 +192,6 @@ impl Queue {
                         dirty = true;
                         match pending {
                             Pending::Record(record) => output(Some(record)),
-                            Pending::Bytes {
-                                elapsed_ms,
-                                source,
-                                context,
-                                data,
-                            } => {
-                                byte_records(elapsed_ms, &source, &context, &data, |record| {
-                                    output(Some(record))
-                                });
-                            }
                             Pending::Flush(done) => {
                                 output(None);
                                 dirty = false;
@@ -265,14 +248,6 @@ impl Queue {
             })
     }
 
-    fn diagnostic(&self, cost: usize, pending: impl FnOnce() -> Pending) -> bool {
-        if !self.reserve(cost) {
-            self.budget.omitted.fetch_add(1, Ordering::Relaxed);
-            return true;
-        }
-        self.enqueue(pending(), cost).is_ok()
-    }
-
     pub(crate) fn flush(&self) -> io::Result<()> {
         let (tx, rx) = mpsc::channel();
         self.sender
@@ -306,14 +281,6 @@ pub fn background() -> io::Result<FlushGuard> {
         let _ = BACKGROUND.set(queue);
     }
     Ok(FlushGuard)
-}
-
-fn queue() -> Option<Queue> {
-    if crate::progress::active() {
-        crate::progress::log_queue()
-    } else {
-        BACKGROUND.get().cloned()
-    }
 }
 
 pub fn enabled(level: Level) -> bool {
@@ -350,52 +317,6 @@ impl Drop for FirmwareTransfer {
 pub fn emit(level: Level, source: &str, message: fmt::Arguments<'_>) {
     if enabled(level) {
         publish(Record::new(level, source, message));
-    }
-}
-
-/// Complete hex dumps in bounded records, including partial reads and binary data.
-/// Check before allocating: ordinary restores must not pay for byte formatting.
-pub fn bytes(source: &str, context: fmt::Arguments<'_>, bytes: &[u8]) {
-    if !enabled(Level::Trace) {
-        return;
-    }
-    let elapsed_ms = elapsed_ms();
-    let context = context.to_string();
-    if let Some(queue) = queue()
-        && queue.diagnostic(128 + source.len() + context.len() + bytes.len(), || {
-            Pending::Bytes {
-                elapsed_ms,
-                source: source.to_owned(),
-                context: context.clone(),
-                data: bytes.to_vec(),
-            }
-        })
-    {
-        return;
-    }
-    byte_records(elapsed_ms, source, &context, bytes, publish);
-}
-
-fn byte_records(
-    elapsed_ms: u64,
-    source: &str,
-    context: &str,
-    bytes: &[u8],
-    mut output: impl FnMut(Record),
-) {
-    for (index, chunk) in bytes.chunks(64).enumerate() {
-        let mut record = Record::new(
-            Level::Trace,
-            source,
-            format_args!(
-                "{context} +{:08x} [{} B]: {}",
-                index * 64,
-                chunk.len(),
-                hex::encode(chunk)
-            ),
-        );
-        record.elapsed_ms = elapsed_ms;
-        output(record);
     }
 }
 

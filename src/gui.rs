@@ -36,7 +36,7 @@ const NOTICE_LIFETIME: Duration = Duration::from_secs(5);
 
 fn trim_logs(records: &mut VecDeque<Record>) {
     if records.len() > 4000 {
-        // Byte dumps must not evict the visible operation history.
+        // Preserve operation history when diagnostic records fill the buffer.
         let index = records
             .iter()
             .position(|record| record.level < Level::Info)

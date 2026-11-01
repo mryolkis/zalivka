@@ -74,11 +74,6 @@ impl Channel {
                 "RST {peer_port} -> {source}: {}",
                 String::from_utf8_lossy(&data[..data.len().min(256)])
             );
-            crate::logging::bytes(
-                "usbmux:tcp",
-                format_args!("RST {peer_port} -> {source}"),
-                data,
-            );
             self.state = State::Closed;
             return Ok(false);
         }

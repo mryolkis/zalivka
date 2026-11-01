@@ -278,7 +278,7 @@ impl RecoveryTransport for RecoveryUsb {
             "IN type={kind:#04x}, req={request:#04x}, value={value:#06x}, index={index:#06x}, len={length}"
         );
         let (control_type, recipient) = control_kind(kind)?;
-        let bytes = self.interface()?.control_in(
+        self.interface()?.control_in(
             ControlIn {
                 control_type,
                 recipient,
@@ -288,13 +288,7 @@ impl RecoveryTransport for RecoveryUsb {
                 length,
             },
             TIMEOUT,
-        )?;
-        crate::logging::bytes(
-            "usb:control",
-            format_args!("IN request={request:#04x}"),
-            &bytes,
-        );
-        Ok(bytes)
+        )
     }
     fn control_out(
         &mut self,
@@ -309,11 +303,6 @@ impl RecoveryTransport for RecoveryUsb {
             "usb:control",
             "OUT type={kind:#04x}, req={request:#04x}, value={value:#06x}, index={index:#06x}, len={}",
             data.len()
-        );
-        crate::logging::bytes(
-            "usb:control",
-            format_args!("OUT request={request:#04x}, value={value:#06x}"),
-            data,
         );
         let (control_type, recipient) = control_kind(kind)?;
         self.interface()?.control_out(
