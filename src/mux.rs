@@ -11,7 +11,7 @@ use std::{
 
 pub use crate::platform::usb::is_device_removal;
 pub(crate) use direct::MAX_PAYLOAD;
-pub use direct::{InputReady, Packet, PacketTransport, decode_packet};
+pub use direct::{InputReady, PacketTransport, decode_packet};
 
 #[derive(Clone)]
 pub struct Session(Backend);
@@ -145,18 +145,6 @@ impl MuxStream {
             Stream::Direct(s) => s.read_timeout(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             Stream::System(s) => s.read_timeout(),
-        }
-    }
-
-    pub(crate) fn set_log_source(&mut self, source: &'static str) {
-        dispatch!(self, s => s.set_log_source(source))
-    }
-
-    pub(crate) fn local_port(&self) -> u16 {
-        match &self.0 {
-            Stream::Direct(s) => s.local_port(),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            Stream::System(s) => s.local_port(),
         }
     }
 

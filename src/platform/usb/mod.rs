@@ -6,17 +6,21 @@ use crate::{
     usb::RecoveryTransport,
 };
 use anyhow::{Context, Result, bail};
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use backend::BulkInput;
+use backend::BulkOutput;
 pub(crate) use backend::UsbInterface;
-use backend::{BulkInput, BulkOutput};
 pub(crate) use descriptors::{mux_interface, recovery_interface};
 pub(crate) use kis::Kis;
 use nusb::{
     Device, MaybeFuture,
     transfer::{ControlIn, ControlOut, ControlType, Recipient},
 };
-use std::{sync::atomic::AtomicBool, time::Duration};
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
-pub const APPLE_VENDOR: u16 = 0x05ac;
+pub(crate) const APPLE_VENDOR: u16 = 0x05ac;
 pub(crate) const MUX_INTERFACE: (u8, u8, u8) = (0xff, 0xfe, 2);
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -177,8 +181,8 @@ impl RecoveryUsb {
         }
     }
 
+    #[cfg(windows)]
     pub fn check_reset_access(&self) -> Result<()> {
-        #[cfg(windows)]
         if let RecoveryConnection::Standard { interface, .. } = &self.connection {
             interface.check_reset_access(&self.topology)?;
         }
@@ -323,7 +327,6 @@ impl RecoveryTransport for RecoveryUsb {
         Ok(())
     }
     fn bulk_out(&mut self, data: &[u8]) -> Result<()> {
-        crate::logging::bytes("usb:bulk", format_args!("OUT"), data);
         let RecoveryConnection::Standard { bulk, .. } = &mut self.connection else {
             bail!("KIS has no Recovery bulk endpoint")
         };
@@ -333,7 +336,6 @@ impl RecoveryTransport for RecoveryUsb {
         ep.write(data)
     }
     fn reset(&mut self) -> Result<()> {
-        crate::log!(Trace, "usb", "Resetting device");
         #[cfg(windows)]
         {
             match self.interface()? {
@@ -383,7 +385,8 @@ pub fn detect() -> Result<Vec<DeviceInfo>> {
 mod enumeration_tests;
 
 /// USB mux interface, selected by the vendor-specific ff/fe/02 interface triple.
-pub struct MuxUsb {
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) struct MuxUsb {
     _device: Device,
     _interface: UsbInterface,
     input: BulkInput,
@@ -391,8 +394,9 @@ pub struct MuxUsb {
     packet_size: usize,
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl MuxUsb {
-    pub fn candidates() -> Result<Vec<nusb::DeviceInfo>> {
+    pub(crate) fn candidates() -> Result<Vec<nusb::DeviceInfo>> {
         Ok(nusb::list_devices()
             .wait()?
             .filter(|d| {
@@ -403,7 +407,7 @@ impl MuxUsb {
             .collect())
     }
 
-    pub fn open(info: &nusb::DeviceInfo) -> Result<Self> {
+    pub(crate) fn open(info: &nusb::DeviceInfo) -> Result<Self> {
         let device = info.open().wait()?;
         let active = device
             .active_configuration()
@@ -437,7 +441,7 @@ impl MuxUsb {
         })
     }
 
-    pub fn write_packet(&mut self, data: &[u8]) -> Result<()> {
+    pub(crate) fn write_packet(&mut self, data: &[u8]) -> Result<()> {
         self.output.write(data)?;
         if data.len().is_multiple_of(self.packet_size) {
             self.output.write(&[])?;
@@ -462,7 +466,7 @@ impl MuxUsb {
         self.output.write_batch(&transfers, cancelled)
     }
 
-    pub fn read_packet(&mut self) -> Result<Vec<u8>> {
+    pub(crate) fn read_packet(&mut self) -> Result<Vec<u8>> {
         self.input.read()
     }
 

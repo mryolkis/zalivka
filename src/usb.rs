@@ -1,7 +1,9 @@
 //! Apple USB transports and the portable recovery protocol contract.
 use anyhow::Result;
 
-pub use crate::platform::usb::{APPLE_VENDOR, MuxUsb, RecoveryUsb, detect};
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) use crate::platform::usb::MuxUsb;
+pub use crate::platform::usb::{RecoveryUsb, detect};
 
 pub trait RecoveryTransport {
     fn control_in(

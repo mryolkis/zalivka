@@ -30,13 +30,11 @@ impl WriteProfile {
     }
 }
 
-pub struct MuxStream {
+pub(crate) struct MuxStream {
     session: Session,
     source: u16,
     destination: u16,
     read_timeout: Duration,
-    log_source: &'static str,
-    received: u64,
     profile: WriteProfile,
 }
 impl MuxStream {
@@ -46,20 +44,18 @@ impl MuxStream {
             source,
             destination,
             read_timeout: Duration::from_secs(300),
-            log_source: "usbmux:io",
-            received: 0,
             profile: WriteProfile::default(),
         }
     }
 
-    pub fn has_pending_input(&self) -> Result<bool> {
+    pub(crate) fn has_pending_input(&self) -> Result<bool> {
         let link = self.session.lock()?;
         Ok(link
             .channels
             .get(&self.source)
             .is_some_and(|c| !c.input.is_empty()))
     }
-    pub fn set_read_timeout(&mut self, timeout: Duration) {
+    pub(crate) fn set_read_timeout(&mut self, timeout: Duration) {
         crate::log!(
             Trace,
             "usbmux:io",
@@ -69,13 +65,7 @@ impl MuxStream {
         );
         self.read_timeout = timeout;
     }
-    pub(crate) fn set_log_source(&mut self, source: &'static str) {
-        self.log_source = source;
-    }
-    pub(crate) fn local_port(&self) -> u16 {
-        self.source
-    }
-    pub fn read_timeout(&self) -> Duration {
+    pub(crate) fn read_timeout(&self) -> Duration {
         self.read_timeout
     }
 
@@ -155,14 +145,6 @@ impl MuxStream {
                     n
                 };
                 let usb_before = link.usb_write_time;
-                crate::logging::bytes(
-                    self.log_source,
-                    format_args!(
-                        "{} -> {} TX offset={}",
-                        self.source, self.destination, self.profile.bytes
-                    ),
-                    &data[..n],
-                );
                 let sent = link.send_data(self.source, &data[..n]);
                 let usb = link.usb_write_time - usb_before;
                 self.profile.usb_out += usb;
@@ -240,15 +222,6 @@ impl Read for MuxStream {
             c.firmware_transfer = crate::logging::firmware_transfer_active();
             if !c.input.is_empty() {
                 let n = c.input.read(out)?;
-                crate::logging::bytes(
-                    self.log_source,
-                    format_args!(
-                        "{} -> {} RX offset={}",
-                        self.destination, self.source, self.received
-                    ),
-                    &out[..n],
-                );
-                self.received += n as u64;
                 c.consumed += n;
                 if c.consumed >= 16384 {
                     c.consumed = 0;

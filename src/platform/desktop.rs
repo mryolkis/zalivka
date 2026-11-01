@@ -7,8 +7,8 @@ use std::{
 
 /// Reuse the caller's terminal for CLI commands in a Windows GUI build.
 #[allow(unsafe_code)]
+#[cfg(windows)]
 pub fn attach_parent_console() {
-    #[cfg(windows)]
     unsafe {
         windows_sys::Win32::System::Console::AttachConsole(
             windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
@@ -16,14 +16,10 @@ pub fn attach_parent_console() {
     }
 }
 
+#[cfg(windows)]
 pub fn system_font() -> Option<Vec<u8>> {
-    #[cfg(windows)]
-    {
-        let windows = std::env::var_os("WINDIR")?;
-        std::fs::read(std::path::PathBuf::from(windows).join("Fonts/segoeui.ttf")).ok()
-    }
-    #[cfg(not(windows))]
-    None
+    let windows = std::env::var_os("WINDIR")?;
+    std::fs::read(std::path::PathBuf::from(windows).join("Fonts/segoeui.ttf")).ok()
 }
 
 pub fn open_directory(directory: &Path) -> Result<()> {

@@ -49,12 +49,12 @@ fn parent_hub(device: &nusb::DeviceInfo) -> Result<OwnedHandle> {
 }
 
 /// Check hub write access without cycling a port or issuing an IOCTL.
-pub fn check_access(device: &nusb::DeviceInfo) -> Result<()> {
+pub(crate) fn check_access(device: &nusb::DeviceInfo) -> Result<()> {
     drop(parent_hub(device)?);
     Ok(())
 }
 
-pub fn cycle_port(device: &nusb::DeviceInfo) -> Result<()> {
+pub(crate) fn cycle_port(device: &nusb::DeviceInfo) -> Result<()> {
     let handle = parent_hub(device)?;
     cycle_port_request(
         handle.as_raw_handle(),

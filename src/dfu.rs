@@ -66,11 +66,7 @@ fn wait_download(usb: &mut impl RecoveryTransport) -> Result<()> {
 
 /// Match Apple's last-packet convention: a suffix-only packet can reuse the last block index.
 /// Full blocks borrow the input. Only the final block and suffix need storage.
-pub fn packets(data: &[u8]) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>> {
-    image_packets(data, Mode::Dfu)
-}
-
-fn image_packets(data: &[u8], mode: Mode) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>> {
+pub fn packets(data: &[u8], mode: Mode) -> Result<impl Iterator<Item = (u16, Cow<'_, [u8]>)>> {
     ensure!(!data.is_empty(), "cannot send an empty DFU image");
     let block_size = if mode == Mode::PortDfu {
         64
@@ -82,26 +78,28 @@ fn image_packets(data: &[u8], mode: Mode) -> Result<impl Iterator<Item = (u16, C
         blocks <= u16::MAX as usize,
         "DFU image exceeds block index range"
     );
-    let mut suffix = [0; 16];
-    suffix[..SUFFIX.len()].copy_from_slice(&SUFFIX);
-    let mut checksum = crc32fast::Hasher::new();
-    checksum.update(data);
-    checksum.update(&SUFFIX);
-    suffix[SUFFIX.len()..].copy_from_slice(&(!checksum.finalize()).to_le_bytes());
     let index = (blocks - 1) as u16;
     let (prefix, last) = data.split_at(usize::from(index) * block_size);
     let (last, continuation) = if mode == Mode::PortDfu {
         (Cow::Borrowed(last), None)
-    } else if last.len() + suffix.len() <= block_size {
-        let mut bytes = Vec::with_capacity(last.len() + suffix.len());
-        bytes.extend_from_slice(last);
-        bytes.extend_from_slice(&suffix);
-        (Cow::Owned(bytes), None)
     } else {
-        (
-            Cow::Borrowed(last),
-            Some((index, Cow::Owned(suffix.to_vec()))),
-        )
+        let mut suffix = [0; 16];
+        suffix[..SUFFIX.len()].copy_from_slice(&SUFFIX);
+        let mut checksum = crc32fast::Hasher::new();
+        checksum.update(data);
+        checksum.update(&SUFFIX);
+        suffix[SUFFIX.len()..].copy_from_slice(&(!checksum.finalize()).to_le_bytes());
+        if last.len() + suffix.len() <= block_size {
+            let mut bytes = Vec::with_capacity(last.len() + suffix.len());
+            bytes.extend_from_slice(last);
+            bytes.extend_from_slice(&suffix);
+            (Cow::Owned(bytes), None)
+        } else {
+            (
+                Cow::Borrowed(last),
+                Some((index, Cow::Owned(suffix.to_vec()))),
+            )
+        }
     };
     Ok(prefix
         .chunks(block_size)
@@ -153,7 +151,7 @@ pub fn upload(
         }
         state => bail!("expected DFU idle state 2, got {state}; re-enter DFU"),
     }
-    let mut packets = image_packets(data, mode)?.peekable();
+    let mut packets = packets(data, mode)?.peekable();
     let mut remaining = data.len();
     while let Some((block, bytes)) = packets.next() {
         usb.control_out(0x21, 1, block, 0, &bytes)?;

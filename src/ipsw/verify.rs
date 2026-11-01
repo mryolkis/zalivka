@@ -103,10 +103,6 @@ impl Ipsw {
     }
 
     /// Exhaust every ZIP stream (including CRC validation) with bounded memory.
-    pub fn verify_all(&mut self) -> Result<Verification> {
-        self.verify_all_with_options(&aea::Options::default())
-    }
-
     pub fn verify_all_with_options(&mut self, options: &aea::Options) -> Result<Verification> {
         let requirements = self.manifest_digests()?;
         let no_digests = EntryDigests::default();

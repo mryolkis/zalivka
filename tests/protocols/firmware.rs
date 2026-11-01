@@ -638,7 +638,7 @@ fn nested_payloads_keep_their_parsed_tags_when_layout_entries_change_order() {
     let nested = centauri_table(vec![(*b"rkos", vec![1, 2, 3], 0)]);
     for entries in [
         vec![(*b"2ftb", layout.clone(), 0), (*b"FIRM", nested.clone(), 0)],
-        vec![(*b"FIRM", nested.clone(), 0), (*b"2ftb", layout.clone(), 0)],
+        vec![(*b"FIRM", nested, 0), (*b"2ftb", layout.clone(), 0)],
     ] {
         let nested_index = entries
             .iter()
@@ -1096,7 +1096,7 @@ fn namespace_bundles_bind_metadata_and_stream_original_bytes_without_updater_nam
             &[("arbitrary/path.plist", &bundle)],
         );
         let mut ipsw = Ipsw::open(file.path()).unwrap();
-        assert!(ipsw.verify_all().is_ok());
+        assert!(ipsw.verify_all_with_options(&Default::default()).is_ok());
         for name in [None, Some("AppleTCON"), Some("UnknownUpdater")] {
             let mut args = args.clone();
             if let Some(name) = name {
@@ -1300,7 +1300,7 @@ fn namespace_payloads_require_a_valid_ticket_and_verified_bundle() {
         let file = fixture_files(Some(id.clone()), false, &[("arbitrary/path.plist", bytes)]);
         let mut ipsw = Ipsw::open(file.path()).unwrap();
         assert!(ipsw.component(&id, "New,ArbitraryComponent").is_err());
-        assert!(ipsw.verify_all().is_err());
+        assert!(ipsw.verify_all_with_options(&Default::default()).is_err());
         assert!(zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).is_err());
     }
     // Even a valid raw-file digest does not describe how to package it for Mac.
@@ -1343,7 +1343,7 @@ fn namespace_bundle_integrity_checks_agree_even_when_the_outer_hash_is_valid() {
     );
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(ipsw.component(&id, "New,ArbitraryComponent").is_err());
-    assert!(ipsw.verify_all().is_err());
+    assert!(ipsw.verify_all_with_options(&Default::default()).is_err());
     assert!(zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).is_err());
 }
 
@@ -1365,7 +1365,7 @@ fn namespace_bundle_limit_is_checked_before_reading_and_raw_manifest_hashes_are_
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args).is_ok());
     assert!(ipsw.component(&id, "New,ArbitraryComponent").is_ok());
-    assert!(ipsw.verify_all().is_ok());
+    assert!(ipsw.verify_all_with_options(&Default::default()).is_ok());
 
     let mut oversized = vec![0; 32 * 1024 * 1024 + 1];
     oversized[..8].copy_from_slice(b"bplist00");
@@ -1376,7 +1376,9 @@ fn namespace_bundle_limit_is_checked_before_reading_and_raw_manifest_hashes_are_
         zip::CompressionMethod::Deflated,
     );
     let mut ipsw = Ipsw::open(file.path()).unwrap();
-    let error = ipsw.verify_all().unwrap_err();
+    let error = ipsw
+        .verify_all_with_options(&Default::default())
+        .unwrap_err();
     assert!(format!("{error:#}").contains("exceeds memory limit"));
     let error = zalivka::firmware::prepare(&mut ipsw, &id, &device_info(), &args)
         .err()

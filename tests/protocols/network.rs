@@ -54,7 +54,7 @@ fn apple_catalog_resolves_mac_and_t2_hardware_and_uses_current_universal_release
         assert!([catalog::MACOS_CATALOG, catalog::BRIDGEOS_CATALOG].contains(&url));
         for mode in [Mode::Dfu, Mode::Recovery] {
             device.mode = mode;
-            let release = catalog::resolve(&data, &device).unwrap();
+            let release = catalog::resolve(&data, &device).unwrap().unwrap();
             assert_eq!(release.product_type, product);
             assert_eq!(release.version, "27.0.1");
             assert_eq!(release.build, "26A434");
@@ -90,7 +90,10 @@ fn apple_catalog_selects_the_highest_matching_schema_without_skipping_invalid_ve
     versions.insert("010".into(), schema(newest));
     // A newer schema that only lists other models must not hide this model.
     versions.insert("11".into(), wire::dict([] as [(&str, Value); 0]));
-    assert_eq!(catalog::resolve(&data, &device).unwrap().url, newest);
+    assert_eq!(
+        catalog::resolve(&data, &device).unwrap().unwrap().url,
+        newest
+    );
     let versions = data.as_dictionary_mut().unwrap()["MobileDeviceSoftwareVersionsByVersion"]
         .as_dictionary_mut()
         .unwrap();
@@ -141,7 +144,7 @@ fn metadata_catalog_never_falls_back_from_malformed_newer_schema_or_conflicting_
             .insert("2".into(), invalid);
         assert!(catalog::resolve(&value, &device).is_err());
     }
-    let mut value = base.clone();
+    let mut value = base;
     let alternate = catalog_fixture(
         "637567235",
         "MacBookAir10,1",
@@ -187,7 +190,7 @@ fn apple_catalog_rejects_unknown_hardware_invalid_hashes_and_untrusted_urls() {
     }
     let data = catalog_fixture("637567235", "MacBookAir10,1", &"ab".repeat(20), good_url);
     device.board_id += 1;
-    assert!(catalog::resolve(&data, &device).is_err());
+    assert!(catalog::resolve(&data, &device).unwrap().is_none());
     device.board_id = 0x100;
     assert!(catalog::resolve(&data, &device).is_err());
 }
@@ -309,7 +312,10 @@ fn cached_firmware_verifies_required_components_without_scanning_other_identitie
             "{corrupt_path}"
         );
         // The explicit full-archive check still diagnoses either corruption.
-        assert!(ipsw.verify_all().is_err(), "{corrupt_path}");
+        assert!(
+            ipsw.verify_all_with_options(&Default::default()).is_err(),
+            "{corrupt_path}"
+        );
     }
 }
 

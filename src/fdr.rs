@@ -126,7 +126,6 @@ fn control_loop(
                 // concurrent; parallel connects could reorder requests.
                 let connection = (|| -> Result<MuxStream> {
                     let mut connection = session.connect(port)?;
-                    connection.set_log_source("fdr:conn");
                     connection.set_read_timeout(Duration::from_secs(20));
                     connection.write_all(b"HelloConn\0")?;
                     connection_handshake(&mut connection, version)
@@ -190,8 +189,6 @@ pub(crate) fn handle_connection<S: Read + Write>(
     stop: &AtomicBool,
     mut connect: impl FnMut(&str, u16) -> Result<S>,
 ) -> Result<()> {
-    stream.set_log_source("fdr:conn");
-    let channel = stream.local_port();
     stream.set_read_timeout(Duration::from_secs(1));
     let mut cmd = [0; 2];
     while read_exact_idle(&mut stream, &mut cmd, stop).context("reading FDR connection command")? {
@@ -233,11 +230,6 @@ pub(crate) fn handle_connection<S: Read + Write>(
                         match stream.read(&mut buffer) {
                             Ok(0) => return Ok("EOF from Mac"),
                             Ok(n) => {
-                                crate::logging::bytes(
-                                    "fdr:proxy",
-                                    format_args!("#{channel} {host}:{port} TX offset={from_mac}"),
-                                    &buffer[..n],
-                                );
                                 from_mac += n as u64;
                                 socket
                                     .write_all(&buffer[..n])
@@ -249,13 +241,6 @@ pub(crate) fn handle_connection<S: Read + Write>(
                         match socket.read(&mut buffer) {
                             Ok(0) => return Ok("EOF from proxy/Apple"),
                             Ok(n) => {
-                                crate::logging::bytes(
-                                    "fdr:proxy",
-                                    format_args!(
-                                        "#{channel} {host}:{port} RX offset={from_upstream}"
-                                    ),
-                                    &buffer[..n],
-                                );
                                 from_upstream += n as u64;
                                 stream
                                     .write_all(&buffer[..n])

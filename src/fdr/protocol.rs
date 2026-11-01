@@ -13,7 +13,6 @@ use std::{
 
 pub(super) fn control_handshake(session: &Session, version: u8) -> Result<(MuxStream, u16)> {
     let mut control = session.connect(1082).context("connecting FDR control")?;
-    control.set_log_source("fdr:control");
     crate::log!(Debug, "fdr:control", "Negotiating v{version}");
     control.set_read_timeout(Duration::from_secs(20));
     let port = if version == 2 {

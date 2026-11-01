@@ -250,7 +250,7 @@ fn im4p_headers_resolve_boot_roles_and_stage_firmware_without_changing_the_manif
         request,
         tss::request(&device_info(), &Identity::new(id.index, original)).unwrap()
     );
-    ipsw.verify_all().unwrap();
+    ipsw.verify_all_with_options(&Default::default()).unwrap();
 }
 
 #[test]
@@ -320,7 +320,7 @@ fn header_types_do_not_override_explicit_manifest_types_on_shared_files() {
         img4::personalize(&retagged, &ticket()).unwrap()
     );
     assert_eq!(id.value, original);
-    ipsw.verify_all().unwrap();
+    ipsw.verify_all_with_options(&Default::default()).unwrap();
 }
 
 #[test]
@@ -372,7 +372,7 @@ fn raw_trusted_files_do_not_require_an_img4_type_when_they_are_not_boot_objects(
     restore::preflight(&mut ipsw, &mut id).unwrap();
     assert_eq!(id.payload_type("OS").unwrap(), None);
     assert_eq!(ipsw.component(&id, "OS").unwrap(), bytes);
-    ipsw.verify_all().unwrap();
+    ipsw.verify_all_with_options(&Default::default()).unwrap();
 }
 
 #[test]
@@ -599,7 +599,10 @@ fn manifest_paths_are_checked_consistently_before_restore_and_full_verification(
         let mut ipsw = Ipsw::open(file.path()).unwrap();
         assert!(restore::preflight(&mut ipsw, &mut id).is_err(), "{entry:?}");
         assert!(ipsw.validate_identity(&mut id).is_err(), "{entry:?}");
-        assert!(ipsw.verify_all().is_err(), "{entry:?}");
+        assert!(
+            ipsw.verify_all_with_options(&Default::default()).is_err(),
+            "{entry:?}"
+        );
     }
     for entry in [
         wire::dict([("Trusted", false.into())]),
@@ -611,7 +614,7 @@ fn manifest_paths_are_checked_consistently_before_restore_and_full_verification(
         let mut ipsw = Ipsw::open(file.path()).unwrap();
         restore::preflight(&mut ipsw, &mut id).unwrap();
         ipsw.validate_identity(&mut id).unwrap();
-        ipsw.verify_all().unwrap();
+        ipsw.verify_all_with_options(&Default::default()).unwrap();
     }
 }
 
@@ -642,7 +645,10 @@ fn full_ipsw_verification_checks_all_streams_and_manifest_digests() {
     ] {
         let file =
             fixture_compression(None, false, &[("extra", b"unreferenced data")], compression);
-        let report = Ipsw::open(file.path()).unwrap().verify_all().unwrap();
+        let report = Ipsw::open(file.path())
+            .unwrap()
+            .verify_all_with_options(&Default::default())
+            .unwrap();
         assert_eq!(report.entries, 8);
         assert_eq!(report.manifest_digests, 6);
         assert!(report.uncompressed_bytes > 6 * im4p(b"test").len() as u64);
@@ -658,7 +664,7 @@ fn full_ipsw_verification_checks_all_streams_and_manifest_digests() {
     assert!(
         Ipsw::open(file.path())
             .unwrap()
-            .verify_all()
+            .verify_all_with_options(&Default::default())
             .unwrap_err()
             .to_string()
             .contains("digest mismatch")
@@ -671,13 +677,23 @@ fn full_ipsw_verification_checks_all_streams_and_manifest_digests() {
         .unwrap();
     bytes[offset] ^= 0xff;
     std::fs::write(file.path(), bytes).unwrap();
-    assert!(Ipsw::open(file.path()).unwrap().verify_all().is_err());
+    assert!(
+        Ipsw::open(file.path())
+            .unwrap()
+            .verify_all_with_options(&Default::default())
+            .is_err()
+    );
 
     let mut truncated_ftab = vec![0; 48];
     truncated_ftab[36..40].copy_from_slice(b"ftab");
     truncated_ftab[40..44].copy_from_slice(&1u32.to_le_bytes());
     let file = fixture_files(None, false, &[("unreferenced.ftab", &truncated_ftab)]);
-    assert!(Ipsw::open(file.path()).unwrap().verify_all().is_err());
+    assert!(
+        Ipsw::open(file.path())
+            .unwrap()
+            .verify_all_with_options(&Default::default())
+            .is_err()
+    );
 }
 
 #[test]
@@ -694,7 +710,10 @@ fn encrypted_aea_digests_are_explicitly_deferred_and_archive_hash_can_be_checked
         component_entry("image.dmg.aea", b"decrypted content"),
     );
     let file = fixture_files(Some(id), false, &[("image.dmg.aea", &encrypted)]);
-    let report = Ipsw::open(file.path()).unwrap().verify_all().unwrap();
+    let report = Ipsw::open(file.path())
+        .unwrap()
+        .verify_all_with_options(&Default::default())
+        .unwrap();
     assert_eq!(report.aea_content_digests_not_checked, ["image.dmg.aea"]);
     assert!(!report.archive_checksum_verified);
     let checksum = hex::encode(sha2::Sha256::digest(std::fs::read(file.path()).unwrap()));
@@ -741,7 +760,7 @@ fn restore_digest_hashes_the_retagged_im4p_and_preserves_the_original_file() {
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert_eq!(ipsw.component(&id, "RestoreKernelCache").unwrap(), raw);
     assert_eq!(ipsw.component(&id, "KernelCache").unwrap(), raw);
-    ipsw.verify_all().unwrap();
+    ipsw.verify_all_with_options(&Default::default()).unwrap();
     let personalized = img4::personalize_with_metadata(
         "RestoreKernelCache",
         &raw,
@@ -760,7 +779,7 @@ fn restore_digest_hashes_the_retagged_im4p_and_preserves_the_original_file() {
     );
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(ipsw.component(&id, "RestoreKernelCache").is_err());
-    assert!(ipsw.verify_all().is_err());
+    assert!(ipsw.verify_all_with_options(&Default::default()).is_err());
 }
 
 #[test]
@@ -790,7 +809,7 @@ fn manifest_payload_types_drive_verification_and_personalization_for_new_compone
         let mut ipsw = Ipsw::open(file.path()).unwrap();
         restore::preflight(&mut ipsw, &mut id).unwrap();
         assert_eq!(ipsw.component(&id, component).unwrap(), raw);
-        ipsw.verify_all().unwrap();
+        ipsw.verify_all_with_options(&Default::default()).unwrap();
         let tss = wire::dict([("ApImg4Ticket", Value::Data(ticket()))]);
         let personalized = ipsw.personalized(&id, component, &tss).unwrap();
         let (image, _) = img4::parse(&personalized).unwrap();
@@ -808,7 +827,7 @@ fn manifest_payload_types_drive_verification_and_personalization_for_new_compone
         );
         let mut ipsw = Ipsw::open(file.path()).unwrap();
         assert!(ipsw.component(&id, component).is_err());
-        assert!(ipsw.verify_all().is_err());
+        assert!(ipsw.verify_all_with_options(&Default::default()).is_err());
         assert!(ipsw.personalized(&id, component, &tss).is_err());
     }
 }
@@ -834,7 +853,7 @@ fn shared_files_keep_distinct_manifest_payload_types_for_unknown_components() {
     }
     let file = fixture_files(Some(id.clone()), false, &[("Firmware/shared-future", &raw)]);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
-    ipsw.verify_all().unwrap();
+    ipsw.verify_all_with_options(&Default::default()).unwrap();
     for name in ["FutureA", "FutureB"] {
         assert_eq!(ipsw.component(&id, name).unwrap(), raw);
     }
@@ -852,7 +871,7 @@ fn shared_files_keep_distinct_manifest_payload_types_for_unknown_components() {
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(ipsw.component(&id, "FutureA").is_ok());
     assert!(ipsw.component(&id, "FutureB").is_err());
-    assert!(ipsw.verify_all().is_err());
+    assert!(ipsw.verify_all_with_options(&Default::default()).is_err());
 }
 
 #[test]
@@ -882,7 +901,9 @@ fn malformed_manifest_payload_types_fail_before_restore_instead_of_using_legacy_
             ipsw.component(&id, "RestoreKernelCache").unwrap_err(),
             ipsw.personalized(&id, "RestoreKernelCache", &tss)
                 .unwrap_err(),
-            ipsw.verify_all().err().unwrap(),
+            ipsw.verify_all_with_options(&Default::default())
+                .err()
+                .unwrap(),
             img4::personalize_with_metadata("RestoreKernelCache", &im4p(b"krnl"), &tss, &id.value)
                 .unwrap_err(),
         ] {
@@ -936,7 +957,7 @@ fn shared_files_keep_each_components_digest_algorithm_and_restore_tag() {
         let mut ipsw = Ipsw::open(file.path()).unwrap();
         assert_eq!(ipsw.component(&id, "RestoreKernelCache").unwrap(), raw);
         assert!(ipsw.component(&id, "RestoreDeviceTree").is_err());
-        assert!(ipsw.verify_all().is_err());
+        assert!(ipsw.verify_all_with_options(&Default::default()).is_err());
 
         let mut tree = raw.clone();
         tree[offset..offset + 4].copy_from_slice(b"rdtr");
@@ -947,7 +968,7 @@ fn shared_files_keep_each_components_digest_algorithm_and_restore_tag() {
         let file = fixture_files(Some(id.clone()), false, &[("Firmware/shared", &raw)]);
         let mut ipsw = Ipsw::open(file.path()).unwrap();
         assert_eq!(ipsw.component(&id, "RestoreDeviceTree").unwrap(), raw);
-        ipsw.verify_all().unwrap();
+        ipsw.verify_all_with_options(&Default::default()).unwrap();
     }
 }
 
@@ -998,7 +1019,12 @@ fn shared_bundles_match_each_authenticated_digest_and_reject_metadata_only_diges
             for name in ["BundleFirmware", "BundleConfiguration", "WholeBundle"] {
                 assert_eq!(ipsw.component(&id, name).unwrap(), bytes);
             }
-            assert_eq!(ipsw.verify_all().unwrap().manifest_digests, 9);
+            assert_eq!(
+                ipsw.verify_all_with_options(&Default::default())
+                    .unwrap()
+                    .manifest_digests,
+                9
+            );
 
             let mut invalid = component_entry("shared.plist", &bytes);
             invalid
@@ -1009,7 +1035,7 @@ fn shared_bundles_match_each_authenticated_digest_and_reject_metadata_only_diges
             let file = fixture_compression(Some(id.clone()), false, &files, compression);
             let mut ipsw = Ipsw::open(file.path()).unwrap();
             assert!(ipsw.component(&id, "MetadataOnly").is_err());
-            assert!(ipsw.verify_all().is_err());
+            assert!(ipsw.verify_all_with_options(&Default::default()).is_err());
         }
     }
 }
@@ -1021,7 +1047,12 @@ fn empty_components_have_the_same_digest_in_memory_and_streaming() {
     let file = fixture_files(Some(id.clone()), false, &[("empty", b"")]);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     assert!(ipsw.component(&id, "Empty").unwrap().is_empty());
-    assert_eq!(ipsw.verify_all().unwrap().manifest_digests, 7);
+    assert_eq!(
+        ipsw.verify_all_with_options(&Default::default())
+            .unwrap()
+            .manifest_digests,
+        7
+    );
 }
 
 #[test]
@@ -1072,7 +1103,7 @@ fn ftab_and_uarp_manifest_digests_validate_inner_payloads_across_stream_chunks()
             .unwrap(),
         uarp
     );
-    ipsw.verify_all().unwrap();
+    ipsw.verify_all_with_options(&Default::default()).unwrap();
     uarp[76..80].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(payload_ranges(&uarp, uarp.len() as u64).is_err());
     let mut bad = ftab;
@@ -1139,7 +1170,7 @@ fn zip64_streams_five_gib_with_bounded_memory() {
         ipsw.stream("large.dmg", &mut std::io::sink()).unwrap(),
         size
     );
-    let report = ipsw.verify_all().unwrap();
+    let report = ipsw.verify_all_with_options(&Default::default()).unwrap();
     assert_eq!(report.entries, 2);
     assert!(report.uncompressed_bytes > size);
 }
@@ -1500,7 +1531,10 @@ fn trusted_files_and_fileless_signing_metadata_use_the_same_digest_validation() 
         let mut ipsw = Ipsw::open(file.path()).unwrap();
         assert!(restore::preflight(&mut ipsw, &mut id).is_err(), "{name}");
         assert!(ipsw.validate_identity(&mut id).is_err(), "{name}");
-        assert!(ipsw.verify_all().is_err(), "{name}");
+        assert!(
+            ipsw.verify_all_with_options(&Default::default()).is_err(),
+            "{name}"
+        );
     }
 }
 
@@ -1551,7 +1585,10 @@ fn verification_reports_crc_only_files_and_each_identity_component() {
             ("unreferenced.bin", b"extra"),
         ],
     );
-    let report = Ipsw::open(file.path()).unwrap().verify_all().unwrap();
+    let report = Ipsw::open(file.path())
+        .unwrap()
+        .verify_all_with_options(&Default::default())
+        .unwrap();
     assert!(!report.apple_signature_verified);
     let unsigned = report
         .files
@@ -1701,7 +1738,9 @@ fn embedded_tickets_check_all_matching_identities_and_reject_mismatched_measurem
                 bytes,
             )],
         );
-        let result = Ipsw::open(file.path()).unwrap().verify_all();
+        let result = Ipsw::open(file.path())
+            .unwrap()
+            .verify_all_with_options(&Default::default());
         assert_eq!(result.is_ok(), !corrupt);
         if let Ok(report) = result {
             assert_eq!(report.im4m_manifests[0].identity_indexes, [0, 1]);
@@ -1746,7 +1785,10 @@ fn real_apple_restore_and_cryptex_tickets_match_their_manifest_and_payloads() {
         zip::CompressionMethod::Deflated,
     ] {
         let file = test_support::ipsw(&manifest, &files, method);
-        let report = Ipsw::open(file.path()).unwrap().verify_all().unwrap();
+        let report = Ipsw::open(file.path())
+            .unwrap()
+            .verify_all_with_options(&Default::default())
+            .unwrap();
         assert_eq!(report.manifest_digests, 2);
         assert_eq!(report.components.len(), 4);
         assert_eq!(report.im4m_manifests.len(), 2);
@@ -1811,6 +1853,9 @@ fn embedded_ticket_selection_continues_past_a_different_identity_for_the_same_ha
             tss::ticket(&ticket).unwrap(),
         )],
     );
-    let report = Ipsw::open(file.path()).unwrap().verify_all().unwrap();
+    let report = Ipsw::open(file.path())
+        .unwrap()
+        .verify_all_with_options(&Default::default())
+        .unwrap();
     assert_eq!(report.im4m_manifests[0].identity_indexes, [1]);
 }

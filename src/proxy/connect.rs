@@ -34,6 +34,8 @@ pub(super) fn connect<S: Connection>(
             auth.as_mut().unwrap().step(challenge)
         },
     )?;
+    // GSSAPI needs a completion check; SSPI validates tokens inside step().
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(auth) = auth {
         auth.finish()?;
     }

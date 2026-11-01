@@ -67,7 +67,6 @@ fn session(path: &Path) -> Session {
         path: path.to_owned(),
         device_id: 42,
         cancelled: AtomicBool::new(false),
-        next_channel: AtomicU16::new(1),
     }))
 }
 
@@ -139,7 +138,6 @@ fn connect_preserves_coalesced_service_bytes_and_independent_channels() {
     let mut bytes = [0; 8];
     main.read_exact(&mut bytes).unwrap();
     assert_eq!(&bytes, b"restored");
-    assert_ne!(main.local_port(), data.local_port());
     data.write_all(b"payload").unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     while !data.has_pending_input().unwrap() {

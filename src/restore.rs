@@ -96,9 +96,11 @@ pub(crate) fn run(
     assets: net::AssetClient,
 ) -> Result<()> {
     // The catalog/download phase can outlive a change in host driver/service state.
+    #[cfg(windows)]
     crate::drivers::check_host()?;
     let mut usb = RecoveryUsb::open(ecid)?;
     ensure!(usb.info.mode.can_restore(), "enter DFU before restoring");
+    #[cfg(windows)]
     usb.check_reset_access()?;
     crate::log!(
         Info,
@@ -111,6 +113,7 @@ pub(crate) fn run(
     if usb.info.mode == Mode::PortDfu {
         usb = port_dfu::boot(&mut ipsw, usb, &identity)?;
         // SoC identity and ticket must use its own ECID, nonces and fuses.
+        #[cfg(windows)]
         usb.check_reset_access()?;
     }
     let ecid = usb.info.ecid;

@@ -84,3 +84,7 @@ codegen-units = 1
 
 [lints.rust]
 unsafe_code = "deny"
+unreachable_pub = "deny"
+
+[lints.clippy]
+redundant_clone = "warn"

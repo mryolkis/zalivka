@@ -73,17 +73,17 @@ fn generate_loopback() -> Result<Loopback, rcgen::Error> {
 }
 
 /// Trust anchor for [`localhost_leaf`]; it is signed by this certificate.
-pub fn localhost_root() -> CertificateDer<'static> {
+pub(crate) fn localhost_root() -> CertificateDer<'static> {
     loopback().root.clone()
 }
 
 /// Server certificate presented by [`tls_server_config`] and validated as
 /// `localhost` or `127.0.0.1`.
-pub fn localhost_leaf() -> CertificateDer<'static> {
+pub(crate) fn localhost_leaf() -> CertificateDer<'static> {
     loopback().leaf.clone()
 }
 
-pub fn tls_server_config() -> Arc<ServerConfig> {
+pub(crate) fn tls_server_config() -> Arc<ServerConfig> {
     Arc::new(
         ServerConfig::builder_with_provider(Arc::new(oxitls_rustcrypto_provider::provider()))
             .with_safe_default_protocol_versions()
@@ -94,7 +94,7 @@ pub fn tls_server_config() -> Arc<ServerConfig> {
     )
 }
 
-pub fn accept(listener: &TcpListener) -> TcpStream {
+pub(crate) fn accept(listener: &TcpListener) -> TcpStream {
     listener.set_nonblocking(true).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     let stream = loop {
@@ -119,7 +119,7 @@ pub fn accept(listener: &TcpListener) -> TcpStream {
 }
 
 // Read only headers: a following HTTP body or tunneled bytes must remain unread.
-pub fn read_header(stream: &mut impl Read) -> String {
+pub(crate) fn read_header(stream: &mut impl Read) -> String {
     let mut bytes = Vec::new();
     while !bytes.ends_with(b"\r\n\r\n") {
         let mut byte = [0];

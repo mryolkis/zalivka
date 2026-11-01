@@ -6,11 +6,12 @@ mod channel;
 mod packet;
 #[path = "stream.rs"]
 mod stream;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use crate::usb::MuxUsb;
 use anyhow::{Context, Result, ensure};
 use bytes::{Bytes, BytesMut};
 use channel::{Channel, State};
-pub use packet::{Packet, decode_packet};
+pub use packet::decode_packet;
 use packet::{TcpPacket, encode_header};
 use std::{
     collections::BTreeMap,
@@ -20,7 +21,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-pub use stream::MuxStream;
+pub(super) use stream::MuxStream;
 
 const HOST_MAGIC: u32 = 0xfeedface;
 const DEVICE_MAGIC: u32 = 0xfaceface;
@@ -72,6 +73,7 @@ pub trait PacketTransport: Send {
         Ok(())
     }
 }
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl PacketTransport for MuxUsb {
     fn write_packet(&mut self, b: &[u8]) -> Result<()> {
         self.write_packet(b)
@@ -103,10 +105,10 @@ struct Link {
 }
 
 #[derive(Clone)]
-pub struct Session(Arc<Mutex<Link>>, Arc<AtomicBool>);
+pub(super) struct Session(Arc<Mutex<Link>>, Arc<AtomicBool>);
 
 impl Session {
-    pub fn new(usb: impl PacketTransport + 'static) -> Result<Self> {
+    pub(super) fn new(usb: impl PacketTransport + 'static) -> Result<Self> {
         crate::log!(Trace, "usbmux", "Negotiating version");
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut link = Link {
@@ -168,7 +170,7 @@ impl Session {
     }
 
     #[cfg(test)]
-    pub fn connect(&self, destination: u16) -> Result<MuxStream> {
+    pub(super) fn connect(&self, destination: u16) -> Result<MuxStream> {
         self.connect_until(destination, Instant::now() + Duration::from_secs(30))
     }
 
@@ -213,14 +215,14 @@ impl Session {
         }
     }
 
-    pub fn cancel(&self) {
+    pub(super) fn cancel(&self) {
         crate::log!(Trace, "usbmux", "Cancelling session");
         self.1.store(true, Ordering::Release);
     }
 
     /// True only after the OS reported physical device removal, not a timeout,
     /// malformed plist, closed service, or firmware updater failure.
-    pub fn disconnected(&self) -> bool {
+    pub(super) fn disconnected(&self) -> bool {
         self.lock().map(|l| l.disconnected).unwrap_or(false)
     }
 }

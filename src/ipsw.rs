@@ -5,7 +5,7 @@ mod verify;
 use crate::{img4, wire};
 use anyhow::{Context, Result, ensure};
 pub use digest::verify_digest;
-pub use identity::{Behavior, Identity, IdentitySummary};
+pub use identity::{Behavior, Identity};
 use plist::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -16,7 +16,7 @@ use std::{
 };
 pub use stream::ImageReader;
 use stream::{STREAM_CHUNK, copy_prefetched};
-pub use verify::{ComponentVerification, FileVerification, ManifestVerification, Verification};
+pub use verify::Verification;
 use zip::ZipArchive;
 
 pub const MAX_COMPONENT: u64 = 1024 * 1024 * 1024;

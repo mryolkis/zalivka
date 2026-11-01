@@ -218,9 +218,6 @@ impl Localizer {
     pub fn preference(&self) -> &str {
         &self.preference
     }
-    pub fn language(&self) -> &str {
-        &self.selected.locale
-    }
     pub fn name(&self) -> &str {
         &self.selected.name
     }

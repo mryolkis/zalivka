@@ -60,10 +60,10 @@ fn product_type<'a>(catalog: &'a Value, device: &DeviceInfo) -> Result<Option<&'
         .transpose()
 }
 
-pub fn resolve(catalog: &Value, device: &DeviceInfo) -> Result<Release> {
-    let product_type = product_type(catalog, device)?
-        .context("Apple catalog has no model for the supplied hardware and mode")?;
-    resolve_product(catalog, product_type)
+pub fn resolve(catalog: &Value, device: &DeviceInfo) -> Result<Option<Release>> {
+    product_type(catalog, device)?
+        .map(|product| resolve_product(catalog, product))
+        .transpose()
 }
 
 fn resolve_product(catalog: &Value, product_type: &str) -> Result<Release> {
@@ -141,11 +141,7 @@ fn latest_with(
     let mut selected = None;
     let mut errors = Vec::new();
     for url in [MACOS_CATALOG, BRIDGEOS_CATALOG] {
-        let loaded = load(url).and_then(|catalog| {
-            product_type(&catalog, device)?
-                .map(|product| resolve_product(&catalog, product))
-                .transpose()
-        });
+        let loaded = load(url).and_then(|catalog| resolve(&catalog, device));
         match loaded {
             Ok(Some(release)) => {
                 ensure!(

@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU16, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -26,7 +26,6 @@ struct Shared {
     path: PathBuf,
     device_id: u32,
     cancelled: AtomicBool,
-    next_channel: AtomicU16,
 }
 
 pub(crate) fn candidates() -> Result<Vec<Session>> {
@@ -41,7 +40,6 @@ fn candidates_at(path: &Path) -> Result<Vec<Session>> {
                 path: path.to_owned(),
                 device_id,
                 cancelled: AtomicBool::new(false),
-                next_channel: AtomicU16::new(1),
             }))
         })
         .collect())
@@ -52,9 +50,8 @@ fn list_devices(path: &Path) -> Result<Vec<Value>> {
         path: path.to_owned(),
         device_id: 0,
         cancelled: AtomicBool::new(false),
-        next_channel: AtomicU16::new(1),
     });
-    let mut stream = Stream::open(shared, 0, Instant::now() + Duration::from_secs(10))?;
+    let mut stream = Stream::open(shared, Instant::now() + Duration::from_secs(10))?;
     let response = request(&mut stream, "ListDevices", [])?;
     let devices = wire::get(&response, &["DeviceList"])?
         .as_array()
@@ -108,7 +105,7 @@ pub(crate) fn check_device(info: &nusb::DeviceInfo) -> Result<()> {
 impl Session {
     pub(crate) fn connect(&self, destination: u16, deadline: Instant) -> Result<Stream> {
         ensure!(destination != 0, "zero service port");
-        let mut stream = Stream::open(self.0.clone(), destination, deadline)?;
+        let mut stream = Stream::open(self.0.clone(), deadline)?;
         let response = request(
             &mut stream,
             "Connect",
@@ -212,17 +209,12 @@ pub(crate) struct Stream {
     socket: UnixStream,
     shared: Arc<Shared>,
     pending: Mutex<VecDeque<u8>>,
-    source: u16,
-    destination: u16,
     read_timeout: Duration,
     deadline: Option<Instant>,
-    log_source: &'static str,
-    received: u64,
-    written: u64,
 }
 
 impl Stream {
-    fn open(shared: Arc<Shared>, destination: u16, deadline: Instant) -> Result<Self> {
+    fn open(shared: Arc<Shared>, deadline: Instant) -> Result<Self> {
         check(&shared, deadline)?;
         let socket = UnixStream::connect(&shared.path).map_err(|error| {
             // connect_retry retries a device's Result=3, not a stopped daemon.
@@ -236,18 +228,12 @@ impl Stream {
             shared.path.display()
         ))?;
         socket.set_nonblocking(true)?;
-        let source = shared.next_channel.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             socket,
             shared,
             pending: Mutex::new(VecDeque::new()),
-            source,
-            destination,
             read_timeout: TIMEOUT,
             deadline: Some(deadline),
-            log_source: "usbmux:io",
-            received: 0,
-            written: 0,
         })
     }
 
@@ -282,12 +268,6 @@ impl Stream {
     pub(crate) fn read_timeout(&self) -> Duration {
         self.read_timeout
     }
-    pub(crate) fn set_log_source(&mut self, source: &'static str) {
-        self.log_source = source;
-    }
-    pub(crate) fn local_port(&self) -> u16 {
-        self.source
-    }
 
     fn write_data(&mut self, data: &[u8], stop_on_input: bool) -> io::Result<Option<usize>> {
         if data.is_empty() {
@@ -306,18 +286,7 @@ impl Stream {
                         "usbmuxd socket closed",
                     ));
                 }
-                Ok(n) => {
-                    crate::logging::bytes(
-                        self.log_source,
-                        format_args!(
-                            "{} -> {} TX offset={}",
-                            self.source, self.destination, self.written
-                        ),
-                        &data[..n],
-                    );
-                    self.written += n as u64;
-                    return Ok(Some(n));
-                }
+                Ok(n) => return Ok(Some(n)),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(1))
@@ -357,34 +326,24 @@ impl Read for Stream {
         let deadline = self
             .deadline
             .unwrap_or_else(|| Instant::now() + self.read_timeout);
-        let n = loop {
+        loop {
             check(&self.shared, deadline)?;
             let pending = self
                 .pending
                 .get_mut()
                 .map_err(|_| io::Error::other("usbmuxd input lock poisoned"))?;
             if !pending.is_empty() {
-                break pending.read(out)?;
+                return pending.read(out);
             }
             match self.socket.read(out) {
-                Ok(n) => break n,
+                Ok(n) => return Ok(n),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(1))
                 }
                 Err(error) => return Err(error),
             }
-        };
-        crate::logging::bytes(
-            self.log_source,
-            format_args!(
-                "{} -> {} RX offset={}",
-                self.destination, self.source, self.received
-            ),
-            &out[..n],
-        );
-        self.received += n as u64;
-        Ok(n)
+        }
     }
 }
 

@@ -138,7 +138,7 @@ fn native_verification_emits_typed_progress_and_complete_diagnostics() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let output = events.clone();
     let report = zalivka::progress::Context::new(move |event| output.lock().unwrap().push(event))
-        .run(|| zalivka::operations::verify(file.path(), None))
+        .run(|| zalivka::operations::verify_with_options(file.path(), None, &Default::default()))
         .unwrap();
     let events = events.lock().unwrap();
     let mut started = std::collections::HashSet::new();

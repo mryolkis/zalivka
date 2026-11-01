@@ -78,7 +78,7 @@ fn m4_m5_catalog_and_identity_selection_follow_the_captured_metadata() {
                 device.board_id = (device.board_id << 24) | (device.chip_id << 8);
                 device.chip_id = 0x22;
             }
-            let release = catalog::resolve(&catalog, &device).unwrap();
+            let release = catalog::resolve(&catalog, &device).unwrap().unwrap();
             // This captures Apple's current mapping, including the Mac16,10/
             // Mac16,11 discrepancy documented in the investigation.
             assert_eq!(release.product_type, model.catalog_product_type);

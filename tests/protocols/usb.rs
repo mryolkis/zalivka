@@ -544,7 +544,7 @@ fn empty_firmware_is_rejected_before_any_usb_request_in_both_modes() {
 }
 
 fn dfu_packets(data: &[u8]) -> Result<Vec<(u16, Vec<u8>)>> {
-    Ok(dfu::packets(data)?
+    Ok(dfu::packets(data, Mode::Dfu)?
         .map(|(index, bytes)| (index, bytes.into_owned()))
         .collect())
 }

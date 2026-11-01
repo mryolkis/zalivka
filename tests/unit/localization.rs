@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn bundled_languages_are_valid_and_select_by_system_language() {
     let mut localizer = Localizer::from_directories(&[], vec!["ru-RU".into()], "system");
-    assert_eq!(localizer.language(), "ru");
+    assert_eq!(localizer.selected.locale, "ru");
     {
         let _language = localizer.enter();
         assert_eq!(text("Settings"), "Настройки");
@@ -40,14 +40,14 @@ fn locale_matching_uses_region_language_and_english_fallback() {
             system.into_iter().map(String::from).collect(),
             "system",
         );
-        assert_eq!(localizer.language(), expected);
+        assert_eq!(localizer.selected.locale, expected);
     }
     let mut localizer = Localizer::from_directories(&[], vec!["ru-RU".into()], "en");
-    assert_eq!(localizer.language(), "en");
+    assert_eq!(localizer.selected.locale, "en");
     localizer.select("system");
-    assert_eq!(localizer.language(), "ru");
+    assert_eq!(localizer.selected.locale, "ru");
     localizer.select("missing");
-    assert_eq!(localizer.language(), "en");
+    assert_eq!(localizer.selected.locale, "en");
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn third_party_language_pack_is_loaded_without_source_changes() {
     std::fs::write(&file, r#"{"locale":"fr","name":"Français","messages":{"Settings":"Paramètres","Version {}, build {}":"Version {}, compilation {}"}}"#).unwrap();
     let localizer =
         Localizer::from_directories(&[directory.path().into()], vec!["fr-FR".into()], "system");
-    assert_eq!(localizer.language(), "fr");
+    assert_eq!(localizer.selected.locale, "fr");
     assert!(
         localizer
             .languages()

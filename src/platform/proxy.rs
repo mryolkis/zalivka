@@ -221,10 +221,6 @@ impl Negotiate {
     pub(crate) fn step(&mut self, _challenge: Option<&str>) -> Result<String> {
         anyhow::bail!("integrated proxy authentication is unavailable on this platform")
     }
-
-    pub(crate) fn finish(&self) -> Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

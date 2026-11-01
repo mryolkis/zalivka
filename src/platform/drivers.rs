@@ -10,7 +10,7 @@ use nusb::MaybeFuture;
 use serde::Serialize;
 use std::{fs::File, io::Write, path::Path};
 
-pub const UDEV_RULES: &str = include_str!("../../packaging/70-zalivka.rules");
+pub(crate) const UDEV_RULES: &str = include_str!("../../packaging/70-zalivka.rules");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HostStatus {
@@ -47,6 +47,7 @@ pub fn host_status() -> Result<Option<HostStatus>> {
 }
 
 /// Check before downloading firmware or sending anything to the device.
+#[cfg(windows)]
 pub fn check_host() -> Result<()> {
     if let Some(status) = host_status()?
         && let Some(reason) = status.blocking_reason()
@@ -65,11 +66,9 @@ pub fn prepare_windows() -> Result<bool> {
     anyhow::bail!("Driver setup is only available on Windows")
 }
 
+#[cfg(windows)]
 pub fn run_elevated_helper() -> Option<u32> {
-    #[cfg(windows)]
-    return setup::run_helper();
-    #[cfg(not(windows))]
-    None
+    setup::run_helper()
 }
 
 /// Remove Apple restore device records and reinstall the signed USB package.

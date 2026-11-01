@@ -463,6 +463,7 @@ pub fn publish(record: Record) {
 }
 
 fn write_default(record: Record, mut stderr: impl Write) {
+    #[cfg(windows)]
     if crate::platform::logging::write_elevated(&record) {
         return;
     }

@@ -84,7 +84,7 @@ fn catalog_selection_uses_advertised_hardware_without_chip_or_product_name_table
         &"ab".repeat(20),
         "https://updates.cdn-apple.com/other.ipsw",
     );
-    let expected = resolve(&matching, &device).unwrap();
+    let expected = resolve(&matching, &device).unwrap().unwrap();
     let select = |first: &Value, second: &Value| {
         let mut catalogs = [first, second].into_iter();
         latest_with(&device, |_| Ok(catalogs.next().unwrap().clone()))

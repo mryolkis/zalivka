@@ -3,20 +3,20 @@ use crate::wire;
 use anyhow::Result;
 use plist::Value;
 
-pub fn boolean(value: &Value, path: &[&str]) -> bool {
+pub(crate) fn boolean(value: &Value, path: &[&str]) -> bool {
     wire::get(value, path)
         .ok()
         .and_then(Value::as_boolean)
         .unwrap_or(false)
 }
 
-pub struct Ftab {
+pub(crate) struct Ftab {
     pub header: [u8; 48],
     pub entries: Vec<([u8; 4], Vec<u8>, u32)>,
 }
 
 impl Ftab {
-    pub fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut output = self.header.to_vec();
         output[40..44].copy_from_slice(&(self.entries.len() as u32).to_le_bytes());
         output.resize(48 + self.entries.len() * 16, 0);
@@ -36,7 +36,7 @@ impl Ftab {
 
 /// A normal IPSW fixture; malformed XML, ZIP64 and directory tests build their
 /// own archives when they need to violate these defaults.
-pub fn ipsw(
+pub(crate) fn ipsw(
     manifest: &Value,
     files: &[(&str, &[u8])],
     compression: zip::CompressionMethod,
@@ -56,7 +56,7 @@ pub fn ipsw(
 }
 
 /// Locate the exact central-directory name for deliberate metadata corruption.
-pub fn zip_entry_offset(bytes: &[u8], name: &str) -> usize {
+pub(crate) fn zip_entry_offset(bytes: &[u8], name: &str) -> usize {
     bytes
         .windows(4)
         .enumerate()
@@ -69,7 +69,7 @@ pub fn zip_entry_offset(bytes: &[u8], name: &str) -> usize {
         .expect("fixture ZIP entry missing")
 }
 
-pub fn corrupt_crc(path: &std::path::Path, name: &str) {
+pub(crate) fn corrupt_crc(path: &std::path::Path, name: &str) {
     let mut bytes = std::fs::read(path).unwrap();
     let offset = zip_entry_offset(&bytes, name);
     bytes[offset + 16] ^= 1;
@@ -77,7 +77,7 @@ pub fn corrupt_crc(path: &std::path::Path, name: &str) {
 }
 
 /// A finite packet script: an unexpected read fails instead of hanging a test.
-pub struct Scripted {
+pub(crate) struct Scripted {
     pub input: std::collections::VecDeque<Vec<u8>>,
     pub output: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
 }
@@ -95,7 +95,7 @@ impl crate::mux::PacketTransport for Scripted {
     }
 }
 
-pub fn scripted(
+pub(crate) fn scripted(
     packets: Vec<Vec<u8>>,
 ) -> (Scripted, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
     let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -108,7 +108,10 @@ pub fn scripted(
     )
 }
 
-pub fn payloads(output: &std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>, port: u16) -> Vec<u8> {
+pub(crate) fn payloads(
+    output: &std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    port: u16,
+) -> Vec<u8> {
     let mut data = Vec::new();
     for bytes in output.lock().unwrap().iter() {
         if u32::from_be_bytes(bytes[..4].try_into().unwrap()) != 6 {
@@ -123,7 +126,7 @@ pub fn payloads(output: &std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>, port: u
     data
 }
 
-pub fn catalog_fixture(key: &str, product: &str, checksum: &str, url: &str) -> Value {
+pub(crate) fn catalog_fixture(key: &str, product: &str, checksum: &str, url: &str) -> Value {
     wire::dict([
         (
             "MobileDeviceProductTypes",

@@ -174,7 +174,7 @@ pub(super) fn run() -> Result<()> {
     if std::env::args_os().len() == 1 {
         return crate::gui::run();
     }
-    #[cfg(feature = "gui")]
+    #[cfg(all(windows, feature = "gui"))]
     zalivka::platform::attach_parent_console();
     let cli = Cli::parse();
     match cli.command {

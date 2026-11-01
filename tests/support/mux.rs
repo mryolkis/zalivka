@@ -1,7 +1,14 @@
 //! Device-side packets shared by protocol tests and synthetic transports.
 use anyhow::{Result, ensure};
 
-pub fn tcp(source: u16, destination: u16, seq: u32, ack: u32, flags: u8, data: &[u8]) -> Vec<u8> {
+pub(crate) fn tcp(
+    source: u16,
+    destination: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    data: &[u8],
+) -> Vec<u8> {
     let mut header = vec![0; 20];
     header[..2].copy_from_slice(&source.to_be_bytes());
     header[2..4].copy_from_slice(&destination.to_be_bytes());
@@ -14,12 +21,12 @@ pub fn tcp(source: u16, destination: u16, seq: u32, ack: u32, flags: u8, data: &
     encode_packet(6, 2, 1, 0, &header).unwrap()
 }
 
-pub fn version_packet() -> Vec<u8> {
+pub(crate) fn version_packet() -> Vec<u8> {
     encode_packet(0, 0, 0, 0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap()
 }
 
 /// Build device fixtures independently of the production frame encoder.
-pub fn encode_packet(
+pub(crate) fn encode_packet(
     protocol: u32,
     version: u32,
     tx: u16,

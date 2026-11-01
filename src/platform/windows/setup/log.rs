@@ -21,7 +21,7 @@ pub(super) struct LogPipe {
 }
 
 impl LogPipe {
-    pub fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let id = uuid::Uuid::new_v4();
         let name = super::wide(format!(r"\\.\pipe\zalivka-elevated-{id}"));
         // Default pipe ACL grants access to its creator and administrators,
@@ -59,7 +59,7 @@ impl LogPipe {
         })
     }
 
-    pub fn drain(&mut self, mut publish: impl FnMut(Record)) -> Result<()> {
+    pub(crate) fn drain(&mut self, mut publish: impl FnMut(Record)) -> Result<()> {
         // Nonblocking reads let the caller also observe helper exit, including
         // failures before it connects. Bound work and incomplete record size.
         let mut buffer = [0u8; 8192];
@@ -93,7 +93,7 @@ impl LogPipe {
         Ok(())
     }
 
-    pub fn incomplete(&self) -> bool {
+    pub(crate) fn incomplete(&self) -> bool {
         !self.pending.is_empty()
     }
 }

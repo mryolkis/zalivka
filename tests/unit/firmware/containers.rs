@@ -34,7 +34,7 @@ fn bundle_records_are_verified_recursively_and_metadata_alone_is_insufficient() 
         .unwrap();
     fields.insert("Payload".into(), Value::Data(b"tampered firmware".to_vec()));
     assert!(check(&bundle).is_err());
-    let metadata = wire::dict([("Digest", Value::Data(digest.clone()))]);
+    let metadata = wire::dict([("Digest", Value::Data(digest))]);
     assert!(check(&metadata).unwrap().is_empty());
     assert!(verify_plist_bundle(b"raw firmware").unwrap().is_empty());
     assert!(verify_plist_bundle(b"<?xml invalid").is_err());

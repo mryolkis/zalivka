@@ -8,13 +8,17 @@ use crate::platform::windows::{
 #[cfg(windows)]
 use anyhow::bail;
 use anyhow::{Context, Result, ensure};
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use nusb::transfer::{Buffer, In};
 use nusb::{
     Device, Interface, MaybeFuture,
-    transfer::{Buffer, Bulk, ControlIn, ControlOut, In, Out},
+    transfer::{Bulk, ControlIn, ControlOut, Out},
 };
+use std::time::Duration;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use std::{
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 /// Use the normal OS USB backend first, then Apple's installed Windows filter.
@@ -104,6 +108,7 @@ impl UsbInterface {
         }
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(super) fn bulk_in(&self, address: u8) -> Result<BulkInput> {
         match self {
             Self::Native(i) => Ok(BulkInput::Native(i.endpoint(address)?)),
@@ -136,6 +141,7 @@ impl BulkOutput {
         }
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(super) fn write_batch(&mut self, packets: &[&[u8]], cancelled: &AtomicBool) -> Result<()> {
         match self {
             Self::Native(ep) => {
@@ -187,12 +193,14 @@ impl BulkOutput {
     }
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) enum BulkInput {
     Native(nusb::Endpoint<Bulk, In>),
     #[cfg(windows)]
     Apple(BulkReader),
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl BulkInput {
     pub(super) fn input_ready(&self) -> Option<crate::mux::InputReady> {
         match self {
@@ -232,6 +240,7 @@ impl BulkInput {
 }
 
 /// Cancellation is asynchronous: retire every request before releasing its buffer.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn cancel_and_drain<Dir: nusb::transfer::EndpointDirection>(
     endpoint: &mut nusb::Endpoint<Bulk, Dir>,
 ) {

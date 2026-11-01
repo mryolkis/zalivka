@@ -87,7 +87,7 @@ fn base(device: &DeviceInfo, id: &Identity) -> Result<Dictionary> {
         );
     }
     if !device.sep_nonce.is_empty() {
-        d.insert("SepNonce".into(), Value::Data(device.sep_nonce.clone()));
+        d.insert("SepNonce".into(), Value::Data(device.sep_nonce));
     }
     Ok(d)
 }

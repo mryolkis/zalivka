@@ -97,6 +97,7 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
             load_ibss,
             "reading boot state from DFU requires --load-ibss (loads a signed bootloader into RAM)"
         );
+        #[cfg(windows)]
         usb.check_reset_access()?;
         let mut ipsw = Ipsw::open(path)?;
         let mut identity = ipsw.select_behavior(&usb.info, None, Behavior::Update)?;

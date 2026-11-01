@@ -57,7 +57,7 @@ struct State {
 struct EventUsb(Arc<Mutex<State>>, InputReady);
 
 #[test]
-fn fdr_reader_skips_firmware_acks_and_keeps_its_own_trace() {
+fn fdr_reader_skips_firmware_acks_without_logging_payloads() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let output = records.clone();
     crate::progress::Context::new(move |event| {
@@ -78,7 +78,6 @@ fn fdr_reader_skips_firmware_acks_and_keeps_its_own_trace() {
         let session = Session::new(EventUsb(state, InputReady::new(|_| Ok(false)))).unwrap();
         let mut firmware = session.connect(12345).unwrap();
         let mut fdr = session.connect(45678).unwrap();
-        fdr.set_log_source("fdr:conn");
         records.lock().unwrap().clear();
         {
             let _transfer = crate::logging::firmware_transfer();
@@ -92,7 +91,7 @@ fn fdr_reader_skips_firmware_acks_and_keeps_its_own_trace() {
         }))
         .join()
         .unwrap();
-        // The same channel resumes tracing when it sends a control message.
+        // Ordinary control messages also omit the generic usbmux payload dump.
         firmware.write_all(b"control").unwrap();
     });
     let records = records.lock().unwrap();
@@ -108,16 +107,10 @@ fn fdr_reader_skips_firmware_acks_and_keeps_its_own_trace() {
             .iter()
             .any(|record| record.message.starts_with("12345 -> 1:"))
     );
-    assert!(
-        records
-            .iter()
-            .any(|record| { record.source == "fdr:conn" && record.message.ends_with("464452") })
-    );
-    assert!(
-        records.iter().any(|record| {
-            record.source == "usbmux:io" && record.message.contains("TX offset=64")
-        })
-    );
+    assert!(!records.iter().any(|record| {
+        (record.source == "usbmux:io" || record.source.starts_with("fdr:"))
+            && record.message.contains(" offset=")
+    }));
 }
 
 #[test]

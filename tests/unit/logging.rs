@@ -110,7 +110,7 @@ fn firmware_trace_suppression_is_scoped_and_preserves_parallel_fdr_and_errors() 
             crate::log!(Debug, "transfer", "Transfer progress");
             std::thread::spawn(crate::progress::inherit(|| {
                 crate::log!(Trace, "fdr:conn", "Parallel FDR");
-                bytes("fdr:conn", format_args!("RX"), b"FDR");
+                bytes("test:bytes", format_args!("RX"), b"parallel payload");
             }))
             .join()
             .unwrap();
@@ -136,11 +136,8 @@ fn firmware_trace_suppression_is_scoped_and_preserves_parallel_fdr_and_errors() 
     ] {
         assert!(records.iter().any(|record| record.message == message));
     }
-    assert!(
-        records
-            .iter()
-            .any(|record| record.source == "fdr:conn" && record.message.ends_with("464452"))
-    );
+    assert!(records.iter().any(|record| record.source == "test:bytes"
+        && record.message.ends_with("706172616c6c656c207061796c6f6164")));
 }
 
 #[test]
@@ -169,7 +166,7 @@ fn queued_dumps_do_not_wait_for_the_sink_and_keep_owned_data_and_timestamps() {
         worker.run(|| {
             crate::log!(Info, "test", "Pause sink");
             let mut data: Vec<_> = (0..256 * 1024).map(|index| index as u8).collect();
-            bytes("fdr:conn", format_args!("RX offset=0"), &data);
+            bytes("test:bytes", format_args!("RX offset=0"), &data);
             data.fill(0);
             let mut value = crate::wire::dict([("Data", plist::Value::Data(vec![1, 2, 3]))]);
             plist("plist", "TX binary LE", &value);
@@ -200,7 +197,7 @@ fn queued_dumps_do_not_wait_for_the_sink_and_keep_owned_data_and_timestamps() {
     );
     let received: Vec<_> = records
         .iter()
-        .filter(|record| record.source == "fdr:conn")
+        .filter(|record| record.source == "test:bytes")
         .flat_map(|record| hex::decode(record.message.split_once("]: ").unwrap().1).unwrap())
         .collect();
     assert_eq!(
@@ -266,7 +263,7 @@ fn trace_producer_benchmark() {
             let _disabled = (mode == "disabled").then(firmware_transfer);
             for offset in 0..256 {
                 bytes(
-                    "fdr:conn",
+                    "test:bytes",
                     format_args!("RX offset={}", offset * payload.len()),
                     &payload,
                 );
@@ -399,7 +396,7 @@ fn trace_subprocess() {
 }
 
 #[test]
-fn native_operations_always_trace_and_fdr_dumps_preserve_all_bytes_in_both_directions() {
+fn native_operations_trace_fdr_events_without_payload_dumps() {
     for native in [false, true] {
         for level in ["info", "debug", "trace"] {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
@@ -433,46 +430,28 @@ fn native_operations_always_trace_and_fdr_dumps_preserve_all_bytes_in_both_direc
                 assert_eq!(stderr.contains("TRACE"), level == "trace");
                 assert_eq!(stderr.contains("DEBUG"), level != "info");
                 assert!(stderr.contains("info record"));
+                assert_eq!(stderr.contains("Negotiating v2"), level != "info");
+                assert!(!stderr.contains(" offset="));
                 continue;
             }
             assert!(stderr.is_empty());
             assert!(records.iter().any(|r| r.message == "debug record"));
             assert!(records.iter().any(|r| r.level == Level::Trace));
-            assert!(
-                records
-                    .iter()
-                    .any(|r| r.source == "fdr:control" && r.message == "Stopped")
-            );
-            let dump = |source, direction| -> Vec<u8> {
-                records
-                    .iter()
-                    .filter(|r| r.source == source && r.message.contains(direction))
-                    .flat_map(|r| {
-                        let (_, hex) = r.message.split_once("]: ").unwrap();
-                        let bytes = hex::decode(hex).unwrap();
-                        assert!(bytes.len() <= 64);
-                        bytes
-                    })
-                    .collect()
-            };
-            let control = dump("fdr:control", " TX offset=");
-            assert!(control.starts_with(b"BeginCtrl\0"));
-            assert_eq!(&control[14..22], b"bplist00");
-            let received = dump("fdr:conn", " RX offset=");
-            assert_eq!(&received[..5], &[5, 1, 0, 3, 14]);
-            assert_eq!(
-                &received[21..],
-                &(0..400).map(|i| i as u8).collect::<Vec<_>>()
-            );
-            assert_eq!(
-                dump("fdr:proxy", " TX offset="),
-                (0..400).map(|i| i as u8).collect::<Vec<_>>()
-            );
-            let reply: Vec<u8> = (0..333).map(|i| (255 - i % 256) as u8).collect();
-            assert_eq!(dump("fdr:proxy", " RX offset="), reply);
-            let sent = dump("fdr:conn", " TX offset=");
-            assert!(sent.starts_with(&[5, 0, 0, 3, 14]));
-            assert_eq!(&sent[21..], reply);
+            for (source, message) in [
+                ("fdr:control", "Negotiating v2"),
+                ("fdr:control", "Stopped"),
+                ("fdr:proxy", "Connecting to tbsc.apple.com:443"),
+            ] {
+                assert!(
+                    records
+                        .iter()
+                        .any(|r| r.source == source && r.message == message)
+                );
+            }
+            assert!(!records.iter().any(|r| {
+                (r.source == "usbmux:io" || r.source.starts_with("fdr:"))
+                    && r.message.contains(" offset=")
+            }));
         }
     }
 }

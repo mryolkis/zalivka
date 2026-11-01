@@ -34,6 +34,7 @@ pub struct Restore {
 
 impl Restore {
     pub fn run(self, behavior: Behavior) -> Result<()> {
+        #[cfg(windows)]
         drivers::check_host()?;
         let assets = net::AssetClient::from_files(
             self.authorization_tokens.as_deref(),
@@ -67,10 +68,6 @@ impl Restore {
         progress::Event::RestoreCompleted.emit();
         Ok(())
     }
-}
-
-pub fn verify(path: &Path, checksum: Option<&str>) -> Result<Verification> {
-    verify_with_options(path, checksum, &crate::aea::Options::default())
 }
 
 pub fn verify_with_options(

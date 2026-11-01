@@ -25,7 +25,7 @@ pub(crate) struct Negotiate {
 }
 
 impl Negotiate {
-    pub fn new(scheme: &str, proxy_host: &str) -> Result<Self> {
+    pub(crate) fn new(scheme: &str, proxy_host: &str) -> Result<Self> {
         ensure!(
             matches!(scheme, "Negotiate" | "NTLM"),
             "unsupported SSPI proxy scheme"
@@ -74,12 +74,7 @@ impl Negotiate {
         })
     }
 
-    pub(crate) fn finish(&self) -> Result<()> {
-        // SSPI validates the exchange in step(), including the final server token.
-        Ok(())
-    }
-
-    pub fn step(&mut self, challenge: Option<&str>) -> Result<String> {
+    pub(crate) fn step(&mut self, challenge: Option<&str>) -> Result<String> {
         let mut bytes = challenge
             .map(|text| BASE64_STANDARD.decode(text))
             .transpose()

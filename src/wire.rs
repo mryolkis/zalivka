@@ -303,10 +303,8 @@ pub fn receive_xml(r: &mut impl BufRead) -> Result<Value> {
         let finished = depth == 0 && matches!(event, Event::End(_) | Event::Empty(_));
         writer.write_event(event)?;
         if finished {
-            let value = Value::from_reader_xml(writer.into_inner().as_slice())
-                .context("decoding ASR plist")?;
-            crate::logging::plist("asr:plist", "RX", &value);
-            return Ok(value);
+            return Value::from_reader_xml(writer.into_inner().as_slice())
+                .context("decoding ASR plist");
         }
         buffer.clear();
     }

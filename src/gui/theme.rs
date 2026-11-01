@@ -96,6 +96,7 @@ pub(super) fn configure(ctx: &egui::Context) {
                 .insert(text, egui::FontId::proportional(size));
         }
     });
+    #[cfg(windows)]
     if let Some(bytes) = zalivka::platform::system_font() {
         let mut fonts = egui::FontDefinitions::default();
         fonts

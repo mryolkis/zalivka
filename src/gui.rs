@@ -50,7 +50,7 @@ fn logo_icon() -> egui::IconData {
         .expect("embedded logo must be a valid PNG")
 }
 
-pub fn run() -> Result<()> {
+pub(crate) fn run() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!(
