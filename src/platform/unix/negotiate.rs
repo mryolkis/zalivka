@@ -31,7 +31,7 @@ impl Negotiate {
         crate::log!(
             Debug,
             "proxy:auth",
-            "GSSAPI {scheme}; service=HTTP/{proxy_host}; default user credentials"
+            "GSSAPI {scheme}; SPN=HTTP/{proxy_host}; current user"
         );
         Ok(Self {
             context: ClientCtx::new(None, target, CtxFlags::GSS_C_MUTUAL_FLAG, Some(mechanism)),

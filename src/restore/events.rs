@@ -22,9 +22,9 @@ pub(super) fn log_progress(
         Level::Debug,
         "restored:op",
         if progress == -1 {
-            format!("Operation {operation}: no percentage")
+            format!("Operation {operation}: progress unavailable")
         } else if progress < 0 {
-            format!("Operation {operation}: percentage unavailable ({progress})")
+            format!("Operation {operation}: progress unavailable ({progress})")
         } else {
             format!("Operation {operation}: {progress}%")
         },
@@ -116,7 +116,7 @@ pub(super) fn log_checkpoint(
         output(Record::new(
             Level::Info,
             "restore",
-            format!("Mac stage: {}", name.replace('_', " ")),
+            format!("Stage: {}", name.replace('_', " ")),
         ));
     }
     let provisioning_failed = complete
@@ -146,8 +146,6 @@ pub(super) fn record_message(log: &mut Option<impl Write>, message: &Value) -> O
     Some(Record::new(
         Level::Warning,
         "transcript",
-        format!(
-            "JSONL journal incomplete: {error:#}. Further recording disabled; restore continues."
-        ),
+        format!("Transcript stopped; restore continues: {error:#}"),
     ))
 }

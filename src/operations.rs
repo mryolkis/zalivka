@@ -64,7 +64,15 @@ impl Restore {
             behavior,
             assets,
         )?;
-        crate::log!(Info, "restore", "Restore complete");
+        crate::log!(
+            Info,
+            "restore",
+            "{} complete",
+            match behavior {
+                Behavior::Erase => "Restore",
+                Behavior::Update => "Revive",
+            }
+        );
         progress::Event::RestoreCompleted.emit();
         Ok(())
     }
@@ -84,7 +92,7 @@ pub fn verify_with_options(
     crate::log!(
         Info,
         "ipsw",
-        "Verified files: {}; manifest digests: {}",
+        "Verified: {} files, {} manifest digests",
         report.entries,
         report.manifest_digests
     );
@@ -92,7 +100,7 @@ pub fn verify_with_options(
         crate::log!(
             Warning,
             "ipsw",
-            "AEA content digests not checked: {}",
+            "AEA content checks skipped: {}",
             report.aea_content_digests_not_checked.len()
         );
     }
@@ -100,9 +108,10 @@ pub fn verify_with_options(
     crate::log!(
         Info,
         "ipsw",
-        "Files checked only by ZIP CRC: {crc_only}; embedded IM4M manifests: {}; Apple signature authentication: not performed",
+        "Coverage: CRC-only={crc_only}; IM4M={}",
         report.im4m_manifests.len()
     );
+    crate::log!(Info, "ipsw", "Apple ticket signatures not authenticated");
     for file in &report.files {
         for reason in &file.skipped_checks {
             crate::log!(Debug, "ipsw:coverage", "{}: {reason}", file.path);
@@ -132,7 +141,7 @@ pub fn doctor() -> Result<Vec<drivers::UsbDiagnostic>> {
         crate::log!(
             Info,
             "drivers",
-            "Apple USB driver: {}; Apple KIS/RSM drivers: {}; Apple service running: {}",
+            "Drivers: USB={}; KIS/RSM={}; Apple service running={}",
             host.apple_driver_installed,
             host.apple_kis_driver_installed,
             host.apple_service_running

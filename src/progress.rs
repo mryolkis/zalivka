@@ -244,11 +244,11 @@ impl Progress {
             progress.level(),
             "transfer",
             format_args!(
-                "{}: starting, {}{}",
+                "{}: started; {}{}",
                 progress.stage,
                 human_bytes(completed),
                 total
-                    .map(|n| format!(" of {}", human_bytes(n)))
+                    .map(|n| format!(" / {}", human_bytes(n)))
                     .unwrap_or_default()
             ),
         );
@@ -354,15 +354,15 @@ impl Update {
         if self.finished {
             let speed = self.bytes_per_second / 1048576.0;
             format!(
-                "{}: complete, {size}, {:.1} s, {speed:.1} MiB/s",
+                "{}: complete; {size}; {:.1} s; {speed:.1} MiB/s",
                 self.stage, self.elapsed_seconds
             )
         } else {
             format!(
-                "{}: {size}{}, {:.1} MiB/s",
+                "{}: {size}{}; {:.1} MiB/s",
                 self.stage,
                 self.total
-                    .map(|n| format!(" of {}", human_bytes(n)))
+                    .map(|n| format!(" / {}", human_bytes(n)))
                     .unwrap_or_default(),
                 self.bytes_per_second / 1048576.0
             )

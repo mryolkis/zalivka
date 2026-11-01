@@ -129,7 +129,7 @@ impl Negotiate {
         crate::log!(
             Trace,
             "proxy:auth",
-            "InitializeSecurityContextW: status=0x{:08X}; attributes=0x{attributes:08X}; input={} B, output={} B",
+            "SSPI: status=0x{:08X}; flags=0x{attributes:08X}; in={} B, out={} B",
             status as u32,
             bytes.len(),
             output.0.cbBuffer

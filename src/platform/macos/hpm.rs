@@ -273,10 +273,6 @@ pub(super) fn enter_dfu() -> Result<()> {
         "Expected one connection on the host DFU port, found {}; connect only the target Mac directly through the two DFU ports",
         connected.len()
     );
-    crate::log!(
-        Info,
-        "dfu",
-        "Requesting DFU mode through the host USB-C controller"
-    );
+    crate::log!(Info, "dfu", "Requesting DFU via USB-C");
     protocol::enter_dfu(&mut connected[0], key)
 }

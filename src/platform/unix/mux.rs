@@ -216,17 +216,21 @@ pub(crate) struct Stream {
 impl Stream {
     fn open(shared: Arc<Shared>, deadline: Instant) -> Result<Self> {
         check(&shared, deadline)?;
-        let socket = UnixStream::connect(&shared.path).map_err(|error| {
-            // connect_retry retries a device's Result=3, not a stopped daemon.
-            if error.kind() == io::ErrorKind::ConnectionRefused {
-                io::Error::new(io::ErrorKind::NotConnected, error)
-            } else {
-                error
-            }
-        }).with_context(|| format!(
-            "connecting to system usbmuxd at {}; Linux: install/start usbmuxd and update Zalivka's udev rules; macOS: system usbmuxd must be available",
-            shared.path.display()
-        ))?;
+        let socket = UnixStream::connect(&shared.path)
+            .map_err(|error| {
+                // connect_retry retries a device's Result=3, not a stopped daemon.
+                if error.kind() == io::ErrorKind::ConnectionRefused {
+                    io::Error::new(io::ErrorKind::NotConnected, error)
+                } else {
+                    error
+                }
+            })
+            .with_context(|| {
+                format!(
+                    "connecting to system usbmuxd at {}; check service and USB rules",
+                    shared.path.display()
+                )
+            })?;
         socket.set_nonblocking(true)?;
         Ok(Self {
             socket,

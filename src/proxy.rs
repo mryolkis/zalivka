@@ -42,11 +42,7 @@ pub(crate) fn try_routes<T>(
             Err(error)
                 if routes.peek().is_some() && error.chain().any(|e| e.is::<ConnectFailure>()) =>
             {
-                crate::log!(
-                    Warning,
-                    "proxy",
-                    "Connection failed: {error:#}; trying the next configured proxy route"
-                );
+                crate::log!(Warning, "proxy", "Route failed; trying next: {error:#}");
             }
             Err(error) => return Err(error),
         }

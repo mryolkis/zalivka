@@ -233,7 +233,7 @@ fn prepare_elevated(reboot: &mut bool) -> Result<()> {
     }
     ensure!(
         admin,
-        "Windows setup requires administrator rights: IsUserAnAdmin=false. The process token has no active membership in the local Administrators group (S-1-5-32-544). UAC approval and a high integrity level alone do not guarantee membership. Run setup using a local administrator account on this computer."
+        "Administrator membership required (IsUserAnAdmin=false). Run setup with a local administrator account."
     );
     let arch = architecture().context("Determining architecture before driver installation")?;
     crate::log!(

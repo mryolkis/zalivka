@@ -197,9 +197,14 @@ pub(crate) fn send_http_via(
     crate::log!(
         Trace,
         "http",
-        "HTTP {}; headers={:?}",
+        "HTTP {}; headers={}; length={}",
         response.status(),
-        response.headers()
+        response.headers().len(),
+        response
+            .body()
+            .content_length()
+            .map(|length| format!("{length} B"))
+            .unwrap_or_else(|| "unknown".into())
     );
     Ok(response)
 }

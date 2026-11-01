@@ -215,7 +215,7 @@ pub fn boot_kernel(usb: &mut impl RecoveryTransport) -> Result<()> {
         crate::log!(
             Debug,
             "boot",
-            "Kernel transfer notification failed: {error:#}; sending bootx"
+            "Kernel notification failed; sending bootx: {error:#}"
         );
     }
     crate::log!(Debug, "boot", "Starting kernel with bootx");

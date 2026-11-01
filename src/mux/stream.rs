@@ -300,13 +300,20 @@ impl Drop for MuxStream {
             crate::log!(
                 Trace,
                 "usbmux:stats",
-                "Profile {} -> {}: bytes={}, calls={}, errors={}, elapsed={:.3}s, usb={:.3}s, stalls={}, event_waits={}, wakeups={}",
+                "{} -> {}: bytes={}, calls={}, errors={}, elapsed={:.3}s",
                 self.source,
                 self.destination,
                 p.bytes,
                 p.calls,
                 p.errors,
-                p.elapsed.as_secs_f64(),
+                p.elapsed.as_secs_f64()
+            );
+            crate::log!(
+                Trace,
+                "usbmux:stats",
+                "{} -> {}: usb={:.3}s, stalls={}, waits={}, wakeups={}",
+                self.source,
+                self.destination,
                 p.usb_out.as_secs_f64(),
                 p.window_stalls,
                 p.event_waits,

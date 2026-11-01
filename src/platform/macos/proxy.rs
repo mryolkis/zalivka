@@ -122,7 +122,7 @@ pub(crate) fn for_url(uri: &Uri) -> Result<Vec<Option<Proxy>>> {
                 crate::log!(
                     Debug,
                     "proxy:wpad",
-                    "No DNS WPAD route: {error:#}; using the system's concrete route"
+                    "DNS WPAD unavailable; using system route: {error:#}"
                 );
             }
         }

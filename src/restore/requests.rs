@@ -76,7 +76,11 @@ impl AsyncRequests {
                 crate::log!(
                     Trace,
                     "restored:job",
-                    "{kind}: port={port}; result={result:?}"
+                    "{kind}: port={port}; {}",
+                    match &result {
+                        Ok(()) => "complete".to_owned(),
+                        Err(error) => format!("failed: {error:#}"),
+                    }
                 );
                 // Publish the original error before waking a blocked control read
                 // through cancellation. check() must see the cause, not just cancel.

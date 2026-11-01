@@ -213,7 +213,10 @@ impl RecoveryUsb {
     }
 
     fn open_candidate(usb: nusb::DeviceInfo, mode: Mode) -> Result<Self> {
-        let device = usb.open().wait().context("opening Apple USB device (Linux: udev permissions; Windows: compatible USB driver required)")?;
+        let device = usb
+            .open()
+            .wait()
+            .context("opening Apple USB device; check permissions and driver")?;
         if usb.product_id() == 0x1881 {
             let mut kis = kis::Kis::open(&device, &usb)?;
             let info = kis.info()?;
@@ -272,7 +275,7 @@ impl RecoveryTransport for RecoveryUsb {
         crate::log!(
             Trace,
             "usb:control",
-            "IN type={kind:#04x}, request={request:#04x}, value={value:#06x}, index={index:#06x}, length={length}"
+            "IN type={kind:#04x}, req={request:#04x}, value={value:#06x}, index={index:#06x}, len={length}"
         );
         let (control_type, recipient) = control_kind(kind)?;
         let bytes = self.interface()?.control_in(
@@ -304,7 +307,7 @@ impl RecoveryTransport for RecoveryUsb {
         crate::log!(
             Trace,
             "usb:control",
-            "OUT type={kind:#04x}, request={request:#04x}, value={value:#06x}, index={index:#06x}, length={}",
+            "OUT type={kind:#04x}, req={request:#04x}, value={value:#06x}, index={index:#06x}, len={}",
             data.len()
         );
         crate::logging::bytes(
@@ -373,7 +376,15 @@ pub fn detect() -> Result<Vec<DeviceInfo>> {
             serial_number(&d)?
         };
         let info = DeviceInfo::parse(&serial, mode)?;
-        crate::log!(Trace, "usb:detect", "{info:?}");
+        crate::log!(
+            Trace,
+            "usb:detect",
+            "ECID={:016x}; CPID={:04x}; BDID={:02x}; mode={:?}",
+            info.ecid,
+            info.chip_id,
+            info.board_id,
+            info.mode
+        );
         Ok(info)
     }))?;
     crate::log!(Trace, "usb:detect", "Found={}", out.len());

@@ -146,12 +146,6 @@ enum Pending {
         context: String,
         data: Vec<u8>,
     },
-    Plist {
-        elapsed_ms: u64,
-        source: &'static str,
-        context: &'static str,
-        value: plist::Value,
-    },
     Flush(mpsc::Sender<()>),
 }
 
@@ -171,88 +165,66 @@ struct Budget {
     omitted: AtomicU64,
 }
 
-fn plist_cost(value: &plist::Value, depth: usize) -> usize {
-    if depth >= 128 {
-        return MAX_QUEUED_BYTES + 1;
-    }
-    let mut cost = 128usize;
-    match value {
-        plist::Value::Data(data) => cost = cost.saturating_add(data.len()),
-        plist::Value::String(text) => cost = cost.saturating_add(text.len()),
-        plist::Value::Array(values) => {
-            for value in values {
-                cost = cost.saturating_add(plist_cost(value, depth + 1));
-                if cost > MAX_QUEUED_BYTES {
-                    break;
-                }
-            }
-        }
-        plist::Value::Dictionary(values) => {
-            for (key, value) in values {
-                cost = cost
-                    .saturating_add(key.len())
-                    .saturating_add(plist_cost(value, depth + 1));
-                if cost > MAX_QUEUED_BYTES {
-                    break;
-                }
-            }
-        }
-        _ => {}
-    }
-    cost
-}
-
 impl Queue {
     // None requests a buffered sink flush, including while the producer is idle.
     pub(crate) fn new(mut output: impl FnMut(Option<Record>) + Send + 'static) -> io::Result<Self> {
         let (tx, rx) = mpsc::channel();
         let budget = Arc::new(Budget::default());
         let consumer_budget = budget.clone();
-        std::thread::Builder::new().name("zalivka-journal".into()).spawn(move || {
-            let mut dirty = false;
-            let mut flushed = Instant::now();
-            loop {
-                let incoming = rx.recv_timeout(Duration::from_millis(200));
-                let omitted = consumer_budget.omitted.swap(0, Ordering::AcqRel);
-                if omitted != 0 {
-                    output(Some(Record::new(Level::Warning, "journal", format_args!(
-                        "Diagnostic queue overloaded: omitted {omitted} DEBUG/TRACE records or dumps"
-                    ))));
-                    dirty = true;
-                }
-                let pending = match incoming {
-                    Ok(pending) => Some(pending),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => { output(None); return; }
-                    Err(mpsc::RecvTimeoutError::Timeout) => None,
-                };
-                if let Some((pending, cost)) = pending {
-                    dirty = true;
-                    match pending {
-                        Pending::Record(record) => output(Some(record)),
-                        Pending::Bytes { elapsed_ms, source, context, data } => {
-                            byte_records(elapsed_ms, &source, &context, &data, |record| output(Some(record)));
-                        }
-                        Pending::Plist { elapsed_ms, source, context, value } => {
-                            let mut record = Record::new(Level::Trace, source, format_args!("{context}: {value:?}"));
-                            record.elapsed_ms = elapsed_ms;
-                            output(Some(record));
-                        }
-                        Pending::Flush(done) => {
-                            output(None);
-                            dirty = false;
-                            flushed = Instant::now();
-                            let _ = done.send(());
-                        }
+        std::thread::Builder::new()
+            .name("zalivka-journal".into())
+            .spawn(move || {
+                let mut dirty = false;
+                let mut flushed = Instant::now();
+                loop {
+                    let incoming = rx.recv_timeout(Duration::from_millis(200));
+                    let omitted = consumer_budget.omitted.swap(0, Ordering::AcqRel);
+                    if omitted != 0 {
+                        output(Some(Record::new(
+                            Level::Warning,
+                            "journal",
+                            format_args!("Queue full; omitted {omitted} DEBUG/TRACE records"),
+                        )));
+                        dirty = true;
                     }
-                    consumer_budget.bytes.fetch_sub(cost, Ordering::AcqRel);
+                    let pending = match incoming {
+                        Ok(pending) => Some(pending),
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            output(None);
+                            return;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    };
+                    if let Some((pending, cost)) = pending {
+                        dirty = true;
+                        match pending {
+                            Pending::Record(record) => output(Some(record)),
+                            Pending::Bytes {
+                                elapsed_ms,
+                                source,
+                                context,
+                                data,
+                            } => {
+                                byte_records(elapsed_ms, &source, &context, &data, |record| {
+                                    output(Some(record))
+                                });
+                            }
+                            Pending::Flush(done) => {
+                                output(None);
+                                dirty = false;
+                                flushed = Instant::now();
+                                let _ = done.send(());
+                            }
+                        }
+                        consumer_budget.bytes.fetch_sub(cost, Ordering::AcqRel);
+                    }
+                    if dirty && flushed.elapsed() >= Duration::from_millis(200) {
+                        output(None);
+                        dirty = false;
+                        flushed = Instant::now();
+                    }
                 }
-                if dirty && flushed.elapsed() >= Duration::from_millis(200) {
-                    output(None);
-                    dirty = false;
-                    flushed = Instant::now();
-                }
-            }
-        })?;
+            })?;
         Ok(Self { sender: tx, budget })
     }
 
@@ -431,17 +403,58 @@ pub(crate) fn plist(source: &'static str, context: &'static str, value: &plist::
     if !enabled(Level::Trace) {
         return;
     }
-    if let Some(queue) = queue()
-        && queue.diagnostic(plist_cost(value, 0), || Pending::Plist {
-            elapsed_ms: elapsed_ms(),
-            source,
-            context,
-            value: value.clone(),
-        })
-    {
-        return;
+    emit(
+        Level::Trace,
+        source,
+        format_args!("{context}: {}", plist_summary(value)),
+    );
+}
+
+/// Keep protocol identifiers visible without expanding payloads or nested collections.
+fn plist_summary(value: &plist::Value) -> String {
+    fn text(value: &str, limit: usize) -> String {
+        match value.char_indices().nth(limit) {
+            Some((end, _)) => format!("{:?}… ({} B)", &value[..end], value.len()),
+            None => format!("{value:?}"),
+        }
     }
-    emit(Level::Trace, source, format_args!("{context}: {value:?}"));
+
+    fn field(value: &plist::Value) -> String {
+        match value {
+            plist::Value::Data(bytes) => format!("data[{} B]", bytes.len()),
+            plist::Value::String(value) => text(value, 96),
+            plist::Value::Array(values) => format!("array[{}]", values.len()),
+            plist::Value::Dictionary(values) => format!("dict[{}]", values.len()),
+            plist::Value::Boolean(value) => value.to_string(),
+            plist::Value::Integer(value) => value.to_string(),
+            plist::Value::Real(value) => value.to_string(),
+            plist::Value::Date(value) => value.to_xml_format(),
+            plist::Value::Uid(value) => format!("UID({})", value.get()),
+            _ => "unknown".into(),
+        }
+    }
+
+    let plist::Value::Dictionary(values) = value else {
+        return field(value);
+    };
+    const IDENTIFIERS: &[&str] = &["MsgType", "Request", "DataType", "Status", "Error", "Log"];
+    let identifiers = IDENTIFIERS
+        .iter()
+        .copied()
+        .filter_map(|key| values.get(key).map(|value| (key, value)));
+    let other_fields = values
+        .iter()
+        .filter(|(key, _)| !IDENTIFIERS.contains(&key.as_str()))
+        .map(|(key, value)| (key.as_str(), value));
+    let mut fields: Vec<_> = identifiers
+        .chain(other_fields)
+        .take(8)
+        .map(|(key, value)| format!("{}={}", text(key, 48), field(value)))
+        .collect();
+    if values.len() > fields.len() {
+        fields.push(format!("+{} fields", values.len() - fields.len()));
+    }
+    format!("{{{}}}", fields.join(", "))
 }
 
 pub fn publish(record: Record) {

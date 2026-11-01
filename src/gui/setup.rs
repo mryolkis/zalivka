@@ -152,13 +152,10 @@ impl Setup {
                 operations::fetch(ecid, directory, self.release.as_ref())?;
             }
             Action::Verify => {
-                let report =
-                    operations::verify_with_options(self.local_file()?, None, &Default::default())?;
-                zalivka::log!(Trace, "report", "{}", serde_json::to_string(&report)?);
+                operations::verify_with_options(self.local_file()?, None, &Default::default())?;
             }
             Action::Doctor => {
                 let report = operations::doctor()?;
-                zalivka::log!(Trace, "report", "{}", serde_json::to_string(&report)?);
                 ensure!(
                     report.iter().all(|device| device.accessible),
                     "USB diagnostics found inaccessible devices"

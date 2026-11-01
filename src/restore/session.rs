@@ -191,12 +191,16 @@ impl RestoreSession {
                     }
                 }
                 "RestoredCrash" => bail!("restored crashed: {message:?}"),
-                "PreviousRestoreLogMsg" => crate::log!(
-                    Trace,
-                    "restored:log",
-                    "Previous journal: {}",
-                    wire::string(&message, &["PreviousRestoreLog"]).unwrap_or("unavailable")
-                ),
+                "PreviousRestoreLogMsg" => {
+                    for line in wire::string(&message, &["PreviousRestoreLog"])
+                        .unwrap_or("unavailable")
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                    {
+                        crate::log!(Trace, "restored:log", "Previous: {line}");
+                    }
+                }
                 name => bail!("unsupported restored message {name}; the restore did not complete"),
             }
         }
@@ -254,9 +258,9 @@ pub(super) fn run(
                 // ACK and closure failures are terminal regardless of USB state.
                 connection.finish(&message, &attestation)?;
                 crate::log!(
-                    Info,
+                    Debug,
                     "restore",
-                    "Success; ECID={:016x}",
+                    "Session complete; ECID={:016x}",
                     state.context.device.ecid
                 );
                 if provisioning_error {

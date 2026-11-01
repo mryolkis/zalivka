@@ -317,13 +317,13 @@ impl Job {
             Level::Info,
             "session",
             format!(
-                "Starting: {}; Zalivka {}{}",
+                "Starting {}; version={}{}",
                 action.title(),
                 zalivka::VERSION,
                 if setup.ecid.is_empty() {
                     String::new()
                 } else {
-                    format!("; ECID: {}", setup.ecid)
+                    format!("; ECID={}", setup.ecid)
                 }
             ),
         );
@@ -474,18 +474,12 @@ impl Completion {
     fn record(&self, action: Action, started: Instant) -> Record {
         let notice = self.notice(action);
         let mut message = format!(
-            "{}. Duration: {}.",
+            "{}; elapsed={}",
             notice.title,
             super::widgets::elapsed_text(started.elapsed().as_secs())
         );
-        if !notice.detail.is_empty() {
-            message.push(' ');
-            message.push_str(&notice.detail);
-        }
         if let Some(error) = &notice.journal_error {
-            message.push_str(&format!(
-                " Disk journal incomplete: {error}. Recent history is available in this window."
-            ));
+            message.push_str(&format!("; Disk journal incomplete: {error}"));
         }
         Record::new(
             match notice.tone {

@@ -136,7 +136,7 @@ pub(crate) fn run(
     crate::log!(
         Info,
         "restore",
-        "Requesting Apple signatures for {}, ECID {ecid:016x}",
+        "Signing {}; ECID={ecid:016x}",
         wire::string(&identity.value, &["Info", "DeviceClass"])?
     );
     let ticket = tss::send_for_identity(&tss::request(&usb.info, &identity)?, &identity)

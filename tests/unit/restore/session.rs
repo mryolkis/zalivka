@@ -281,7 +281,7 @@ fn replies(run: &Run, attempt: usize, port: u16) -> Vec<Value> {
 fn has_success(run: &Run) -> bool {
     run.events.lock().unwrap().iter().any(|event| {
         matches!(event,
-        Event::Log(record) if record.source == "restore" && record.message.starts_with("Success;"))
+        Event::Log(record) if record.source == "restore" && record.message.starts_with("Session complete;"))
     })
 }
 
@@ -482,5 +482,5 @@ fn unwritable_transcript_does_not_interrupt_restore_protocol() {
     run.result.as_ref().unwrap();
     assert!(has_success(&run));
     assert_eq!(run.events.lock().unwrap().iter().filter(|event| matches!(event,
-        Event::Log(record) if record.source == "transcript" && record.message.contains("recording disabled"))).count(), 1);
+        Event::Log(record) if record.source == "transcript" && record.message.starts_with("Transcript stopped;"))).count(), 1);
 }

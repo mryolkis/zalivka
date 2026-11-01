@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn plist_summaries_keep_identifiers_and_sizes_without_expanding_payloads() {
+    let message = crate::wire::dict([
+        ("MsgType", "DataRequestMsg".into()),
+        ("DataType", "FirmwareUpdaterData".into()),
+        ("Payload", plist::Value::Data(vec![0xa5; 1024 * 1024])),
+        ("Items", plist::Value::Array(vec![true.into(); 64])),
+        (
+            "Nested",
+            crate::wire::dict([("Secret", "not part of the summary".into())]),
+        ),
+        ("Text", "Ж🚀".repeat(200).into()),
+    ]);
+    let summary = plist_summary(&message);
+    assert!(summary.contains("DataRequestMsg"));
+    assert!(summary.contains("FirmwareUpdaterData"));
+    assert!(summary.contains("data[1048576 B]"));
+    assert!(summary.contains("array[64]"));
+    assert!(summary.contains("dict[1]"));
+    assert!(summary.contains("… (1200 B)"));
+    assert!(!summary.contains("not part of the summary"));
+    assert!(summary.len() < 1024);
+}
+
+#[test]
+fn plist_field_limit_preserves_late_protocol_identifiers_and_error_details() {
+    let mut fields = plist::Dictionary::new();
+    for index in 0..32 {
+        fields.insert(format!("Field{index}"), plist::Value::Data(vec![0xa5; 256]));
+    }
+    fields.extend([
+        ("MsgType".into(), "StatusMsg".into()),
+        ("DataType".into(), "FirmwareUpdaterData".into()),
+        ("Status".into(), 42u64.into()),
+        ("Error".into(), "ticket rejected".into()),
+    ]);
+    let summary = plist_summary(&fields.into());
+    for expected in [
+        "StatusMsg",
+        "FirmwareUpdaterData",
+        "42",
+        "ticket rejected",
+        "+28 fields",
+    ] {
+        assert!(summary.contains(expected), "{summary}");
+    }
+    assert!(summary.len() < 512);
+}
+
+#[test]
 fn diagnostic_overload_is_bounded_reported_and_does_not_discard_important_records() {
     use std::sync::{Arc, Mutex};
     let (entered, ready) = mpsc::channel();
@@ -207,7 +256,7 @@ fn queued_dumps_do_not_wait_for_the_sink_and_keep_owned_data_and_timestamps() {
     assert!(
         records
             .iter()
-            .any(|record| record.source == "plist" && record.message.contains("[1, 2, 3]"))
+            .any(|record| record.source == "plist" && record.message.contains("data[3 B]"))
     );
     assert!(
         !records

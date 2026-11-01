@@ -95,7 +95,7 @@ fn lists_only_usb_devices_and_reports_missing_daemon() {
         candidates_at(&dir.path().join("missing")).err().unwrap()
     );
     assert!(error.contains("system usbmuxd"));
-    assert!(error.contains("install/start usbmuxd"));
+    assert!(error.contains("check service and USB rules"));
 }
 
 #[test]

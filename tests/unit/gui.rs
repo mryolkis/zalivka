@@ -922,7 +922,7 @@ fn completion_uses_context_cancellation_without_a_separate_gui_flag() {
             .back()
             .unwrap()
             .message
-            .starts_with("Operation stopped.")
+            .starts_with("Operation stopped; elapsed=")
     );
 }
 
@@ -1142,9 +1142,9 @@ fn completion_records_label_duration_without_adding_it_to_notifications() {
         (
             Action::ResetDrivers,
             "Reconnect the Mac and enter DFU mode.",
-            "USB driver reset complete. Duration: 00:00:01. Reconnect the Mac and enter DFU mode.",
+            "USB driver reset complete; elapsed=00:00:01",
         ),
-        (Action::Verify, "", "IPSW verified. Duration: 00:00:01."),
+        (Action::Verify, "", "IPSW verified; elapsed=00:00:01"),
     ] {
         let log = tempfile::NamedTempFile::new().unwrap();
         let mut operation = job(action);
