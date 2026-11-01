@@ -390,6 +390,11 @@ impl App {
         self.next_job += 1;
         let id = self.next_job;
         let mut setup = self.setup.clone();
+        if action == Action::EnterDfu {
+            // The USB-PD target is chosen by the host DFU port, before it has
+            // a USB ECID. Do not label this job with an unrelated selection.
+            setup.ecid.clear();
+        }
         setup.release = self.firmware.as_ref().and_then(|selection| {
             self.target()
                 .filter(|device| selection.matches(device))

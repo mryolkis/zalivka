@@ -2451,3 +2451,59 @@ fn phase_labels_follow_the_current_language_and_completion_is_terminal() {
     }
     assert_eq!(operation.phase(), "Restore complete");
 }
+
+#[test]
+fn entering_dfu_needs_no_ecid_or_firmware_and_keeps_the_macos_prompt_until_completion() {
+    Setup::default().validate(Action::EnterDfu).unwrap();
+    let operation = job(Action::EnterDfu);
+    assert!(operation.action.requires_admin());
+    assert!(!operation.action.writes_device());
+    assert!(!operation.can_stop());
+    assert_eq!(operation.phase(), "Approve the macOS administrator prompt");
+    let completion = worker::Completion {
+        success: true,
+        ..Default::default()
+    };
+    let notice = completion.notice(Action::EnterDfu);
+    assert_eq!(notice.title, "Mac entered DFU mode");
+    assert_eq!(notice.tone, Tone::Success);
+}
+
+#[test]
+fn dfu_completion_rescans_without_retaining_an_unrelated_ecid() {
+    let mut app = english_app();
+    app.setup.ecid = "2a".into();
+    app.devices.push(device(42, Mode::Recovery));
+    let mut operation = job(Action::EnterDfu);
+    operation.output(Output::State(progress::Event::Checkpoint {
+        name: "Waiting for DFU".into(),
+        complete: false,
+    }));
+    assert_eq!(operation.phase(), "Waiting for the Mac to enter DFU mode");
+    operation.output(Output::Finished(worker::Completion {
+        success: true,
+        ..Default::default()
+    }));
+    app.job = Some(operation);
+    app.poll(&egui::Context::default());
+    assert!(app.setup.ecid.is_empty());
+    assert!(app.firmware.is_none());
+    assert!(app.last_scan.elapsed() >= SCAN_INTERVAL);
+}
+
+#[test]
+fn dfu_button_is_visible_without_a_detected_mac_only_on_macos() {
+    let ctx = egui::Context::default();
+    configure(&ctx);
+    let mut app = english_app();
+    app.scanning = true;
+    let mut output = render_app(&mut app, &ctx, 0);
+    for frame in 1..3 {
+        output = render_app(&mut app, &ctx, frame);
+    }
+    assert_eq!(
+        visible_text_rect(&output, "Enter DFU mode").is_some(),
+        cfg!(target_os = "macos")
+    );
+    assert!(app.job.is_none());
+}

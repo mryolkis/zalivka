@@ -107,11 +107,15 @@ impl Job {
     pub(super) fn phase(&self) -> String {
         if self.restore_completed {
             tr("Restore complete")
+        } else if self.action == Action::EnterDfu && self.checkpoint.is_some() {
+            tr("Waiting for the Mac to enter DFU mode")
         } else if let Some(name) = &self.checkpoint {
             trf("Stage: {}", &[&name.replace('_', " ")])
         } else {
             tr(if self.action == Action::InstallUdev {
                 "Approve the Linux administrator prompt"
+            } else if self.action == Action::EnterDfu {
+                "Approve the macOS administrator prompt"
             } else if self.action.requires_admin() {
                 "Approve the Windows administrator prompt"
             } else {

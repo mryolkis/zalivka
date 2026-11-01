@@ -170,6 +170,7 @@ jobs:
           }
 
           Copy-Item README.md, LICENSE -Destination artifacts
+          Copy-Item licenses -Destination artifacts -Recurse -Force
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $name = 'zalivka-' + $info.version + '-' + $env:BUILD_PLATFORM
 

@@ -88,6 +88,20 @@ macOS supplies its own usbmuxd; no separate daemon or Homebrew package is
 required. Leave the system service running. Zalivka uses direct USB for DFU and
 Recovery, then connects to restored and its data services through usbmuxd.
 
+On an Apple silicon host, **Device → Enter DFU mode** restarts a connected Apple
+silicon Mac into DFU without the keyboard sequence. Connect the two Macs directly
+through their DFU ports; see [Apple's connection guide](https://support.apple.com/en-us/108900).
+The action requests macOS administrator authorization, sends the USB-C command,
+and waits for the target to appear in DFU. Firmware and an ECID are not needed.
+Intel hosts and T2 targets require manual DFU entry. The terminal equivalent is
+`zalivka enter-dfu` on macOS.
+
+The native USB-C implementation is adapted from
+[macvdmtool](https://github.com/AsahiLinux/macvdmtool), revision
+`b22ae51eb43a0e1daa21d41616ac899f28e7bf8a` (Asahi Linux Contributors, 2021),
+and ThunderboltPatcher (osy86, 2019), under Apache-2.0. No external macvdmtool
+installation is required. See [the bundled license](licenses/macvdmtool-APACHE-2.0.txt).
+
 ## Command-line usage
 
 Find the connected device and copy its hexadecimal ECID:
@@ -305,6 +319,7 @@ can contain device data and protocol dumps; review them before sharing.
 
 ## License
 
-Zalivka source code is available under the [MIT License](LICENSE). Bundled Apple
+Zalivka source code is available under the [MIT License](LICENSE), except the
+macvdmtool-derived USB-C implementation under [Apache-2.0](licenses/macvdmtool-APACHE-2.0.txt). Bundled Apple
 USB drivers are separate proprietary components; see
 [their provenance and licensing notes](packaging/apple-usb/README.md).

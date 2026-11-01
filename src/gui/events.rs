@@ -147,6 +147,10 @@ impl App {
         let completion = job.completion.as_ref().unwrap();
         self.windows_reboot_required |= completion.reboot_required;
         self.journal_error(completion.journal_error.as_deref());
+        if completion.success && job.action == super::Action::EnterDfu {
+            self.setup.ecid.clear();
+            self.firmware = None;
+        }
         let notice = completion.notice(job.action);
         if notice.tone == Tone::Error {
             self.journal_open = true;

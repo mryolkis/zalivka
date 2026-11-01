@@ -106,6 +106,33 @@ impl App {
                 }
             });
         }
+        if cfg!(target_os = "macos") {
+            ui.add_space(8.0);
+            if ui
+                .add_enabled(
+                    cfg!(target_arch = "aarch64")
+                        && !self.devices.iter().any(|d| d.mode.can_restore()),
+                    egui::Button::new(tr("Enter DFU mode")),
+                )
+                .clicked()
+            {
+                self.start(Action::EnterDfu, ctx);
+            }
+            caption(
+                ui,
+                "Connect an Apple silicon Mac directly to the DFU ports of both Macs. This restarts the connected Mac.",
+            );
+            if !cfg!(target_arch = "aarch64") {
+                caption(
+                    ui,
+                    "Automatic DFU entry requires an Apple silicon host and target.",
+                );
+            }
+            ui.hyperlink_to(
+                tr("DFU connection guide"),
+                "https://support.apple.com/en-us/108900",
+            );
+        }
         frame
     }
     pub(super) fn prepare_firmware_card(
@@ -322,9 +349,11 @@ impl App {
             ui.add_space(14.0);
             let idle = job.last_activity.elapsed();
             if !job.can_stop() && !job.action.writes_device() {
-                ui.label(tr(
-                    "Wait for driver installation and the Windows service check to finish.",
-                ));
+                ui.label(tr(if job.action == Action::EnterDfu {
+                    "Wait for the DFU operation to finish."
+                } else {
+                    "Wait for driver installation and the Windows service check to finish."
+                }));
             } else if job.can_stop()
                 && ui
                     .add_enabled(

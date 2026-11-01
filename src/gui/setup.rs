@@ -14,6 +14,7 @@ pub(super) enum Action {
     PrepareWindows,
     InstallUdev,
     ResetDrivers,
+    EnterDfu,
 }
 
 impl Action {
@@ -27,6 +28,7 @@ impl Action {
             Self::PrepareWindows => "Windows setup",
             Self::InstallUdev => "Linux USB setup",
             Self::ResetDrivers => "Reset Apple USB drivers",
+            Self::EnterDfu => "Enter DFU mode",
         }
     }
     pub(super) fn log_name(self) -> &'static str {
@@ -38,6 +40,7 @@ impl Action {
             Self::Doctor => "doctor",
             Self::PrepareWindows | Self::ResetDrivers => "drivers",
             Self::InstallUdev => "udev",
+            Self::EnterDfu => "enter-dfu",
         }
     }
     pub(super) fn completed_title(self) -> &'static str {
@@ -50,12 +53,13 @@ impl Action {
             Self::PrepareWindows => "Windows setup complete",
             Self::InstallUdev => "USB access configured",
             Self::ResetDrivers => "USB driver reset complete",
+            Self::EnterDfu => "Mac entered DFU mode",
         }
     }
     pub(super) fn requires_admin(self) -> bool {
         matches!(
             self,
-            Self::PrepareWindows | Self::ResetDrivers | Self::InstallUdev
+            Self::PrepareWindows | Self::ResetDrivers | Self::InstallUdev | Self::EnterDfu
         )
     }
     pub(super) fn writes_device(self) -> bool {
@@ -165,6 +169,12 @@ impl Setup {
             Action::InstallUdev => drivers::prepare_linux()?,
             Action::ResetDrivers => {
                 drivers::reset_windows()?;
+            }
+            Action::EnterDfu => {
+                #[cfg(target_os = "macos")]
+                zalivka::macos::enter_dfu()?;
+                #[cfg(not(target_os = "macos"))]
+                anyhow::bail!("Automatic DFU entry is only available on macOS");
             }
         }
         Ok(())

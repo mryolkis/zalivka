@@ -11,6 +11,8 @@ pub mod img4;
 pub mod ipsw;
 pub mod localization;
 pub mod logging;
+#[cfg(any(target_os = "macos", test))]
+pub mod macos;
 pub mod mux;
 pub mod net;
 pub mod operations;

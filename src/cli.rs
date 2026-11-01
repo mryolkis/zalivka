@@ -26,6 +26,12 @@ enum Command {
     Gui,
     /// Diagnose USB access, installed drivers and interface claim errors.
     Doctor,
+    #[cfg(target_os = "macos")]
+    /// Reboot the Apple silicon Mac connected to the host DFU port into DFU.
+    EnterDfu,
+    #[cfg(target_os = "macos")]
+    #[command(hide = true)]
+    EnterDfuHelper,
     /// Export or install host USB driver configuration.
     Drivers {
         #[command(subcommand)]
@@ -169,6 +175,10 @@ pub(super) fn run() -> Result<()> {
     }
     let cli = Cli::parse();
     match cli.command {
+        #[cfg(target_os = "macos")]
+        Command::EnterDfu => zalivka::macos::enter_dfu()?,
+        #[cfg(target_os = "macos")]
+        Command::EnterDfuHelper => zalivka::macos::run_dfu_helper()?,
         #[cfg(feature = "gui")]
         Command::Gui => crate::gui::run()?,
         Command::Doctor => {
