@@ -70,11 +70,19 @@ impl Restore {
 }
 
 pub fn verify(path: &Path, checksum: Option<&str>) -> Result<Verification> {
+    verify_with_options(path, checksum, &crate::aea::Options::default())
+}
+
+pub fn verify_with_options(
+    path: &Path,
+    checksum: Option<&str>,
+    options: &crate::aea::Options,
+) -> Result<Verification> {
     crate::log!(Info, "ipsw", "Verifying archive: {}", path.display());
     if let Some(checksum) = checksum {
         net::verify_file(path, &crate::device::decode_hex(checksum)?)?;
     }
-    let mut report = Ipsw::open(path)?.verify_all()?;
+    let mut report = Ipsw::open(path)?.verify_all_with_options(options)?;
     report.archive_checksum_verified = checksum.is_some();
     crate::log!(
         Info,
@@ -90,6 +98,18 @@ pub fn verify(path: &Path, checksum: Option<&str>) -> Result<Verification> {
             "AEA content digests not checked: {}",
             report.aea_content_digests_not_checked.len()
         );
+    }
+    let crc_only = report.files.iter().filter(|file| file.crc_only).count();
+    crate::log!(
+        Info,
+        "ipsw",
+        "Files checked only by ZIP CRC: {crc_only}; embedded IM4M manifests: {}; Apple signature authentication: not performed",
+        report.im4m_manifests.len()
+    );
+    for file in &report.files {
+        for reason in &file.skipped_checks {
+            crate::log!(Debug, "ipsw:coverage", "{}: {reason}", file.path);
+        }
     }
     Ok(report)
 }

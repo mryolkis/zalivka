@@ -136,7 +136,7 @@ pub(crate) fn run(
         "Requesting Apple signatures for {}, ECID {ecid:016x}",
         wire::string(&identity.value, &["Info", "DeviceClass"])?
     );
-    let ticket = tss::send(&tss::request(&usb.info, &identity)?)
+    let ticket = tss::send_for_identity(&tss::request(&usb.info, &identity)?, &identity)
         .context("personalizing restore firmware")?;
     // BAA measures the manifest used to boot iBSS. A later nonce change can
     // replace the restore ticket, so retain the bootstrap measurement now.
@@ -157,7 +157,8 @@ pub(crate) fn run(
             } else {
                 tss::request(&device, &identity)?
             };
-            let ticket = tss::send(&request).context("personalizing RecoveryOS root ticket")?;
+            let ticket = tss::send_for_identity(&request, &identity)
+                .context("personalizing RecoveryOS root ticket")?;
             Ok(SignedIdentity { identity, ticket })
         })
         .transpose()?;

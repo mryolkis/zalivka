@@ -12,6 +12,12 @@ gui = ["dep:eframe", "dep:rfd", "dep:winresource"]
 
 [dependencies]
 anyhow = "1"
+aes = "0.9"
+ctr = "0.10"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+lzfse_rust = "0.2"
+lz4_flex = { version = "0.13", default-features = false, features = ["std", "safe-decode"] }
+zbitmap = "0.1"
 asn1-rs = "0.7"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }

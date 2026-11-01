@@ -14,30 +14,82 @@ pub fn send(request: &Value) -> Result<Value> {
     Ok(response)
 }
 
-/// Check server-generated measurements before using the ticket to boot a device.
+pub fn send_for_identity(request: &Value, identity: &crate::ipsw::Identity) -> Result<Value> {
+    let response = send_raw(request)?;
+    validate_ticket_for_identity(request, &response, identity)?;
+    Ok(response)
+}
+
+/// Check hardware and requested measurements before using an AP ticket.
 pub fn validate_ticket<'a>(request: &Value, response: &'a Value) -> Result<&'a [u8]> {
+    validate_measurements(request, response, None)
+}
+
+pub fn validate_ticket_for_identity<'a>(
+    request: &Value,
+    response: &'a Value,
+    identity: &crate::ipsw::Identity,
+) -> Result<&'a [u8]> {
+    validate_measurements(request, response, Some(identity))
+}
+
+fn validate_measurements<'a>(
+    request: &Value,
+    response: &'a Value,
+    identity: Option<&crate::ipsw::Identity>,
+) -> Result<&'a [u8]> {
     let ticket = ticket(response)?;
+    let manifest = img4::Manifest::parse(ticket)?;
+    manifest.check_hardware(request)?;
+    let digests = manifest.digests()?;
     for (name, entry) in wire::dictionary(request)? {
         let Some(entry) = entry.as_dictionary() else {
             continue;
         };
-        if name.len() != 4
-            || !name.is_ascii()
-            || entry.get("Trusted").and_then(Value::as_boolean) != Some(true)
-            || !entry
-                .get("Digest")
-                .and_then(Value::as_data)
-                .is_some_and(|digest| digest.is_empty())
-        {
+        if entry.get("Trusted").and_then(Value::as_boolean) != Some(true) {
             continue;
         }
-        let object: &[u8; 4] = name.as_bytes().try_into()?;
-        let digest = img4::manifest_data(ticket, object, b"DGST")
-            .with_context(|| format!("validating server-generated {name} measurement"))?;
-        ensure!(
-            digest.is_some_and(|digest| !digest.is_empty()),
-            "Apple ticket is missing the server-generated {name} digest; refusing to boot"
-        );
+        let expected = entry
+            .get("Digest")
+            .and_then(Value::as_data)
+            .with_context(|| format!("missing signing Digest for {name}"))?;
+        let tag = if name == "Ap,LocalPolicy" {
+            Some(*b"lpol")
+        } else {
+            let explicit = identity
+                .map(|id| id.payload_type(name))
+                .transpose()?
+                .flatten();
+            explicit.or_else(|| {
+                (name.len() == 4
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()))
+                .then(|| name.as_bytes().try_into().expect("four ASCII bytes"))
+            })
+        };
+        if expected.is_empty() {
+            let tag = tag.with_context(|| {
+                format!("cannot resolve server-generated {name} measurement type")
+            })?;
+            ensure!(
+                digests.contains_key(&tag),
+                "Apple ticket is missing the server-generated {name} digest; refusing to boot"
+            );
+        } else {
+            ensure!(
+                [20, 32, 48].contains(&expected.len()),
+                "unsupported signing Digest for {name}"
+            );
+            let matches = tag.map_or_else(
+                || digests.values().any(|actual| *actual == expected),
+                |tag| digests.get(&tag).is_some_and(|actual| *actual == expected),
+            );
+            ensure!(
+                matches,
+                "Apple ticket digest mismatch or missing measurement for {name}; refusing to boot"
+            );
+        }
     }
     Ok(ticket)
 }

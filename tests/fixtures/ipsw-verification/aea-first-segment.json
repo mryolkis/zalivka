@@ -1,0 +1,9 @@
+{
+  "member": "022-22150-174.dmg.aea",
+  "archive_key": "3efb7942076625f0a91155e395f2db05b60ac9fa9058ac20bd7c273ab22eae2e",
+  "encrypted_size": 1308622848,
+  "plaintext_segment_bytes": 1048576,
+  "plaintext_segment_sha256": "cd9a31b96f58323c4bc9868cbc564f3cc654cc6c14a3e6950e227284158c2604",
+  "compression": "e",
+  "checksum": 2
+}

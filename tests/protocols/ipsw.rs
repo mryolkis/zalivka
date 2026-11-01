@@ -682,13 +682,18 @@ fn full_ipsw_verification_checks_all_streams_and_manifest_digests() {
 
 #[test]
 fn encrypted_aea_digests_are_explicitly_deferred_and_archive_hash_can_be_checked() {
-    let encrypted = b"AEA1synthetic encrypted content";
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/aea-verification.json")).unwrap();
+    use base64::Engine;
+    let encrypted = base64::engine::general_purpose::STANDARD
+        .decode(vectors["vectors"][0]["archive"].as_str().unwrap())
+        .unwrap();
     let mut id = identity();
     manifest_mut(&mut id).insert(
         "BaseSystem".into(),
         component_entry("image.dmg.aea", b"decrypted content"),
     );
-    let file = fixture_files(Some(id), false, &[("image.dmg.aea", encrypted)]);
+    let file = fixture_files(Some(id), false, &[("image.dmg.aea", &encrypted)]);
     let report = Ipsw::open(file.path()).unwrap().verify_all().unwrap();
     assert_eq!(report.aea_content_digests_not_checked, ["image.dmg.aea"]);
     assert!(!report.archive_checksum_verified);
@@ -1529,4 +1534,283 @@ fn direct_stored_images_reject_inconsistent_sizes_and_physical_truncation() {
         image.read(&mut [0]).unwrap_err().kind(),
         std::io::ErrorKind::UnexpectedEof
     );
+}
+
+#[test]
+fn verification_reports_crc_only_files_and_each_identity_component() {
+    let mut id = identity();
+    manifest_mut(&mut id).insert(
+        "NoDigest".into(),
+        wire::dict([("Info", wire::dict([("Path", "unsigned.bin".into())]))]),
+    );
+    let file = fixture_files(
+        Some(id),
+        false,
+        &[
+            ("unsigned.bin", b"unsigned"),
+            ("unreferenced.bin", b"extra"),
+        ],
+    );
+    let report = Ipsw::open(file.path()).unwrap().verify_all().unwrap();
+    assert!(!report.apple_signature_verified);
+    let unsigned = report
+        .files
+        .iter()
+        .find(|file| file.path == "unsigned.bin")
+        .unwrap();
+    assert!(unsigned.crc_only && unsigned.skipped_checks[0].contains("no digest"));
+    let unreferenced = report
+        .files
+        .iter()
+        .find(|file| file.path == "unreferenced.bin")
+        .unwrap();
+    assert!(unreferenced.crc_only && unreferenced.skipped_checks[0].contains("not referenced"));
+    let missing = report
+        .components
+        .iter()
+        .find(|component| component.component == "NoDigest")
+        .unwrap();
+    assert_eq!(missing.identity_index, 1);
+    assert!(!missing.digest_verified);
+    assert!(missing.algorithm.is_none());
+    assert_eq!(
+        report
+            .components
+            .iter()
+            .filter(|component| component.digest_verified)
+            .count(),
+        12
+    );
+}
+
+#[test]
+fn full_verification_checks_aea_plaintext_and_the_cli_accepts_explicit_keys() {
+    use base64::Engine;
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/aea-verification.json")).unwrap();
+    let decode = |value: &serde_json::Value| {
+        base64::engine::general_purpose::STANDARD
+            .decode(value.as_str().unwrap())
+            .unwrap()
+    };
+    let plaintext = decode(&vectors["plaintext"]);
+    let encrypted = decode(&vectors["vectors"][1]["archive"]);
+    let mut id = identity();
+    manifest_mut(&mut id).insert(
+        "BaseSystem".into(),
+        component_entry("image.dmg.aea", &plaintext),
+    );
+    for method in [
+        zip::CompressionMethod::Stored,
+        zip::CompressionMethod::Deflated,
+    ] {
+        let file = fixture_compression(
+            Some(id.clone()),
+            false,
+            &[("image.dmg.aea", &encrypted)],
+            method,
+        );
+        let options = zalivka::aea::Options {
+            key: Some(
+                hex::decode(vectors["key"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ),
+            ..Default::default()
+        };
+        let report = Ipsw::open(file.path())
+            .unwrap()
+            .verify_all_with_options(&options)
+            .unwrap();
+        assert!(report.aea_content_digests_not_checked.is_empty());
+        let aea = report
+            .files
+            .iter()
+            .find(|file| file.path == "image.dmg.aea")
+            .unwrap();
+        assert!(aea.aea.as_ref().unwrap().integrity_verified);
+        assert!(aea.aea.as_ref().unwrap().content_verified);
+        assert!(!aea.crc_only);
+        assert!(
+            report
+                .components
+                .iter()
+                .find(|entry| entry.component == "BaseSystem")
+                .unwrap()
+                .digest_verified
+        );
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
+            .arg("verify")
+            .arg(file.path())
+            .args(["--aea-key", vectors["key"].as_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            json["aea_content_digests_not_checked"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let mut wrong = id.clone();
+        manifest_mut(&mut wrong)
+            .get_mut("BaseSystem")
+            .unwrap()
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Digest".into(), Value::Data(vec![1; 48]));
+        let file =
+            fixture_compression(Some(wrong), false, &[("image.dmg.aea", &encrypted)], method);
+        assert!(
+            Ipsw::open(file.path())
+                .unwrap()
+                .verify_all_with_options(&options)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn embedded_tickets_check_all_matching_identities_and_reject_mismatched_measurements() {
+    use super::tss_tests::{hardware_properties, measurement_property, measurement_ticket};
+    let digest = Sha384::digest(im4p(b"test"));
+    for corrupt in [false, true] {
+        let mut expected = digest.to_vec();
+        if corrupt {
+            expected[0] ^= 1;
+        }
+        let mut objects = hardware_properties(0x8103, 0x0a, 1);
+        let measurement = measurement_property(b"DGST", &img4::element(4, &expected));
+        objects.extend(measurement_property(
+            b"ibss",
+            &img4::element(0x31, &measurement),
+        ));
+        let ticket = measurement_ticket(&objects);
+        let bytes = tss::ticket(&ticket).unwrap();
+        let file = fixture_files(
+            Some(identity()),
+            false,
+            &[(
+                "Firmware/Manifests/restore/macOS Customer/apticket.j313ap.im4m",
+                bytes,
+            )],
+        );
+        let result = Ipsw::open(file.path()).unwrap().verify_all();
+        assert_eq!(result.is_ok(), !corrupt);
+        if let Ok(report) = result {
+            assert_eq!(report.im4m_manifests[0].identity_indexes, [0, 1]);
+            assert_eq!(report.im4m_manifests[0].verified_digests, 1);
+            assert!(!report.im4m_manifests[0].signature_verified);
+        }
+    }
+}
+
+#[test]
+fn real_apple_restore_and_cryptex_tickets_match_their_manifest_and_payloads() {
+    let manifest = Value::from_reader(Cursor::new(include_bytes!(
+        "../fixtures/ipsw-verification/BuildManifest-excerpt.plist"
+    )))
+    .unwrap();
+    let members: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(include_str!("../fixtures/ipsw-verification/members.json")).unwrap();
+    let fixture_data: std::collections::BTreeMap<&str, &[u8]> = std::collections::BTreeMap::from([
+        (
+            "Ap-BaseSystemTrustCache.im4p",
+            include_bytes!("../fixtures/ipsw-verification/Ap-BaseSystemTrustCache.im4p").as_slice(),
+        ),
+        (
+            "Cryptex1-AppTrustCache.im4p",
+            include_bytes!("../fixtures/ipsw-verification/Cryptex1-AppTrustCache.im4p").as_slice(),
+        ),
+        (
+            "restore.im4m",
+            include_bytes!("../fixtures/ipsw-verification/restore.im4m").as_slice(),
+        ),
+        (
+            "cryptex.im4m",
+            include_bytes!("../fixtures/ipsw-verification/cryptex.im4m").as_slice(),
+        ),
+    ]);
+    let files = members
+        .iter()
+        .map(|(path, source)| (path.as_str(), fixture_data[source.as_str()]))
+        .collect::<Vec<_>>();
+    for method in [
+        zip::CompressionMethod::Stored,
+        zip::CompressionMethod::Deflated,
+    ] {
+        let file = test_support::ipsw(&manifest, &files, method);
+        let report = Ipsw::open(file.path()).unwrap().verify_all().unwrap();
+        assert_eq!(report.manifest_digests, 2);
+        assert_eq!(report.components.len(), 4);
+        assert_eq!(report.im4m_manifests.len(), 2);
+        for ticket in report.im4m_manifests {
+            assert_eq!(ticket.identity_indexes, [0, 1]);
+            assert_eq!(ticket.verified_digests, 1);
+            assert!(!ticket.unmapped_payload_types.is_empty());
+            assert!(!ticket.signature_verified);
+            assert!(ticket.skipped_reason.is_none());
+        }
+    }
+    let ticket = img4::Manifest::parse(fixture_data["restore.im4m"]).unwrap();
+    assert_eq!(ticket.number(b"CHIP").unwrap(), Some(0x8103));
+    assert_eq!(ticket.number(b"BORD").unwrap(), Some(0x26));
+    let reference: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/ipsw-verification/ipsw-reference.json"
+    ))
+    .unwrap();
+    use base64::Engine;
+    for name in ["restore", "cryptex"] {
+        let bytes = fixture_data[format!("{name}.im4m").as_str()];
+        let manifest = img4::Manifest::parse(bytes).unwrap();
+        let actual = manifest.digests().unwrap();
+        let expected = reference["manifests"][name]["images"].as_object().unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (tag, values) in expected {
+            let digest = base64::engine::general_purpose::STANDARD
+                .decode(values["DGST"].as_str().unwrap())
+                .unwrap();
+            let tag: &[u8; 4] = tag.as_bytes().try_into().unwrap();
+            assert_eq!(actual[tag], digest.as_slice());
+        }
+    }
+}
+
+#[test]
+fn embedded_ticket_selection_continues_past_a_different_identity_for_the_same_hardware() {
+    use super::tss_tests::{hardware_properties, measurement_property, measurement_ticket};
+    let mut id = identity();
+    let mut bytes = im4p(b"test");
+    let offset = img4::type_offset(&bytes).unwrap();
+    bytes[offset..offset + 4].copy_from_slice(b"ibss");
+    let digest = Sha384::digest(&bytes).to_vec();
+    manifest_mut(&mut id)
+        .get_mut("iBSS")
+        .unwrap()
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("Digest".into(), Value::Data(digest.clone()));
+    let mut objects = hardware_properties(0x8103, 0x0a, 1);
+    let property = measurement_property(b"DGST", &img4::element(4, &digest));
+    objects.extend(measurement_property(
+        b"ibss",
+        &img4::element(0x31, &property),
+    ));
+    let ticket = measurement_ticket(&objects);
+    let file = fixture_files(
+        Some(id),
+        false,
+        &[(
+            "Firmware/Manifests/restore/macOS Customer/apticket.j313ap.im4m",
+            tss::ticket(&ticket).unwrap(),
+        )],
+    );
+    let report = Ipsw::open(file.path()).unwrap().verify_all().unwrap();
+    assert_eq!(report.im4m_manifests[0].identity_indexes, [1]);
 }

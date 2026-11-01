@@ -4,11 +4,11 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE},
 };
-use hkdf::Hkdf;
-use hmac::{Hmac, KeyInit, Mac};
 use hpke::{Deserializable, Kem, OpModeR, aead::AesGcm256, kdf::HkdfSha256, kem::DhP256HkdfSha256};
 use p256::{SecretKey, elliptic_curve::sec1::ToSec1Point, pkcs8::DecodePrivateKey};
 use sha2::{Digest, Sha256};
+mod verify;
+pub use verify::{Options, Verification, verify};
 
 const MAX_AUTH: usize = 1024 * 1024;
 pub const MAX_PREFIX: usize = 12 + MAX_AUTH + 144;
@@ -148,21 +148,7 @@ impl PublicFcs {
         // Authenticate this image's encrypted root header before returning
         // LocalUnwrapped. A successful HPKE open alone does not bind the key
         // to the remainder of this file's AEA metadata and root header.
-        let mut main = [0; 32];
-        Hkdf::<Sha256>::new(Some(&self.salt), &key)
-            .expand(b"AEA_AMK\x01\0\0\0", &mut main)
-            .map_err(|_| anyhow::anyhow!("AEA key derivation failed"))?;
-        let mut mac_key = [0; 32];
-        Hkdf::<Sha256>::new(None, &main)
-            .expand(b"AEA_RHEK", &mut mac_key)
-            .map_err(|_| anyhow::anyhow!("AEA header key derivation failed"))?;
-        let mut mac = Hmac::<Sha256>::new_from_slice(&mac_key)?;
-        mac.update(&self.root[80..112]);
-        mac.update(&self.auth);
-        mac.update(&self.root[32..80]);
-        mac.update(&(32 + self.auth.len() as u64).to_le_bytes());
-        mac.verify_slice(&self.root[..32])
-            .map_err(|_| anyhow::anyhow!("AEA root header authentication failed"))?;
+        verify::root_header(&key, &self.salt, &self.auth, &self.root)?;
         Ok(key)
     }
 }

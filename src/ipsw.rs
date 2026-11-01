@@ -16,7 +16,7 @@ use std::{
 };
 pub use stream::ImageReader;
 use stream::{STREAM_CHUNK, copy_prefetched};
-pub use verify::Verification;
+pub use verify::{ComponentVerification, FileVerification, ManifestVerification, Verification};
 use zip::ZipArchive;
 
 pub const MAX_COMPONENT: u64 = 1024 * 1024 * 1024;

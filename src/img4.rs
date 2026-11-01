@@ -2,6 +2,8 @@
 use anyhow::{Context, Result, ensure};
 use asn1_rs::{Class, FromDer, Header, Length, Tag, ToDer};
 use std::ops::Range;
+mod manifest;
+pub use manifest::Manifest;
 
 pub fn element(tag: u8, data: &[u8]) -> Vec<u8> {
     let mut out = encoded_header(header(tag, data.len()));
@@ -135,77 +137,6 @@ fn private_property(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
     ));
     encoded.extend_from_slice(&sequence);
     encoded
-}
-
-fn manifest_property<'a>(mut fields: &'a [u8], name: &[u8; 4]) -> Result<Option<Der<'a>>> {
-    let mut found = None;
-    while !fields.is_empty() {
-        let (rest, property) = asn1_rs::Any::from_der(fields)
-            .map_err(|error| anyhow::anyhow!("invalid IMG4 manifest property: {error}"))?;
-        if property.class() == Class::Private && property.tag().0 == u32::from_be_bytes(*name) {
-            ensure!(found.is_none(), "duplicate IMG4 manifest property {name:?}");
-            ensure!(
-                property.header.constructed(),
-                "invalid IMG4 manifest property tag"
-            );
-            let mut header = Vec::new();
-            property.header.write_der_header(&mut header)?;
-            ensure!(
-                fields.starts_with(&header),
-                "noncanonical IMG4 manifest property"
-            );
-            let (sequence, trailing) = parse(property.data)?;
-            ensure!(
-                sequence.tag == 0x30 && trailing.is_empty(),
-                "invalid IMG4 manifest property sequence"
-            );
-            let (key, value) = parse(sequence.content)?;
-            ensure!(
-                key.tag == 0x16 && key.content == name,
-                "IMG4 manifest property name mismatch"
-            );
-            let (value, trailing) = parse(value)?;
-            ensure!(trailing.is_empty(), "trailing IMG4 manifest property data");
-            found = Some(value);
-        }
-        fields = rest;
-    }
-    Ok(found)
-}
-
-/// Inspect an IM4M data property. Signature authentication remains with the device.
-pub(crate) fn manifest_data<'a>(
-    ticket: &'a [u8],
-    object: &[u8; 4],
-    key: &[u8; 4],
-) -> Result<Option<&'a [u8]>> {
-    let (sequence, trailing) = parse(ticket)?;
-    ensure!(
-        sequence.tag == 0x30 && trailing.is_empty(),
-        "invalid IM4M sequence"
-    );
-    let (magic, rest) = parse(sequence.content)?;
-    ensure!(
-        magic.tag == 0x16 && magic.content == b"IM4M",
-        "ticket is not IM4M"
-    );
-    let (version, rest) = parse(rest)?;
-    ensure!(version.tag == 0x02, "invalid IM4M version");
-    let (body, _) = parse(rest)?;
-    ensure!(body.tag == 0x31, "invalid IM4M body");
-    let Some(body) = manifest_property(body.content, b"MANB")? else {
-        return Ok(None);
-    };
-    ensure!(body.tag == 0x31, "invalid IM4M MANB");
-    let Some(object) = manifest_property(body.content, object)? else {
-        return Ok(None);
-    };
-    ensure!(object.tag == 0x31, "invalid IM4M object");
-    let Some(value) = manifest_property(object.content, key)? else {
-        return Ok(None);
-    };
-    ensure!(value.tag == 0x04, "IMG4 manifest property is not data");
-    Ok(Some(value.content))
 }
 
 pub(crate) fn nonce_slot(

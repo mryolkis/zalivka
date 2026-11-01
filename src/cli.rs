@@ -31,7 +31,10 @@ enum Command {
     EnterDfu,
     #[cfg(target_os = "macos")]
     #[command(hide = true)]
-    EnterDfuHelper,
+    EnterDfuHelper {
+        #[arg(long)]
+        prompt: Option<String>,
+    },
     /// Export or install host USB driver configuration.
     Drivers {
         #[command(subcommand)]
@@ -57,12 +60,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Check all ZIP streams and supported manifest digests; report encrypted AEA separately.
+    /// Check ZIP streams, manifest digests, embedded IM4M measurements and AEA integrity.
     Verify {
         ipsw: PathBuf,
         /// Trusted complete archive SHA-1 (Apple catalog) or SHA-256, in hex.
         #[arg(long)]
         checksum: Option<String>,
+        /// AEA profile 1 archive key (32 bytes in hex).
+        #[arg(long, conflicts_with = "aea_private_key")]
+        aea_key: Option<String>,
+        /// PKCS#8 PEM key for the archive's public FCS metadata.
+        #[arg(long)]
+        aea_private_key: Option<PathBuf>,
+        /// Allow fetching public FCS keys from Apple; offline by default.
+        #[arg(long)]
+        online: bool,
     },
     /// Validate restore components without uploading firmware or contacting Apple.
     Plan {
@@ -169,7 +181,7 @@ pub(super) fn run() -> Result<()> {
         #[cfg(target_os = "macos")]
         Command::EnterDfu => zalivka::macos::enter_dfu()?,
         #[cfg(target_os = "macos")]
-        Command::EnterDfuHelper => zalivka::macos::run_dfu_helper()?,
+        Command::EnterDfuHelper { prompt } => zalivka::macos::run_dfu_helper(prompt.as_deref())?,
         #[cfg(feature = "gui")]
         Command::Gui => crate::gui::run()?,
         Command::Doctor => {
@@ -219,8 +231,43 @@ pub(super) fn run() -> Result<()> {
         } => {
             print_json(&restore::probe_boot_state(&ipsw, ecid, load_ibss)?)?;
         }
-        Command::Verify { ipsw, checksum } => {
-            print_json(&operations::verify(&ipsw, checksum.as_deref())?)?;
+        Command::Verify {
+            ipsw,
+            checksum,
+            aea_key,
+            aea_private_key,
+            online,
+        } => {
+            let key = aea_key
+                .as_deref()
+                .map(zalivka::device::decode_hex)
+                .transpose()?
+                .map(|key| {
+                    key.try_into()
+                        .map_err(|_| anyhow::anyhow!("AEA archive key must contain 32 bytes"))
+                })
+                .transpose()?;
+            let private_key = aea_private_key
+                .map(|path| -> Result<Vec<u8>> {
+                    use std::io::Read;
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(path)?
+                        .take(65537)
+                        .read_to_end(&mut bytes)?;
+                    ensure!(bytes.len() <= 65536, "AEA private key exceeds 64 KiB");
+                    Ok(bytes)
+                })
+                .transpose()?;
+            let options = zalivka::aea::Options {
+                key,
+                private_key,
+                online,
+            };
+            print_json(&operations::verify_with_options(
+                &ipsw,
+                checksum.as_deref(),
+                &options,
+            )?)?;
         }
         Command::Detect { json } => {
             let devices = usb::detect()?;

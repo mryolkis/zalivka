@@ -199,7 +199,7 @@ fn trusted_file_hashes_are_never_replaced_with_server_measurement_markers() {
     assert!(tss::request(&device_info(), &id).is_err());
 }
 
-fn measurement_property(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
+pub(super) fn measurement_property(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
     use asn1_rs::{Class, Header, Length, Tag, ToDer};
     let mut body = img4::element(0x16, name);
     body.extend_from_slice(value);
@@ -216,7 +216,7 @@ fn measurement_property(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
     encoded
 }
 
-fn measurement_ticket(objects: &[u8]) -> Value {
+pub(super) fn measurement_ticket(objects: &[u8]) -> Value {
     let mut fields = img4::element(0x16, b"IM4M");
     fields.extend(img4::element(0x02, &[0]));
     fields.extend(img4::element(
@@ -689,4 +689,121 @@ fn signing_rejects_an_identity_for_other_hardware_or_security_domain() {
             assert!(request(&device_info(), &id).is_err(), "{key}");
         }
     }
+}
+
+pub(super) fn hardware_properties(chip: u64, board: u64, domain: u64) -> Vec<u8> {
+    use asn1_rs::ToDer;
+    let mut props = Vec::new();
+    for (name, number) in [(b"CHIP", chip), (b"BORD", board), (b"SDOM", domain)] {
+        props.extend(measurement_property(name, &number.to_der_vec().unwrap()));
+    }
+    measurement_property(b"MANP", &img4::element(0x31, &props))
+}
+
+#[test]
+fn tickets_are_bound_to_the_selected_identity_hardware_and_requested_digests() {
+    use asn1_rs::ToDer;
+    let id = identity();
+    let request = tss::request(&device_info(), &id).unwrap();
+    let mut hardware = Vec::new();
+    for (name, key) in [
+        (b"CHIP", "ApChipID"),
+        (b"BORD", "ApBoardID"),
+        (b"SDOM", "ApSecurityDomain"),
+        (b"ECID", "ApECID"),
+    ] {
+        hardware.extend(measurement_property(
+            name,
+            &wire::number(wire::get(&request, &[key]).unwrap())
+                .unwrap()
+                .to_der_vec()
+                .unwrap(),
+        ));
+    }
+    let build = |omit: bool, corrupt: bool, wrong_type: bool, wrong_hardware: bool| {
+        let mut props = hardware.clone();
+        if wrong_hardware {
+            props = measurement_property(b"CHIP", &1u64.to_der_vec().unwrap());
+        }
+        let mut objects = measurement_property(b"MANP", &img4::element(0x31, &props));
+        for (name, entry) in id.manifest().unwrap() {
+            if omit && name == "iBSS" {
+                continue;
+            }
+            let mut tag = id.payload_type(name).unwrap().unwrap();
+            if wrong_type && name == "iBSS" {
+                tag = *b"fake";
+            }
+            let mut digest = wire::get(entry, &["Digest"])
+                .unwrap()
+                .as_data()
+                .unwrap()
+                .to_vec();
+            if corrupt && name == "iBSS" {
+                digest[0] ^= 1;
+            }
+            let digest = measurement_property(b"DGST", &img4::element(4, &digest));
+            objects.extend(measurement_property(&tag, &img4::element(0x31, &digest)));
+        }
+        measurement_ticket(&objects)
+    };
+    let response = build(false, false, false, false);
+    tss::validate_ticket_for_identity(&request, &response, &id).unwrap();
+    for (omit, corrupt, wrong_type, wrong_hardware) in [
+        (true, false, false, false),
+        (false, true, false, false),
+        (false, false, true, false),
+        (false, false, false, true),
+    ] {
+        assert!(
+            tss::validate_ticket_for_identity(
+                &request,
+                &build(omit, corrupt, wrong_type, wrong_hardware),
+                &id
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn local_policy_and_fileless_measurements_use_their_actual_img4_types() {
+    let digest = vec![0xab; 48];
+    let request = wire::dict([(
+        "Ap,LocalPolicy",
+        wire::dict([
+            ("Trusted", true.into()),
+            ("Digest", Value::Data(digest.clone())),
+        ]),
+    )]);
+    let fields = measurement_property(b"DGST", &img4::element(4, &digest));
+    let valid = measurement_ticket(&measurement_property(
+        b"lpol",
+        &img4::element(0x31, &fields),
+    ));
+    tss::validate_ticket(&request, &valid).unwrap();
+    let wrong = measurement_ticket(&measurement_property(
+        b"fake",
+        &img4::element(0x31, &fields),
+    ));
+    assert!(tss::validate_ticket(&request, &wrong).is_err());
+}
+
+#[test]
+fn selected_identity_retains_fourcc_names_for_fileless_server_generated_measurements() {
+    let mut id = identity();
+    manifest_mut(&mut id).insert(
+        "newa".into(),
+        wire::dict([("Trusted", true.into()), ("Digest", Value::Data(vec![]))]),
+    );
+    let request = wire::dict([(
+        "newa",
+        wire::dict([("Trusted", true.into()), ("Digest", Value::Data(vec![]))]),
+    )]);
+    let fields = measurement_property(b"DGST", &img4::element(4, &[0x15; 32]));
+    let response = measurement_ticket(&measurement_property(
+        b"newa",
+        &img4::element(0x31, &fields),
+    ));
+    tss::validate_ticket_for_identity(&request, &response, &id).unwrap();
 }

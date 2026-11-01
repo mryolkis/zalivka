@@ -54,21 +54,18 @@ pub fn enter_dfu() -> Result<()> {
     }
 }
 
-/// Internal executable entry point used by the macOS authorization prompt.
+/// Internal entry point for the temporary authorizer and privileged DFU worker.
 #[cfg(target_os = "macos")]
-pub fn run_dfu_helper() -> Result<()> {
-    elevation::report(
-        || {
-            ensure!(
-                cfg!(target_arch = "aarch64"),
-                "Automatic DFU entry requires an Apple silicon host and target"
-            );
-            ensure!(
-                hpm::is_root(),
-                "The DFU helper requires macOS administrator authorization"
-            );
-            hpm::enter_dfu()
-        },
-        std::io::stdout().lock(),
-    )
+pub fn run_dfu_helper(prompt: Option<&str>) -> Result<()> {
+    ensure!(
+        cfg!(target_arch = "aarch64"),
+        "Automatic DFU entry requires an Apple silicon host and target"
+    );
+    if !hpm::is_root() {
+        return elevation::authorize(
+            prompt.unwrap_or("Zalivka: Enter DFU mode"),
+            std::io::stdout().lock(),
+        );
+    }
+    elevation::report(hpm::enter_dfu, std::io::stdout().lock())
 }

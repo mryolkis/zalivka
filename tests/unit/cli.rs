@@ -1,5 +1,23 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn native_dfu_helper_accepts_a_literal_prompt_and_stays_hidden() {
+    let prompt = "Zalivka: Вход в DFU $HOME $(id);";
+    match Cli::try_parse_from(["zalivka", "enter-dfu-helper", "--prompt", prompt])
+        .unwrap()
+        .command
+    {
+        Command::EnterDfuHelper { prompt: value } => assert_eq!(value.as_deref(), Some(prompt)),
+        _ => panic!("wrong command"),
+    }
+    assert!(Cli::try_parse_from(["zalivka", "enter-dfu-helper"]).is_ok());
+    use clap::CommandFactory;
+    let help = Cli::command().render_help().to_string();
+    assert!(help.contains("enter-dfu"));
+    assert!(!help.contains("enter-dfu-helper"));
+}
+
 #[test]
 fn driver_reset_is_a_separate_command_without_a_device_or_firmware() {
     assert!(matches!(
@@ -141,4 +159,35 @@ fn usb_internet_commands_and_post_restore_sharing_are_rejected() {
         args.push("--share-internet");
         assert!(Cli::try_parse_from(args).is_err());
     }
+}
+
+#[test]
+fn verification_requires_explicit_network_access_and_exclusive_aea_key_sources() {
+    let parsed = Cli::try_parse_from(["zalivka", "verify", "firmware.ipsw"]).unwrap();
+    assert!(matches!(
+        parsed.command,
+        Command::Verify {
+            online: false,
+            aea_key: None,
+            aea_private_key: None,
+            ..
+        }
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "zalivka",
+            "verify",
+            "firmware.ipsw",
+            "--aea-key",
+            "00",
+            "--aea-private-key",
+            "key.pem"
+        ])
+        .is_err()
+    );
+    let parsed = Cli::try_parse_from(["zalivka", "verify", "firmware.ipsw", "--online"]).unwrap();
+    assert!(matches!(
+        parsed.command,
+        Command::Verify { online: true, .. }
+    ));
 }

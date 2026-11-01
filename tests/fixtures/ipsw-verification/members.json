@@ -1,0 +1,6 @@
+{
+  "Firmware/022-22150-174.dmg.aea.trustcache": "Ap-BaseSystemTrustCache.im4p",
+  "Firmware/141-12233-175.dmg.trustcache": "Cryptex1-AppTrustCache.im4p",
+  "Firmware/Manifests/restore/macOS Customer/apticket.j313ap.im4m": "restore.im4m",
+  "Firmware/Manifests/restore/cryptex1/macOS Customer/apticket.j313ap.im4m": "cryptex.im4m"
+}

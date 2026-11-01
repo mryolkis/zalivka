@@ -1,0 +1,225 @@
+{
+  "tool": "blacktop/ipsw",
+  "version": "3.1.741",
+  "build_commit": "126b1d5ec810a3a7a94a9d4942aaa76ca03fb350",
+  "manifests": {
+    "restore": {
+      "properties": {
+        "BORD": 38,
+        "CEPO": 1,
+        "CHIP": 33027,
+        "CPRO": true,
+        "CSEC": true,
+        "SDOM": 1,
+        "apmv": "27.2",
+        "augs": 1,
+        "love": "26.2.123.0.0,0",
+        "prtp": "MacBookAir10,1",
+        "sdkp": "macosx",
+        "srvn": "PgJiBI1peqmeS9GjwsoV/ggy5Rw=",
+        "tagt": "J313AP",
+        "tatp": "j313",
+        "tstp": "2026-10-22T23:48:57Z"
+      },
+      "images": {
+        "anef": {
+          "DGST": "wlEfLpwhstbJvPK8dj3zcB5C6Scs0H9VfDOT/rNqlbpiEKncrLAEdlmIElqYtUzq",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "aopf": {
+          "DGST": "Ktpriupr+HqW6wlN5DBrNCto8oUdnskztQV64YsKDpap0l0osS+BfaC9iUeFQYq2",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "avef": {
+          "DGST": "Dsv5eRdTRf1vvR/jRdK5D+SuVbd5j7XJMYC4Pa7yfKcIg5Sw95+5pzEsxFikDTJk",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "bstc": {
+          "DGST": "Yz0Cla3MK92J1hd4DPk0Tr2eeOzsmjnrdibrUzzHl9H6t70qZbgomliVXJCPrDhi",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "bsys": {
+          "DGST": "DihVHJNEzpOiDDaSySkwofFAYAxrRhivwFBjPJAPCSj+QqpomErgYiNS/6h8znN0",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "csys": {
+          "DGST": "n/1cMwCyXnbCBP0sEMmz3CsridbzLCbY+6h5NLle1MJAGyjA/1Vx+B5YE1i53VKI",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "dcp2": {
+          "DGST": "I0eU6FpfIEFGGewXNNL7Tog82L82C3Xu7nwLDP3E7MD5zyBdOh9cJx/3iSdJN8qP",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "dtre": {
+          "DGST": "HveXLqu/hHXZfyUG3136Mf+J5+qu8OMmLXpGSgnG7O0DDE4FhbfEba9y3PJ/vhbS",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "gfxf": {
+          "DGST": "h7qrzaF0HDEUZ59z89lXgZjQFp1CXlxBkCD7rz9wWzaJTe0BPC6EDO7XXog+pJ2Y",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "ibdt": {
+          "DGST": "bs04ifgIzu1AwaNcQwg1tGajueEpP2t5+D3W0QpUXaZRHyOVTfXMxD5ymZXclood",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "ibot": {
+          "DGST": "wtznmwtbWnD4xx/XZsYFn3pP/U47pE531tthcHOFqIFcl/jD5hRb6nWDWT+2CWKw",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "ipdf": {
+          "DGST": "e2k+mU57NwBIR/XXoAMKple6k0dhzRbDgSP8ABR8oUSrN6spCmwKRpwxDfNWo1Q5",
+          "EKEY": false,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "ispf": {
+          "DGST": "j9l5gUv0mTlt+GwR+XEJ4moV39t1ixH+nRPuk5B3X6jMj91KkAWeGhAgdCXHWATG",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "isys": {
+          "DGST": "zcY7WVgS6dC65NUvfkOILuXj9XDVvSWAB8L+pntIjc6kh3A/dWXjKoivhkgc/1dq",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "krnl": {
+          "DGST": "Uj6BxBFqOKWPT9GPb1A4mz+ZD1UCqr6pTSYGPMmLVuHj9Fz7sYYjXEJ9dY55jEzD",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "msys": {
+          "DGST": "oXzliWbfuwHZTm0R+ek0Se5ZCFztywRLXiuj+4C3xVbYuKcN2vEr+tW/0GKMNdrn",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "pmpf": {
+          "DGST": "iq64+goP/Q98H5aQ7XJBRFu5/D3gjG5MDdMxFG+UvkxIA29v4kU6fEkSjeFySRVF",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "rdc2": {
+          "DGST": "oracSIcVEkHMVkvrSOqRRSLNhNNOnz655LoqMB6OfcvNh3N2ispEBA++T1Xi7P8S",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "rdtr": {
+          "DGST": "V0zAxl+kC6uKawdgKD0V2DOOaLcme+3NRDqHaKin8ULpiw4B3f7ggvt/joqwwCzk",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "rlgo": {
+          "DGST": "yTbPVfYkvgXr3mThtNu32v2e95Z0k9WdMEag2Q0PtB2VZrbdUfWvh427YyUvQ80d",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "rosi": {
+          "DGST": "LCF44KG8ONdyajF/y0uKRKcVIq/buMz9MQMeFdaGs19q6itGffM0hMKeg/77zyXf",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "siof": {
+          "DGST": "WQJ5psZb3P1BdXLhZQ2x/ST9M7OUrOa75Vs8eU94m2TS64tbdxSXeLCwEb5FRAvp",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "sptm": {
+          "DGST": "nbK/jp1PnNkpfoBwMRMdTu3WS84YOleAS0hrojjRrbwGNdPoPvJe1MoPQpZxgAa6",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "trst": {
+          "DGST": "mp2dBAcnabkuewPteOib2iAfePjB7a/tZdNzMs5fr1yfInJu9ZeOwuu/ttuZzDpX",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        },
+        "trxm": {
+          "DGST": "4a4elnBIO4nRzjVKaWPVcfDWUwAZBjiCJenxukek7PZGb9LddUkxtSsKfkdfrhoI",
+          "EKEY": true,
+          "EPRO": true,
+          "ESEC": true
+        }
+      }
+    },
+    "cryptex": {
+      "properties": {
+        "BORD": 38,
+        "CEPO": 1,
+        "CHIP": 33027,
+        "CPRO": true,
+        "SDOM": 1,
+        "augs": 1,
+        "clas": 241,
+        "fchp": 65296,
+        "kaid": 4313846529,
+        "pave": "26.2.123.0.0,0",
+        "srvn": "DhcldSwnSwNNqkMmqCyLdRZ6AJE=",
+        "styp": 1,
+        "type": 1,
+        "vnum": "26.2.123.0.0,0"
+      },
+      "images": {
+        "caos": {
+          "DGST": "l9NdyqSRKrxeIihAbce8eXuwi/x7RvjHY96E8H9j5zDWeDG3qOggdbYrAdVDvaej"
+        },
+        "casy": {
+          "DGST": "wR2lkK0l27Z7F3HoG3Q86dhivtJr8FPLl4Y8/TSei1wpzTdmWHNuzf3qTqIDRnjP"
+        },
+        "cros": {
+          "DGST": "xhQ+jYtJ7bqEgPAeacq25gUoE2C9taFRFhbWIzS8+5uH1ZU1rzh6iXN9gUDdXPbm"
+        },
+        "crsy": {
+          "DGST": "e/eG5Vf6l/cFEE/kg+MB+vTVUz7a+NGBf3mBTQDabmuIADoh6roGMxHY/AEg0ZC+"
+        },
+        "csos": {
+          "DGST": "kSKJ6/Qf/4U0fk/lA4MZEGcySx2IqTniagVnoHf4iMNVrNxye7z0cqJPV+YpjEk4"
+        },
+        "cssy": {
+          "DGST": "Fw9WoekHf0s+0cwP48HLvK6HNGxOTRuidJu+PxPgaPd/ChSSX0/OhEb9EaRiq4NE"
+        },
+        "trca": {
+          "DGST": "wRfdMEB56cXHmHcH7BTWjcYdoYYW1dADl5X4o40AN2CynltA+ft2nwk/HStEpRhM"
+        },
+        "trcr": {
+          "DGST": "WDGGz/yXiaHz4a5/OOLGODLqVl7S4qWzSrNvcBf60S+uCUKrHBqXZbPW/L+g3sbM"
+        },
+        "trcs": {
+          "DGST": "AJX0NUvLJa95VTia8Gjatz4H2oDW1cBfqb+UR86lGki4Q7HmUQ83tU8b7fFd+PVk"
+        }
+      }
+    }
+  }
+}

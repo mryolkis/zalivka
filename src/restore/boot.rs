@@ -108,7 +108,7 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         ipsw.resolve_types(&mut identity)?;
         let name = identity.require_component_type(b"ibss")?;
         let component = ipsw.verify_boot_component(&identity, name)?;
-        let ticket = tss::send(&tss::request(&usb.info, &identity)?)
+        let ticket = tss::send_for_identity(&tss::request(&usb.info, &identity)?, &identity)
             .context("personalizing diagnostic iBSS")?;
         let bytes = img4::personalize_with_metadata(name, &component, &ticket, &identity.value)?;
         crate::log!(Debug, "boot", "iBSS in RAM: {} B", bytes.len());
@@ -219,8 +219,9 @@ impl SignedIdentity {
         if usb.info.ap_nonce != device.ap_nonce || usb.info.sep_nonce != device.sep_nonce {
             crate::log!(Info, "boot", "Refreshing signatures after iBSS");
             device = usb.info.clone();
-            self.ticket = tss::send(&tss::request(&device, &self.identity)?)
-                .context("personalizing restore firmware after iBSS nonce change")?;
+            self.ticket =
+                tss::send_for_identity(&tss::request(&device, &self.identity)?, &self.identity)
+                    .context("personalizing restore firmware after iBSS nonce change")?;
         }
         if self.identity.is_macos()? {
             ensure!(

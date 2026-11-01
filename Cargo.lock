@@ -2147,6 +2147,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "lz4_flex"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
+
+[[package]]
+name = "lzfse_rust"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5edeac3ec657925dececc672bdd58fa2212291886ddcb3e08aa46924c78340c6"
+
+[[package]]
 name = "lzxd"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5047,6 +5059,7 @@ dependencies = [
 name = "zalivka"
 version = "0.2.3"
 dependencies = [
+ "aes 0.9.3",
  "anyhow",
  "asn1-rs",
  "base64",
@@ -5055,7 +5068,9 @@ dependencies = [
  "clap",
  "core-foundation 0.10.1",
  "crc32fast",
+ "ctr 0.10.1",
  "eframe",
+ "flate2",
  "fs4",
  "hex",
  "hkdf 0.13.0",
@@ -5064,6 +5079,8 @@ dependencies = [
  "httparse",
  "libgssapi",
  "libproxy",
+ "lz4_flex",
+ "lzfse_rust",
  "nusb",
  "oxiri",
  "oxitls-rustcrypto-provider",
@@ -5089,8 +5106,15 @@ dependencies = [
  "windows-sys 0.61.2",
  "winresource",
  "x509-parser",
+ "zbitmap",
  "zip",
 ]
+
+[[package]]
+name = "zbitmap"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bde9194267e17314ff9f9ec82b2670983e33f2f5fe2027c6de01354050be85b0"
 
 [[package]]
 name = "zerocopy"

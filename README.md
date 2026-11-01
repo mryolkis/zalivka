@@ -98,10 +98,22 @@ ECID are not needed.
 Intel hosts and T2 targets require manual DFU entry. The terminal equivalent is
 `zalivka enter-dfu` on macOS.
 
-The portable binary uses `AuthorizationExecuteWithPrivileges`, which Apple has
-[deprecated in favor of launchd / Service Management](https://developer.apple.com/documentation/security/authorizationexecutewithprivileges).
-This avoids AppleScript and shell execution. Moving to `SMAppService` would require
-an app bundle with a registered privileged helper.
+The portable binary makes a temporary copy of itself in a private directory under
+`/private/tmp`, and that copy requests authorization and launches the privileged
+DFU helper. Requesting authorization directly from a binary in protected folders
+such as Downloads, Desktop or Documents can fail with `errAuthorizationInternal`
+(`-60008`) because `authd` cannot read its code signature; see
+[Apple's explanation](https://forums.swift.org/t/swift-build-differs-from-xcode-build/80775/2).
+Only the fixed `enter-dfu-helper` command is elevated, using
+`AuthorizationExecuteWithPrivileges`. No AppleScript or shell is involved. The
+temporary copy is removed when the operation finishes. Cancellation, numeric
+authorization errors and the helper's full result return to the operation journal.
+Apple has [deprecated this API in favor of launchd / Service Management](https://developer.apple.com/documentation/security/authorizationexecutewithprivileges);
+`SMAppService` would require an app bundle with a registered privileged helper.
+
+For an older build that reports `Unable to obtain authorization for this operation`,
+move the executable out of those folders (for example, into `~/Applications`) and
+launch it again. Alternatively, run `sudo ./zalivka enter-dfu` from a terminal.
 
 The native USB-C implementation is adapted from
 [macvdmtool](https://github.com/AsahiLinux/macvdmtool), revision
@@ -123,12 +135,35 @@ Inspect and verify a local IPSW without opening a USB device:
 zalivka inspect firmware.ipsw --json
 zalivka verify firmware.ipsw
 zalivka verify firmware.ipsw --checksum TRUSTED_SHA256
+zalivka verify firmware.ipsw --online
+zalivka verify firmware.ipsw --aea-key ARCHIVE_KEY_HEX
+zalivka verify firmware.ipsw --aea-private-key public-fcs.pem
 zalivka plan firmware.ipsw --identity 0
 ```
 
-`verify` checks ZIP streams, CRCs, and supported manifest digests. `--checksum`
-accepts a trusted SHA-1 or SHA-256 for the entire archive. Encrypted AEA content
-is reported separately when its plaintext checksum cannot be verified.
+`verify` checks every ZIP stream and CRC, supported manifest digests, and the
+measurements in embedded restore and cryptex IM4M manifests. It checks each
+ticket against the matching build identities, including hardware identifiers,
+and reports payload types it cannot map. During restore, returned TSS tickets
+are also checked against the selected identity and requested trusted digests
+before firmware is uploaded. These comparisons do not authenticate Apple's
+cryptographic ticket signature; the device performs that authentication.
+
+Verification is offline by default. AEA profile 1 images can be checked with a
+32-byte archive key (`--aea-key`, hex) or their public FCS PKCS#8 PEM key
+(`--aea-private-key`). `--online` permits fetching public FCS keys from Apple.
+AEA checks authenticate the root header, every cluster and segment, and padding;
+supported plaintext is decompressed and checked against segment checksums and
+BuildManifest digests. Supported compression methods are uncompressed, LZFSE,
+LZVN, LZBITMAP, zlib and LZ4. Images are processed sequentially without creating
+a temporary copy. Missing keys or unsupported profiles/compression are reported
+as skipped checks; they are never reported as verified plaintext.
+
+The JSON report includes per-file coverage, each identity's component digest
+status, AEA authentication and plaintext results, and embedded IM4M comparisons.
+Files without a manifest digest are explicitly identified as checked only by
+ZIP CRC. `--checksum` additionally accepts a trusted SHA-1 or SHA-256 for the
+entire archive; that result is reported separately.
 
 `plan --identity` selects a build identity by index for an offline check. Use
 `plan firmware.ipsw --ecid HEX_ECID` to select an identity for a connected device;
