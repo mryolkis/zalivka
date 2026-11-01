@@ -72,6 +72,18 @@ fn installer_upgrades_the_previous_bundled_rule_and_keeps_custom_rules_protected
     std::fs::write(&path, "# Apple DFU/recovery and restore interfaces. Access for the active local seat.\nSUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n").unwrap();
     install_with(&path, &mut exit(0)).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), UDEV_RULES);
+    // The last direct-USB version also blocked usbmuxd for DFU and Recovery.
+    std::fs::write(&path, concat!(
+            "# Apple DFU/recovery and restore interfaces. Access for the active local seat.\n",
+            "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n",
+            "\n",
+            "# SoC DFU, iBoot Recovery, restored, Port DFU and KIS belong to Zalivka.\n",
+            "# Override usbmuxd activation/ownership while keeping the active seat's ACL.\n",
+            "# Normal iPhone/iPad modes retain the system's usbmuxd policy.\n",
+            "SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{idVendor}==\"05ac\", ATTR{idProduct}==\"1227|128[0-3]|12ac|f014|1881\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", OWNER:=\"root\", GROUP:=\"root\", MODE:=\"0600\"\n",
+        )).unwrap();
+    install_with(&path, &mut exit(0)).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), UDEV_RULES);
     // The second shipped version protected only restored (12ac).
     std::fs::write(&path, concat!(
         "# Apple DFU/recovery and restore interfaces. Access for the active local seat.\n",

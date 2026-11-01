@@ -23,11 +23,11 @@ fn cancelled_or_expired_connects_do_not_allocate_channels_or_write_syn() {
 fn mux_header_rejects_oversized_payloads_without_touching_the_buffer() {
     for size in [usize::MAX, 50000] {
         let mut bytes = vec![42];
-        assert!(crate::mux::packet::encode_header(&mut bytes, 6, 2, 0, 0, size).is_err());
+        assert!(crate::mux::direct::packet::encode_header(&mut bytes, 6, 2, 0, 0, size).is_err());
         assert_eq!(bytes, [42]);
     }
 }
-use crate::mux::{InputReady, Link, PacketTransport, SYN, decode_packet};
+use crate::mux::direct::{InputReady, Link, PacketTransport, SYN, decode_packet};
 use crate::test_mux::encode_packet;
 use anyhow::ensure;
 use std::sync::Weak;

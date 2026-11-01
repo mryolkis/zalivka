@@ -3,7 +3,6 @@ use super::RESTORED_PORT;
 use crate::{
     device::DeviceInfo,
     mux::{MuxStream, Session},
-    usb::MuxUsb,
     wire,
 };
 use anyhow::{Context, Result, ensure};
@@ -55,9 +54,15 @@ pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, 
     let mut last_error = None;
     let mut reported_error = None;
     loop {
-        for candidate in MuxUsb::candidates()? {
+        // Enumeration can fail during re-enumeration or daemon startup. Preserve
+        // that diagnostic and retry within the same restore-service deadline.
+        let candidates = match Session::candidates() {
+            Ok(candidates) => candidates,
+            Err(error) => vec![Err(error)],
+        };
+        for candidate in candidates {
             let result = (|| -> Result<_> {
-                let session = Session::new(MuxUsb::open(&candidate)?)?;
+                let session = candidate?;
                 let mut stream = session.connect(RESTORED_PORT)?;
                 stream.set_read_timeout(Duration::from_secs(10));
                 wire::send(
@@ -101,7 +106,7 @@ pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, 
         }
         if Instant::now() >= deadline {
             return Err(last_error
-                .unwrap_or_else(|| anyhow::anyhow!("no USB multiplex interface found"))
+                .unwrap_or_else(|| anyhow::anyhow!("no USB multiplex device found"))
                 .context(format!(
                     "restore service did not appear for ECID {:016x}",
                     device.ecid

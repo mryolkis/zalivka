@@ -133,6 +133,11 @@ pub(crate) fn diagnostics(restore_only: bool) -> Result<Vec<UsbDiagnostic>> {
         #[cfg(windows)]
         let mut reset_error = None;
         let probe = (|| -> Result<String> {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if mode.is_none() && info.product_id() != 0x1881 {
+                crate::mux::check_system_device(&info)?;
+                return Ok("usbmuxd".into());
+            }
             if info.product_id() == 0x1881 {
                 let device = info.open().wait()?;
                 let mut kis = crate::usb::Kis::open(&device, &info)?;

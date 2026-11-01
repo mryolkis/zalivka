@@ -130,6 +130,8 @@ pub struct RecoveryUsb {
 }
 
 enum RecoveryConnection {
+    #[cfg(target_os = "macos")]
+    Closed,
     Standard {
         interface: UsbInterface,
         bulk: Option<BulkOutput>,
@@ -224,6 +226,8 @@ impl RecoveryUsb {
         match &self.connection {
             RecoveryConnection::Standard { interface, .. } => Ok(interface),
             RecoveryConnection::Kis(_) => bail!("KIS has no iBoot control interface"),
+            #[cfg(target_os = "macos")]
+            RecoveryConnection::Closed => bail!("USB connection closed for reset"),
         }
     }
 
@@ -362,6 +366,14 @@ impl RecoveryTransport for RecoveryUsb {
         }
         #[cfg(not(windows))]
         {
+            // IOKit requires every interface and endpoint handle to be dropped
+            // before a device-wide reset. This connection ends at the reset;
+            // the boot stage opens the re-enumerated device separately.
+            #[cfg(target_os = "macos")]
+            drop(std::mem::replace(
+                &mut self.connection,
+                RecoveryConnection::Closed,
+            ));
             self.device.reset().wait().context("USB reset")
         }
     }

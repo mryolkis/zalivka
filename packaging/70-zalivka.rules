@@ -1,7 +1,6 @@
 # Apple DFU/recovery and restore interfaces. Access for the active local seat.
 SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", TAG+="uaccess"
 
-# SoC DFU, iBoot Recovery, restored, Port DFU and KIS belong to Zalivka.
-# Override usbmuxd activation/ownership while keeping the active seat's ACL.
-# Normal iPhone/iPad modes retain the system's usbmuxd policy.
-SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="05ac", ATTR{idProduct}=="1227|128[0-3]|12ac|f014|1881", ENV{USBMUX_SUPPORTED}="0", ENV{SYSTEMD_WANTS}="", OWNER:="root", GROUP:="root", MODE:="0600"
+# Zalivka owns DFU, Recovery, Port DFU and KIS. Restored (12ac) uses system usbmuxd.
+# Keep direct boot interfaces accessible without changing restored's daemon policy.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="05ac", ATTR{idProduct}=="1227|128[0-3]|f014|1881", ENV{USBMUX_SUPPORTED}="0", ENV{SYSTEMD_WANTS}="", OWNER:="root", GROUP:="root", MODE:="0600"

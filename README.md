@@ -2,8 +2,9 @@
 
 Zalivka is an experimental native Rust client for restoring Apple Silicon and T2
 Mac firmware over USB in DFU mode. It includes a command-line interface and an
-optional desktop GUI built with egui. USB communication is direct and does not
-require usbmuxd.
+optional desktop GUI built with egui. DFU and iBoot Recovery use direct USB.
+On Linux and macOS, restoreOS services (restored, ASR and FDR) use the system
+usbmuxd through `/var/run/usbmuxd`. Windows uses direct USB throughout.
 
 **Restore erases the target Mac.** Revive uses an Upgrade identity and never falls
 back to an erase restore.
@@ -70,15 +71,22 @@ sudo ./zalivka drivers install-udev
 Reconnect the USB cable after installation. The rule grants access to the active
 local session. Use `zalivka doctor` to diagnose access or interface claim errors.
 
-For SoC DFU (`1227`), iBoot Recovery (`1280`–`1283`), restored (`12ac`),
-Port DFU (`f014`) and KIS (`1881`), the rule also clears usbmuxd's udev activation
-and assigns USB access to root/the active local user instead of the usbmux
-account. It runs after `39-usbmuxd.rules` and before the seat ACL rule, preventing
-usbmuxd from claiming the restore interface while leaving normal iPhone/iPad
-IDs alone. Reinstall the rule after updating Zalivka; the installer can upgrade
-both previous bundled versions and preserves custom administrator rules. If
-usbmuxd already has the Mac open, stop it once and reconnect/re-enter DFU before
-retrying. A root-run usbmuxd can bypass device permissions and must be stopped.
+Install your distribution's `usbmuxd` package and leave its service enabled.
+For example, on Debian/Ubuntu: `sudo apt-get install usbmuxd`. The daemon takes
+over when the Mac boots into restored (`12ac`); Zalivka connects through its
+system socket and confirms the target's ECID, ChipID and BoardID before use.
+
+For SoC DFU (`1227`), iBoot Recovery (`1280`–`1283`), Port DFU (`f014`) and KIS
+(`1881`), the rule keeps direct USB access for Zalivka. Restored retains the
+system's usbmuxd activation and ownership. Reinstall the USB access rule after
+updating from a direct-USB version, then reconnect the cable; the installer
+upgrades all previous bundled rules and preserves custom administrator rules.
+
+### macOS USB setup
+
+macOS supplies its own usbmuxd; no separate daemon or Homebrew package is
+required. Leave the system service running. Zalivka uses direct USB for DFU and
+Recovery, then connects to restored and its data services through usbmuxd.
 
 ## Command-line usage
 

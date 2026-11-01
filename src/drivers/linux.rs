@@ -59,6 +59,15 @@ pub(super) fn install() -> Result<()> {
 fn install_with(path: &Path, reload: &mut Command) -> Result<()> {
     // Upgrade only our previous bundled rule; preserve administrator changes.
     const PREVIOUS: &[&[u8]] = &[
+        concat!(
+            "# Apple DFU/recovery and restore interfaces. Access for the active local seat.\n",
+            "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n",
+            "\n",
+            "# SoC DFU, iBoot Recovery, restored, Port DFU and KIS belong to Zalivka.\n",
+            "# Override usbmuxd activation/ownership while keeping the active seat's ACL.\n",
+            "# Normal iPhone/iPad modes retain the system's usbmuxd policy.\n",
+            "SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{idVendor}==\"05ac\", ATTR{idProduct}==\"1227|128[0-3]|12ac|f014|1881\", ENV{USBMUX_SUPPORTED}=\"0\", ENV{SYSTEMD_WANTS}=\"\", OWNER:=\"root\", GROUP:=\"root\", MODE:=\"0600\"\n",
+        ).as_bytes(),
         b"# Apple DFU/recovery and restore interfaces. Access for the active local seat.\nSUBSYSTEM==\"usb\", ATTR{idVendor}==\"05ac\", TAG+=\"uaccess\"\n",
         concat!(
             "# Apple DFU/recovery and restore interfaces. Access for the active local seat.\n",
