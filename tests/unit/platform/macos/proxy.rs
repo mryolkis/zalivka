@@ -162,7 +162,7 @@ fn failed_pac_uses_only_fallback_routes_supplied_by_the_system() {
             url("file:///nonexistent/proxy.pac").unwrap().as_CFType(),
         ),
     ]);
-    assert!(resolve(&CFArray::from_CFTypes(&[pac.clone()]), &target, 0).is_err());
+    assert!(resolve(&CFArray::from_CFTypes(std::slice::from_ref(&pac)), &target, 0).is_err());
     let direct = Dictionary::from_CFType_pairs(&[(
         unsafe { CFString::wrap_under_get_rule(kCFProxyTypeKey) },
         unsafe { CFString::wrap_under_get_rule(kCFProxyTypeNone) }.as_CFType(),
