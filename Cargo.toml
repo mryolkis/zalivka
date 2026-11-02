@@ -1,6 +1,6 @@
 [package]
 name = "zalivka"
-version = "0.2.3"
+version = "0.2.6"
 edition = "2024"
 rust-version = "1.99"
 description = "Experimental native Rust DFU restore client for Apple Silicon and T2 Macs"
@@ -56,6 +56,7 @@ libproxy = "0.1.1"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libgssapi = "0.11"
+rustix = { version = "1", features = ["event", "net"] }
 
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 ureq = { version = "3.5", default-features = false, features = ["platform-verifier"] }

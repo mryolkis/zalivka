@@ -3,6 +3,7 @@
 use crate::wire;
 use anyhow::{Context, Result, ensure};
 use plist::Value;
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use std::{
     collections::VecDeque,
     io::{self, Cursor, Read, Write},
@@ -137,6 +138,7 @@ impl Session {
         // After Result=0, the very next byte belongs to the service. Do not
         // buffer ahead while parsing the daemon's response.
         stream.deadline = None;
+        stream.destination = destination;
         crate::log!(
             Debug,
             "usbmuxd",
@@ -211,6 +213,16 @@ pub(crate) struct Stream {
     pending: Mutex<VecDeque<u8>>,
     read_timeout: Duration,
     deadline: Option<Instant>,
+    destination: u16,
+    writes: WriteStats,
+}
+
+#[derive(Default)]
+struct WriteStats {
+    bytes: u64,
+    calls: u64,
+    waits: u64,
+    wait_time: Duration,
 }
 
 impl Stream {
@@ -232,13 +244,43 @@ impl Stream {
                 )
             })?;
         socket.set_nonblocking(true)?;
+        crate::log!(
+            Debug,
+            "usbmuxd",
+            "Socket buffers: send={:?}, receive={:?}",
+            rustix::net::sockopt::socket_send_buffer_size(&socket),
+            rustix::net::sockopt::socket_recv_buffer_size(&socket)
+        );
         Ok(Self {
             socket,
             shared,
             pending: Mutex::new(VecDeque::new()),
             read_timeout: TIMEOUT,
             deadline: Some(deadline),
+            destination: 0,
+            writes: WriteStats::default(),
         })
+    }
+
+    fn wait(&self, events: PollFlags, deadline: Instant) -> io::Result<()> {
+        loop {
+            check(&self.shared, deadline)?;
+            // Wake as soon as the socket is ready. A fixed sleep on each full
+            // buffer caps throughput, especially with macOS's small buffers.
+            // Bound idle waits so session cancellation remains responsive.
+            let timeout = Timespec::try_from(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(50)),
+            )
+            .unwrap();
+            let mut fds = [PollFd::new(&self.socket, events)];
+            match poll(&mut fds, Some(&timeout)) {
+                Ok(0) | Err(rustix::io::Errno::INTR) => continue,
+                Ok(_) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     pub(crate) fn has_pending_input(&self) -> Result<bool> {
@@ -254,6 +296,14 @@ impl Stream {
         if pending.is_empty() {
             let mut buffer = [0; 8192];
             match (&self.socket).read(&mut buffer) {
+                // EOF stays readable to poll. Report it instead of spinning
+                // when an image writer is waiting for either space or a key.
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "usbmuxd service closed",
+                    ));
+                }
                 Ok(n) => pending.extend(&buffer[..n]),
                 Err(error)
                     if matches!(
@@ -277,6 +327,7 @@ impl Stream {
         if data.is_empty() {
             return Ok(Some(0));
         }
+        self.writes.calls += 1;
         let deadline = self.deadline.unwrap_or_else(|| Instant::now() + TIMEOUT);
         loop {
             check(&self.shared, deadline)?;
@@ -290,10 +341,22 @@ impl Stream {
                         "usbmuxd socket closed",
                     ));
                 }
-                Ok(n) => return Ok(Some(n)),
+                Ok(n) => {
+                    self.writes.bytes += n as u64;
+                    return Ok(Some(n));
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(1))
+                    let events = if stop_on_input {
+                        PollFlags::OUT | PollFlags::IN
+                    } else {
+                        PollFlags::OUT
+                    };
+                    let started = Instant::now();
+                    let waited = self.wait(events, deadline);
+                    self.writes.waits += 1;
+                    self.writes.wait_time += started.elapsed();
+                    waited?;
                 }
                 Err(error) => return Err(error),
             }
@@ -343,7 +406,7 @@ impl Read for Stream {
                 Ok(n) => return Ok(n),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(1))
+                    self.wait(PollFlags::IN, deadline)?;
                 }
                 Err(error) => return Err(error),
             }
@@ -361,6 +424,25 @@ impl Write for Stream {
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        if self.writes.bytes >= 1024 * 1024 {
+            let stats = &self.writes;
+            crate::log!(
+                Debug,
+                "usbmuxd:stats",
+                "Device {}, port {}: bytes={}, writes={}, waits={}, wait={:.3}s",
+                self.shared.device_id,
+                self.destination,
+                stats.bytes,
+                stats.calls,
+                stats.waits,
+                stats.wait_time.as_secs_f64()
+            );
+        }
     }
 }
 

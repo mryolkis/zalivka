@@ -275,6 +275,15 @@ fn service_eof_and_daemon_outage_do_not_confirm_device_removal() {
     let session = facade(&session(&dir.path().join("usbmuxd")));
     let mut stream = session.connect(12345).unwrap();
     assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    assert_eq!(
+        stream
+            .has_pending_input()
+            .unwrap_err()
+            .downcast_ref::<io::Error>()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::UnexpectedEof
+    );
     assert!(!session.disconnected());
     assert!(session.disconnected());
     server.join().unwrap();
@@ -377,4 +386,62 @@ fn stopped_daemon_is_not_retried_as_a_service_refusal() {
         io::ErrorKind::NotConnected
     );
     assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn full_socket_write_observes_deadline() {
+    let (dir, listener) = listener();
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_request(&mut socket, "Connect");
+        socket.write_all(&result(0)).unwrap();
+        // Leave image data unread so the writer must wait for socket space.
+        stop_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    });
+    let session = session(&dir.path().join("usbmuxd"));
+    let mut stream = session
+        .connect(12345, Instant::now() + Duration::from_secs(3))
+        .unwrap();
+    rustix::net::sockopt::set_socket_send_buffer_size(&stream.socket, 8192).unwrap();
+    let payload = vec![0xa5; 1024 * 1024];
+    stream.deadline = Some(Instant::now() + Duration::from_millis(100));
+    let started = Instant::now();
+    let error = stream.write_all(&payload).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(stream.writes.waits > 0);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    stop_tx.send(()).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+#[ignore = "local socket benchmark; no USB devices or firmware writes"]
+fn small_socket_buffer_throughput() {
+    let payload: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let expected = payload.clone();
+    let (dir, listener) = listener();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_request(&mut socket, "Connect");
+        rustix::net::sockopt::set_socket_recv_buffer_size(&socket, 8192).unwrap();
+        socket.write_all(&result(0)).unwrap();
+        let mut received = vec![0; expected.len()];
+        socket.read_exact(&mut received).unwrap();
+        assert_eq!(received, expected);
+    });
+    let session = session(&dir.path().join("usbmuxd"));
+    let mut stream = session
+        .connect(12345, Instant::now() + Duration::from_secs(3))
+        .unwrap();
+    rustix::net::sockopt::set_socket_send_buffer_size(&stream.socket, 8192).unwrap();
+    let started = Instant::now();
+    stream.write_all(&payload).unwrap();
+    server.join().unwrap();
+    let seconds = started.elapsed().as_secs_f64();
+    println!(
+        "USBMUXD_BENCH bytes={} seconds={seconds:.3} MiB/s={:.1}; payload verified; no USB",
+        payload.len(),
+        payload.len() as f64 / 1048576.0 / seconds
+    );
 }

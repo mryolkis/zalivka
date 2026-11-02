@@ -5057,7 +5057,7 @@ dependencies = [
 
 [[package]]
 name = "zalivka"
-version = "0.2.3"
+version = "0.2.6"
 dependencies = [
  "aes 0.9.3",
  "anyhow",
@@ -5089,6 +5089,7 @@ dependencies = [
  "quick-xml 0.42.0",
  "rcgen",
  "rfd",
+ "rustix 1.1.6",
  "rustls",
  "rustls-platform-verifier",
  "rustls-webpki",
