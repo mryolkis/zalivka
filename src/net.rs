@@ -14,6 +14,67 @@ pub fn agent() -> ureq::Agent {
     agent_with_body_timeout(Some(Duration::from_secs(120)))
 }
 
+/// Load PAC directly, without recursively consulting the PAC being loaded.
+/// Keep the configured scheme: CFNetwork's URL loader may upgrade HTTP PAC
+/// to HTTPS even when that server only supports cleartext HTTP.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn proxy_script(address: &str) -> Result<String> {
+    let agent = agent();
+    let mut address = address.to_owned();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    for redirects in 0..=5 {
+        crate::progress::check_cancelled()?;
+        let uri: Uri = address.parse().context("invalid PAC URL")?;
+        ensure!(
+            matches!(uri.scheme_str(), Some("http" | "https"))
+                && uri.host().is_some()
+                && !uri.authority().is_some_and(|a| a.as_str().contains('@')),
+            "PAC requires an HTTP(S) URL without embedded credentials"
+        );
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        ensure!(!remaining.is_zero(), "PAC download timed out");
+        let mut response = agent
+            .get(&address)
+            .config()
+            .timeout_global(Some(remaining))
+            .build()
+            .call()
+            .context("downloading proxy auto-configuration script")?;
+        if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            ensure!(redirects < 5, "too many PAC redirects");
+            let location = response
+                .headers()
+                .get("location")
+                .context("PAC redirect without Location")?
+                .to_str()?;
+            let next = oxiri::Iri::parse(address.as_str())?
+                .resolve(&oxiri::IriRef::parse(
+                    location.split('#').next().unwrap_or(""),
+                )?)?
+                .into_inner();
+            ensure!(
+                uri.scheme_str() != Some("https") || next.starts_with("https://"),
+                "PAC redirect downgrades HTTPS"
+            );
+            address = next;
+            continue;
+        }
+        ensure!(
+            response.status().is_success(),
+            "PAC download returned {}",
+            response.status()
+        );
+        let bytes = crate::storage::read_limited(
+            response.body_mut().as_reader(),
+            1024 * 1024,
+            "PAC script exceeds 1 MiB",
+        )?;
+        let script = String::from_utf8(bytes).context("PAC script is not UTF-8")?;
+        return Ok(script.trim_start_matches('\u{feff}').to_owned());
+    }
+    unreachable!()
+}
+
 pub(crate) use crate::platform::tls::public_roots;
 
 /// gs.apple.com uses Apple's private PKI, absent from Mozilla's public roots.

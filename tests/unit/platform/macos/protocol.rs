@@ -45,7 +45,7 @@ fn vdm() -> Step {
 }
 fn script(steps: Vec<Step>, expected: Option<&str>) {
     let mut script = Script(steps.into());
-    let result = enter_dfu(&mut script, *b"BcaM");
+    let result = enter_dfu(&mut script, *b"BcaM", || Ok(()));
     match expected {
         None => result.unwrap(),
         Some(expected) => assert!(format!("{:#}", result.unwrap_err()).contains(expected)),
@@ -175,4 +175,49 @@ fn cleanup_failure_after_an_ack_is_reported() {
         Step::Command(*b"DBMa", vec![0], Ok(3)),
     ]);
     script(steps, Some("leaving USB-C debug mode"));
+}
+
+#[test]
+fn controller_stays_in_debug_mode_until_dfu_detection_and_cleans_up_on_timeout() {
+    use std::cell::Cell;
+
+    struct Waiting<'a> {
+        script: Script,
+        waited: &'a Cell<bool>,
+    }
+    impl Controller for Waiting<'_> {
+        fn read(&mut self, register: u8) -> Result<Vec<u8>> {
+            self.script.read(register)
+        }
+        fn command(&mut self, name: [u8; 4], args: &[u8]) -> Result<u8> {
+            if name == *b"DBMa" && args == [0] {
+                assert!(
+                    self.waited.get(),
+                    "controller mode restored before DFU detection"
+                );
+            }
+            self.script.command(name, args)
+        }
+    }
+    for detected in [true, false] {
+        let waited = Cell::new(false);
+        let mut steps = setup();
+        steps.extend([
+            vdm(),
+            read(0x4d, &[8, 0x52, 0x80, 0xac, 5]),
+            command(b"DBMa", &[0]),
+        ]);
+        let mut controller = Waiting {
+            script: Script(steps.into()),
+            waited: &waited,
+        };
+        let result = enter_dfu(&mut controller, *b"BcaM", || {
+            waited.set(true);
+            anyhow::ensure!(detected, "target did not appear in DFU");
+            Ok(())
+        });
+        assert_eq!(result.is_ok(), detected);
+        assert!(waited.get());
+        assert!(controller.script.0.is_empty());
+    }
 }

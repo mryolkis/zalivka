@@ -93,8 +93,8 @@ silicon Mac into DFU without the keyboard sequence. Connect the two Macs directl
 through their DFU ports; see [Apple's connection guide](https://support.apple.com/en-us/108900).
 The action requests administrator authorization directly through Security.framework,
 starts a short-lived DFU helper as root, sends the USB-C command, and waits for the
-target to appear in DFU. The GUI stays under your normal account. Firmware and an
-ECID are not needed.
+target to appear in DFU before leaving the controller's debug mode. The GUI stays
+under your normal account. Firmware and an ECID are not needed.
 Intel hosts and T2 targets require manual DFU entry. The terminal equivalent is
 `zalivka enter-dfu` on macOS.
 
@@ -108,6 +108,10 @@ Only the fixed `enter-dfu-helper` command is elevated, using
 `AuthorizationExecuteWithPrivileges`. No AppleScript or shell is involved. The
 temporary copy is removed when the operation finishes. Cancellation, numeric
 authorization errors and the helper's full result return to the operation journal.
+This portable helper uses the system `system.privilege.admin` authorization right;
+the password dialog is controlled by macOS. Enabling Touch ID for login or sudo
+does not make this authorization use Touch ID. A LocalAuthentication prompt alone
+cannot grant the helper root privileges.
 Apple has [deprecated this API in favor of launchd / Service Management](https://developer.apple.com/documentation/security/authorizationexecutewithprivileges);
 `SMAppService` would require an app bundle with a registered privileged helper.
 
@@ -210,6 +214,18 @@ On macOS, the **Secure Web Proxy (HTTPS)** system setting specifies an HTTP
 CONNECT proxy for HTTPS destinations; `https://` in an environment proxy URL
 specifies TLS to the proxy itself. Explicit proxy URL credentials support HTTP
 Basic and SOCKS authentication.
+
+CONNECT proxies that accept a Kerberos ticket without returning a final server
+token are supported. If the proxy supplies a final token, it must validate and
+complete the GSSAPI exchange. Destination TLS certificate verification remains
+enabled in both cases.
+
+On macOS, PAC scripts are downloaded directly at their configured HTTP(S) URL,
+then evaluated by CFNetwork. This avoids CFNetwork's implicit HTTP-to-HTTPS PAC
+upgrade. HTTPS PAC servers use the system certificate store; invalid certificates
+remain errors. Failed automatic DHCP discovery proceeds to DNS discovery and
+system routes. A failed PAC referral can use another route explicitly supplied
+by CFNetwork; Zalivka does not invent a direct route.
 
 On Linux and macOS, a nonempty `HTTP_PROXY`/`HTTPS_PROXY` (or lowercase equivalent)
 overrides desktop settings for that destination scheme; `ALL_PROXY` is the

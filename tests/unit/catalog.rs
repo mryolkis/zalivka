@@ -36,6 +36,7 @@ fn unavailable_catalogs_preserve_errors_and_available_conflicts_still_fail() {
     let error = latest_with(&device(), |url| anyhow::bail!("offline: {url}")).unwrap_err();
     let error = format!("{error:#}");
     assert!(error.contains(MACOS_CATALOG) && error.contains(BRIDGEOS_CATALOG));
+    assert!(!error.contains("no firmware for this hardware"));
     let error = latest_with(&device(), |url| {
         Ok(catalog(
             &if url == MACOS_CATALOG { "ab" } else { "cd" }.repeat(20),

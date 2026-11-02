@@ -2145,6 +2145,47 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
 }
 
 #[test]
+fn journal_keeps_restore_buttons_visible_without_scrolling_in_both_languages() {
+    for language in ["en", "ru"] {
+        for size in [
+            egui::vec2(1280.0, 790.0),
+            egui::vec2(700.0, 480.0),
+            egui::vec2(480.0, 360.0),
+        ] {
+            let ctx = egui::Context::default();
+            configure(&ctx);
+            let mut app = english_app();
+            app.localization.select(language);
+            app.journal_open = true;
+            app.scanning = true;
+            app.journal_line(Record::new(Level::Error, "test", "Journal check"));
+            let mut output = egui::FullOutput::default();
+            for _ in 0..4 {
+                output = render_pass(
+                    &ctx,
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |ctx| ctx.root_ui(|ui| app.view(ui)),
+                );
+            }
+            let labels = if language == "ru" {
+                ["Начать Revive", "Стереть и восстановить"]
+            } else {
+                ["Start Revive", "Erase and restore"]
+            };
+            for label in labels {
+                assert!(
+                    visible_text_rect(&output, label).is_some(),
+                    "{language}: {label} hidden at {size:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn narrow_cards_keep_text_and_controls_inside_their_bounds() {
     for width in [480.0, 700.0, 840.0, 1020.0, 1280.0] {
         for automatic in [false, true] {

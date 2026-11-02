@@ -45,7 +45,14 @@ fn kerberos_authenticates_http_and_fdr_tunnels() {
         assert!(status.success());
         return;
     }
-    for http in [false, true] {
+    for (http, server_token) in [
+        (false, "valid"),
+        (true, "valid"),
+        (false, "omitted"),
+        (true, "omitted"),
+        (false, "invalid"),
+        (true, "invalid"),
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -80,6 +87,16 @@ fn kerberos_authenticates_http_and_fdr_tunnels() {
                     })
                     .unwrap_or_default();
                 if context.is_complete() {
+                    // Corporate proxies may omit the AP-REP/SPNEGO final token
+                    // even though they accepted the client's Kerberos ticket.
+                    let token = match server_token {
+                        "omitted" => String::new(),
+                        "invalid" => format!(
+                            "Proxy-Authenticate: Negotiate {}\r\n",
+                            BASE64_STANDARD.encode(b"invalid GSSAPI token")
+                        ),
+                        _ => token,
+                    };
                     write!(stream, "HTTP/1.1 200 Connection established\r\n{token}\r\n").unwrap();
                     break;
                 }
@@ -88,6 +105,9 @@ fn kerberos_authenticates_http_and_fdr_tunnels() {
                     "HTTP/1.1 407 Proxy Authentication Required\r\n{token}Content-Length: 0\r\n\r\n"
                 )
                 .unwrap();
+            }
+            if server_token == "invalid" {
+                return;
             }
             if http {
                 let config = crate::test_net::tls_server_config();
@@ -126,15 +146,30 @@ fn kerberos_authenticates_http_and_fdr_tunnels() {
             let request = ureq::http::Request::get("https://localhost/ticket")
                 .body(Vec::new())
                 .unwrap();
-            let mut response = crate::net::send_http_via(&client, &request, Some(proxy)).unwrap();
-            assert_eq!(response.body_mut().read_to_string().unwrap(), "OK");
+            let response = crate::net::send_http_via(&client, &request, Some(proxy));
+            if server_token == "invalid" {
+                assert!(
+                    format!("{:#}", response.unwrap_err())
+                        .contains("GSSAPI proxy authentication failed")
+                );
+            } else {
+                assert_eq!(response.unwrap().body_mut().read_to_string().unwrap(), "OK");
+            }
         } else {
-            let mut stream =
-                crate::proxy::socket::connect_blocking("gs.apple.com", 443, Some(proxy)).unwrap();
-            stream.write_all(b"PING").unwrap();
-            let mut bytes = [0; 4];
-            stream.read_exact(&mut bytes).unwrap();
-            assert_eq!(&bytes, b"PONG");
+            let stream = crate::proxy::socket::connect_blocking("gs.apple.com", 443, Some(proxy));
+            if server_token == "invalid" {
+                let error = match stream {
+                    Ok(_) => panic!("invalid final token accepted"),
+                    Err(error) => error,
+                };
+                assert!(format!("{error:#}").contains("GSSAPI proxy authentication failed"));
+            } else {
+                let mut stream = stream.unwrap();
+                stream.write_all(b"PING").unwrap();
+                let mut bytes = [0; 4];
+                stream.read_exact(&mut bytes).unwrap();
+                assert_eq!(&bytes, b"PONG");
+            }
         }
         server.join().unwrap();
     }

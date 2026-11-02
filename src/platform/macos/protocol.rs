@@ -19,7 +19,11 @@ fn command(controller: &mut impl Controller, name: [u8; 4], args: &[u8]) -> Resu
     Ok(())
 }
 
-pub(super) fn enter_dfu(controller: &mut impl Controller, key: [u8; 4]) -> Result<()> {
+pub(super) fn enter_dfu(
+    controller: &mut impl Controller,
+    key: [u8; 4],
+    wait_for_dfu: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let connection = controller.read(0x3f)?;
     ensure!(
         connection.first().is_some_and(|state| state & 1 != 0),
@@ -61,7 +65,15 @@ pub(super) fn enter_dfu(controller: &mut impl Controller, key: [u8; 4]) -> Resul
                     u32::from_le_bytes(header.try_into()?) == 0x05ac8052,
                     "The connected device did not acknowledge the DFU command; automatic DFU requires an Apple silicon target"
                 );
-                return Ok(());
+                crate::log!(
+                    Info,
+                    "dfu",
+                    "USB-C DFU command acknowledged; waiting for USB DFU"
+                );
+                // Keep DBMa active through the target reboot. Restoring the
+                // controller mode on the ACK can interrupt USB-C negotiation
+                // before the target has actually entered DFU.
+                return wait_for_dfu();
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

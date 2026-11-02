@@ -264,10 +264,20 @@ impl App {
         frame
     }
     pub(super) fn actions(&mut self, ui: &mut egui::Ui) {
+        self.action_controls(ui, false);
+    }
+
+    pub(super) fn action_controls(&mut self, ui: &mut egui::Ui, compact: bool) {
         card(ui.ctx()).show(ui, |ui| {
-            section(ui, "03", "Action");
+            if !compact {
+                section(ui, "03", "Action");
+            }
             let ready = self.blocked_reason().is_none() && !self.picking;
-            let column_count = if ui.available_width() < 640.0 { 1 } else { 2 };
+            let column_count = if !compact && ui.available_width() < 640.0 {
+                1
+            } else {
+                2
+            };
             ui.columns(column_count, |columns| {
                 for (index, (action, title, detail, button)) in [
                     (
@@ -290,9 +300,11 @@ impl App {
                     if column_count == 1 && index > 0 {
                         ui.add_space(14.0);
                     }
-                    ui.label(RichText::new(tr(title)).size(18.0).strong());
-                    caption(ui, detail);
-                    ui.add_space(7.0);
+                    if !compact {
+                        ui.label(RichText::new(tr(title)).size(18.0).strong());
+                        caption(ui, detail);
+                        ui.add_space(7.0);
+                    }
                     let button = if action == Action::Revive {
                         egui::Button::new(RichText::new(tr(button)).color(Color32::WHITE))
                             .fill(BLUE)
@@ -306,6 +318,7 @@ impl App {
                             ready,
                             button.min_size(Vec2::new(ui.available_width(), 42.0)),
                         )
+                        .on_hover_text(tr(detail))
                         .clicked()
                         && let Some(target) = self.target()
                     {
@@ -317,7 +330,8 @@ impl App {
                     }
                 }
             });
-            if let Some(reason) = self.blocked_reason()
+            if !compact
+                && let Some(reason) = self.blocked_reason()
                 && reason != "Connect a Mac in DFU mode"
             {
                 ui.add_space(5.0);

@@ -159,11 +159,15 @@ fn latest_with(
             }
         }
     }
-    let result = selected.context("Apple catalogs have no firmware for this hardware");
     if errors.is_empty() {
-        result
+        selected.context("Apple catalogs have no firmware for this hardware")
     } else {
-        result.with_context(|| format!("unavailable Apple catalogs: {}", errors.join("; ")))
+        selected.with_context(|| {
+            format!(
+                "Could not determine compatible firmware; unavailable Apple catalogs: {}",
+                errors.join("; ")
+            )
+        })
     }
 }
 

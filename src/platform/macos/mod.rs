@@ -30,6 +30,12 @@ pub fn enter_dfu() -> Result<()> {
     } else {
         elevation::run()?;
     }
+    // Confirm DFU remains available after restoring the USB-C controller mode.
+    wait_for_dfu()
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_dfu() -> Result<()> {
     crate::progress::Event::Checkpoint {
         name: "Waiting for DFU".into(),
         complete: false,
@@ -38,6 +44,7 @@ pub fn enter_dfu() -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut last_error = None;
     loop {
+        crate::progress::check_cancelled()?;
         match crate::usb::detect() {
             Ok(devices) => {
                 if let Some(device) = devices.iter().find(|device| device.mode.can_restore()) {

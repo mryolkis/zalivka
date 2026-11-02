@@ -59,16 +59,22 @@ impl App {
             return;
         }
         let ctx = ui.ctx().clone();
-        let max_height = (ctx.content_rect().height() * 0.35).min(350.0);
+        let max_height = (ctx.content_rect().height() * 0.35)
+            .min(350.0)
+            .min((ui.available_height() - if self.job.is_none() { 160.0 } else { 80.0 }).max(70.0));
         egui::Panel::bottom("journal")
             .resizable(true)
             .default_size(max_height.min(220.0))
-            .min_size(110.0)
+            .min_size(max_height.min(110.0))
             .max_size(max_height)
             .frame(
                 egui::Frame::new()
                     .fill(ui.visuals().window_fill)
-                    .inner_margin(16),
+                    .inner_margin(if ctx.content_rect().height() < 700.0 {
+                        8
+                    } else {
+                        16
+                    }),
             )
             .show(ui, |ui| {
                 ui.spacing_mut().interact_size.y = 24.0;
@@ -272,6 +278,20 @@ impl App {
                 });
             });
         self.journal(ui);
+        // Keep the operation buttons above the journal while the setup cards
+        // scroll independently. Short windows get the same buttons without
+        // the descriptive headings.
+        let dock_actions = self.journal_open && self.job.is_none();
+        if dock_actions {
+            let compact = ctx.content_rect().height() < 700.0;
+            egui::Panel::bottom("actions")
+                .frame(
+                    egui::Frame::new()
+                        .fill(ui.visuals().panel_fill)
+                        .inner_margin(egui::Margin::symmetric(22, 8)),
+                )
+                .show(ui, |ui| self.action_controls(ui, compact));
+        }
         let mut notification_bounds = ctx.content_rect().shrink(14.0);
         notification_bounds.min.y = ui.available_rect_before_wrap().top() + 14.0;
         egui::CentralPanel::default()
@@ -316,8 +336,10 @@ impl App {
                                     ui.add_space(12.0);
                                     self.prepare_firmware_card(ui, &ctx).end(ui);
                                 }
-                                ui.add_space(12.0);
-                                self.actions(ui);
+                                if !dock_actions {
+                                    ui.add_space(12.0);
+                                    self.actions(ui);
+                                }
                             });
                         }
                     });

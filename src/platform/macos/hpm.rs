@@ -274,5 +274,5 @@ pub(super) fn enter_dfu() -> Result<()> {
         connected.len()
     );
     crate::log!(Info, "dfu", "Requesting DFU via USB-C");
-    protocol::enter_dfu(&mut connected[0], key)
+    protocol::enter_dfu(&mut connected[0], key, super::wait_for_dfu)
 }

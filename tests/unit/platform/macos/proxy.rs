@@ -52,11 +52,8 @@ fn system_manual_proxy_uses_connect_and_honors_exception_lists() {
 #[test]
 fn configured_pac_url_is_reported_as_an_autoconfiguration_route() {
     let _pac = pac_lock();
-    // macOS 12 and later may upgrade a cleartext HTTP PAC URL to HTTPS while
-    // loading it, so a loopback HTTP fixture cannot portably download the
-    // script. The adjacent test evaluates a PAC script end to end; this covers
-    // the other half the resolver owns: settings carrying a PAC URL must
-    // surface as a PAC route for `resolve` to expand.
+    // CFNetwork supplies the URL; Zalivka downloads it before asking the native
+    // JavaScript engine to evaluate it, preserving its original HTTP(S) scheme.
     let pac = "http://pac.example/proxy.pac";
     let settings = settings(&[
         ("ProxyAutoConfigEnable", CFNumber::from(1).as_CFType()),
@@ -118,4 +115,59 @@ fn invalid_native_pac_is_an_error_and_does_not_become_direct() {
         )
     });
     assert!(result.is_err());
+}
+
+#[test]
+fn http_pac_is_downloaded_and_evaluated_without_an_https_upgrade() {
+    use std::{io::Write, net::TcpListener, thread};
+    let _pac = pac_lock();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = crate::test_net::accept(&listener);
+        assert!(crate::test_net::read_header(&mut stream).starts_with("GET /proxy.pac HTTP/1.1"));
+        let script = "function FindProxyForURL(url, host) { return host == 'gs.apple.com' ? 'PROXY proxy.example:3131; DIRECT' : 'DIRECT'; }";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{script}",
+            script.len()
+        )
+        .unwrap();
+    });
+    let settings = settings(&[
+        ("ProxyAutoConfigEnable", CFNumber::from(1).as_CFType()),
+        (
+            "ProxyAutoConfigURLString",
+            CFString::new(&format!("http://{address}/proxy.pac")).as_CFType(),
+        ),
+    ]);
+    let routes = proxies_for_settings(&url("https://gs.apple.com/").unwrap(), &settings).unwrap();
+    assert_eq!(routes[0].as_ref().unwrap().host(), "proxy.example");
+    assert_eq!(routes[0].as_ref().unwrap().port(), 3131);
+    assert!(routes.iter().any(Option::is_none));
+    server.join().unwrap();
+}
+
+#[test]
+fn failed_pac_uses_only_fallback_routes_supplied_by_the_system() {
+    let _pac = pac_lock();
+    let target = url("https://gs.apple.com/").unwrap();
+    let pac = Dictionary::from_CFType_pairs(&[
+        (
+            unsafe { CFString::wrap_under_get_rule(kCFProxyTypeKey) },
+            unsafe { CFString::wrap_under_get_rule(kCFProxyTypeAutoConfigurationURL) }.as_CFType(),
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kCFProxyAutoConfigurationURLKey) },
+            url("file:///nonexistent/proxy.pac").unwrap().as_CFType(),
+        ),
+    ]);
+    assert!(resolve(&CFArray::from_CFTypes(&[pac.clone()]), &target, 0).is_err());
+    let direct = Dictionary::from_CFType_pairs(&[(
+        unsafe { CFString::wrap_under_get_rule(kCFProxyTypeKey) },
+        unsafe { CFString::wrap_under_get_rule(kCFProxyTypeNone) }.as_CFType(),
+    )]);
+    let routes = resolve(&CFArray::from_CFTypes(&[pac, direct]), &target, 0).unwrap();
+    assert_eq!(routes.len(), 1);
+    assert!(routes[0].is_none());
 }

@@ -52,12 +52,6 @@ unsafe extern "C" {
     static kCFProxyTypeAutoConfigurationJavaScript: CFStringRef;
     fn CFNetworkCopySystemProxySettings() -> CFDictionaryRef;
     fn CFNetworkCopyProxiesForURL(url: CFURLRef, settings: CFDictionaryRef) -> CFArrayRef;
-    fn CFNetworkExecuteProxyAutoConfigurationURL(
-        pac: CFURLRef,
-        target: CFURLRef,
-        callback: Callback,
-        context: *mut ClientContext,
-    ) -> CFRunLoopSourceRef;
     fn CFNetworkExecuteProxyAutoConfigurationScript(
         script: CFStringRef,
         target: CFURLRef,
@@ -113,9 +107,19 @@ pub(crate) fn for_url(uri: &Uri) -> Result<Vec<Option<Proxy>>> {
         && !bypassed(&settings, &target)?
     {
         if let Some(pac) = dhcp_pac()? {
-            return pac_routes(&url(&pac)?, &target);
+            match pac_routes(&url(&pac)?, &target, 0) {
+                Ok(routes) => return Ok(routes),
+                Err(error) => {
+                    crate::progress::check_cancelled()?;
+                    crate::log!(
+                        Debug,
+                        "proxy:wpad",
+                        "DHCP WPAD unavailable; trying DNS: {error:#}"
+                    );
+                }
+            }
         }
-        match pac_routes(&url("http://wpad/wpad.dat")?, &target) {
+        match pac_routes(&url("http://wpad/wpad.dat")?, &target, 0) {
             Ok(discovered) => return Ok(discovered),
             Err(error) => {
                 crate::progress::check_cancelled()?;
@@ -168,18 +172,22 @@ fn bypassed(settings: &Dictionary, target: &CFURL) -> Result<bool> {
     Ok(routes.iter().all(Option::is_none))
 }
 
-fn pac_routes(pac: &CFURL, target: &CFURL) -> Result<Vec<Option<Proxy>>> {
+fn pac_routes(pac: &CFURL, target: &CFURL, depth: usize) -> Result<Vec<Option<Proxy>>> {
+    let address = pac.get_string().to_string();
+    let script =
+        crate::net::proxy_script(&address).with_context(|| format!("loading PAC {address}"))?;
+    let script = CFString::new(&script);
     resolve(
         &execute_pac(|callback, context| unsafe {
-            CFNetworkExecuteProxyAutoConfigurationURL(
-                pac.as_concrete_TypeRef(),
+            CFNetworkExecuteProxyAutoConfigurationScript(
+                script.as_concrete_TypeRef(),
                 target.as_concrete_TypeRef(),
                 callback,
                 context,
             )
         })?,
         target,
-        1,
+        depth + 1,
     )
 }
 
@@ -277,6 +285,7 @@ fn resolve(proxies: &Proxies, target: &CFURL, depth: usize) -> Result<Vec<Option
         "invalid CFNetwork proxy route list"
     );
     let mut routes = Vec::new();
+    let mut pac_error = None;
     for proxy in proxies.iter() {
         let kind = value(&proxy, unsafe { kCFProxyTypeKey })
             .and_then(|v| v.downcast::<CFString>())
@@ -294,18 +303,14 @@ fn resolve(proxies: &Proxies, target: &CFURL, depth: usize) -> Result<Vec<Option
                     .context("invalid PAC URL")?
                     .to_string())?
             };
-            routes.extend(resolve(
-                &execute_pac(|callback, context| unsafe {
-                    CFNetworkExecuteProxyAutoConfigurationURL(
-                        pac.as_concrete_TypeRef(),
-                        target.as_concrete_TypeRef(),
-                        callback,
-                        context,
-                    )
-                })?,
-                target,
-                depth + 1,
-            )?);
+            match pac_routes(&pac, target, depth) {
+                Ok(resolved) => routes.extend(resolved),
+                Err(error) => {
+                    crate::progress::check_cancelled()?;
+                    crate::log!(Warning, "proxy:pac", "PAC route unavailable: {error:#}");
+                    pac_error = Some(error);
+                }
+            }
         } else if kind_is(&kind, unsafe { kCFProxyTypeAutoConfigurationJavaScript }) {
             let script = value(&proxy, unsafe { kCFProxyAutoConfigurationJavaScriptKey })
                 .and_then(|v| v.downcast::<CFString>())
@@ -355,6 +360,11 @@ fn resolve(proxies: &Proxies, target: &CFURL, depth: usize) -> Result<Vec<Option
                 routes.push(Some(builder.build()?));
             }
         }
+    }
+    if routes.is_empty()
+        && let Some(error) = pac_error
+    {
+        return Err(error);
     }
     ensure!(
         !routes.is_empty(),

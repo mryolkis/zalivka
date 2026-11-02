@@ -21,7 +21,7 @@ pub(super) fn connect<S: Connection>(
     reconnect: impl FnMut(Duration) -> Result<S>,
 ) -> Result<()> {
     let mut auth: Option<Negotiate> = None;
-    handshake(
+    let final_token = handshake(
         stream,
         target,
         proxy,
@@ -34,10 +34,22 @@ pub(super) fn connect<S: Connection>(
             auth.as_mut().unwrap().step(challenge)
         },
     )?;
-    // GSSAPI needs a completion check; SSPI validates tokens inside step().
+    // Some CONNECT proxies accept the client's ticket without returning an
+    // AP-REP/SPNEGO final token. Mutual authentication is optional for this
+    // transport; TLS still authenticates the destination (and HTTPS proxy).
+    // When a final token is supplied, it must complete GSSAPI successfully.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if let Some(auth) = auth {
+    if final_token && let Some(auth) = &auth {
         auth.finish()?;
+    }
+    if auth.is_some() {
+        crate::log!(
+            Info,
+            "proxy:auth",
+            "{}:{}: CONNECT authenticated; server token={final_token}",
+            proxy.host(),
+            proxy.port()
+        );
     }
     Ok(())
 }
@@ -159,7 +171,7 @@ fn handshake<S: Connection>(
     timeout: Duration,
     mut reconnect: impl FnMut(Duration) -> Result<S>,
     mut authenticate: impl FnMut(&str, Option<&str>) -> Result<String>,
-) -> Result<()> {
+) -> Result<bool> {
     let deadline = Instant::now() + timeout;
     let explicit = proxy.username().is_some() || proxy.password().is_some();
     let mut authorization = explicit.then(|| {
@@ -222,25 +234,19 @@ fn handshake<S: Connection>(
             .collect();
         let offered: Vec<_> = offered.iter().flat_map(|value| challenges(value)).collect();
         if (200..300).contains(&code) {
-            if let Some(scheme) = selected {
-                if let Some((_, Some(token))) = offered
+            let mut final_token = false;
+            if let Some(scheme) = selected
+                && let Some((_, Some(token))) = offered
                     .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(scheme))
-                {
-                    ensure!(
-                        authenticate(scheme, Some(token))?.is_empty(),
-                        "proxy authentication requires another exchange after CONNECT success"
-                    );
-                }
-                crate::log!(
-                    Info,
-                    "proxy:auth",
-                    "{}:{}: {scheme}; authentication complete",
-                    proxy.host(),
-                    proxy.port()
+                    .find(|(name, token)| name.eq_ignore_ascii_case(scheme) && token.is_some())
+            {
+                final_token = true;
+                ensure!(
+                    authenticate(scheme, Some(token))?.is_empty(),
+                    "proxy authentication requires another exchange after CONNECT success"
                 );
             }
-            return Ok(());
+            return Ok(final_token);
         }
         let schemes: Vec<_> = offered.iter().map(|(name, _)| *name).collect();
         ensure!(
