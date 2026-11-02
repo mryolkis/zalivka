@@ -2114,9 +2114,14 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
         );
         let mut reached = [false; 4];
         let labels = ["Device", "Firmware", "Start Revive", "Erase and restore"];
-        for _ in 0..50 {
+        // In the smallest viewport, 35-point wheel steps can skip a fully
+        // visible heading between frames. Sample the same range in fine steps.
+        for _ in 0..350 {
             for (reached, label) in reached.iter_mut().zip(labels) {
                 *reached |= visible_text_rect(&output, label).is_some();
+            }
+            if reached.iter().all(|reached| *reached) {
+                break;
             }
             output = render_pass(
                 &ctx,
@@ -2128,7 +2133,7 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
                             phase: egui::TouchPhase::Move,
                             source: egui::MouseWheelSource::Unknown,
                             unit: egui::MouseWheelUnit::Point,
-                            delta: egui::vec2(0.0, -35.0),
+                            delta: egui::vec2(0.0, -5.0),
                             modifiers: egui::Modifiers::NONE,
                         },
                     ],
