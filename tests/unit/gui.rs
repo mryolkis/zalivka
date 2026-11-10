@@ -2058,94 +2058,118 @@ fn notifications_keep_content_in_place_and_their_actions_work_in_small_windows()
 
 #[test]
 fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_open() {
-    for size in [
-        egui::vec2(1020.0, 630.0),
-        egui::vec2(700.0, 480.0),
-        egui::vec2(480.0, 360.0),
-    ] {
-        let ctx = egui::Context::default();
-        configure(&ctx);
-        let mut app = english_app();
-        app.journal_open = true;
-        app.host = Ok(Some(drivers::HostStatus {
-            apple_service_installed: false,
-            apple_service_running: false,
-            apple_driver_installed: false,
-            apple_kis_driver_installed: false,
-            compatible_usb_driver: false,
-        }));
-        for _ in 0..20 {
-            app.journal_line(Record::new(Level::Error, "test", "Journal check"));
-        }
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-        let mut output = egui::FullOutput::default();
-        // Also exercise shrinking a window after egui has saved a taller journal.
-        for frame_size in [egui::vec2(1280.0, 1000.0), size, size, size] {
-            output = render_pass(
-                &ctx,
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, frame_size)),
-                    ..Default::default()
-                },
-                |ctx| ctx.root_ui(|ui| app.view(ui)),
-            );
-        }
-        let heading = visible_text_rect(&output, "Mac restore")
-            .unwrap_or_else(|| panic!("main content hidden at {size:?}"));
-        assert!(screen.contains_rect(heading));
-        for label in ["Copy", "Save journal", "Hide"] {
+    for language in ["en", "ru"] {
+        for size in [
+            egui::vec2(1020.0, 630.0),
+            egui::vec2(700.0, 480.0),
+            egui::vec2(480.0, 360.0),
+        ] {
+            let ctx = egui::Context::default();
+            configure(&ctx);
+            let mut app = english_app();
+            app.localization.select(language);
+            let (heading_label, control_labels, labels) = {
+                let _language = app.localization.enter();
+                use zalivka::localization::text;
+                (
+                    text("Mac restore"),
+                    [
+                        "Copy",
+                        "Save journal",
+                        "Open logs folder",
+                        "Hide",
+                        "Technical details",
+                    ]
+                    .map(text),
+                    ["Device", "Firmware", "Start Revive", "Erase and restore"].map(text),
+                )
+            };
+            app.journal_open = true;
+            app.host = Ok(Some(drivers::HostStatus {
+                apple_service_installed: false,
+                apple_service_running: false,
+                apple_driver_installed: false,
+                apple_kis_driver_installed: false,
+                compatible_usb_driver: false,
+            }));
+            for _ in 0..20 {
+                app.journal_line(Record::new(Level::Error, "test", "Journal check"));
+            }
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let mut output = egui::FullOutput::default();
+            // Also exercise shrinking a window after egui has saved a taller journal.
+            for frame_size in [egui::vec2(1280.0, 1000.0), size, size, size] {
+                output = render_pass(
+                    &ctx,
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, frame_size)),
+                        ..Default::default()
+                    },
+                    |ctx| ctx.root_ui(|ui| app.view(ui)),
+                );
+            }
+            let heading = visible_text_rect(&output, &heading_label)
+                .unwrap_or_else(|| panic!("{language}: main content hidden at {size:?}"));
+            assert!(screen.contains_rect(heading));
+            for label in &control_labels {
+                assert!(
+                    visible_text_rect(&output, label).is_some(),
+                    "journal control {label} clipped at {size:?}"
+                );
+            }
+            let journal_rows: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| {
+                    if let egui::Shape::Text(text) = &shape.shape
+                        && text.galley.text().contains("Journal check")
+                    {
+                        let rect = text.galley.rect.translate(text.pos.to_vec2());
+                        return Some((rect, shape.clip_rect));
+                    }
+                    None
+                })
+                .collect();
             assert!(
-                visible_text_rect(&output, label).is_some(),
-                "journal control {label} clipped at {size:?}"
+                journal_rows
+                    .iter()
+                    .any(|(rect, clip)| rect.top() >= clip.top() && rect.bottom() <= clip.bottom()),
+                "journal rows hidden at {size:?}: {journal_rows:?}"
             );
-        }
-        assert!(
-            output.shapes.iter().any(|shape| {
-                if let egui::Shape::Text(text) = &shape.shape
-                    && text.galley.text().contains("Journal check")
-                {
-                    let rect = text.galley.rect.translate(text.pos.to_vec2());
-                    return rect.top() >= shape.clip_rect.top()
-                        && rect.bottom() <= shape.clip_rect.bottom();
+            let mut reached = [false; 4];
+            // In the smallest viewport, 35-point wheel steps can skip a fully
+            // visible heading between frames. Sample the same range in fine steps.
+            for _ in 0..350 {
+                for (reached, label) in reached.iter_mut().zip(&labels) {
+                    *reached |= visible_text_rect(&output, label).is_some();
                 }
-                false
-            }),
-            "journal rows hidden at {size:?}"
-        );
-        let mut reached = [false; 4];
-        let labels = ["Device", "Firmware", "Start Revive", "Erase and restore"];
-        // In the smallest viewport, 35-point wheel steps can skip a fully
-        // visible heading between frames. Sample the same range in fine steps.
-        for _ in 0..350 {
-            for (reached, label) in reached.iter_mut().zip(labels) {
-                *reached |= visible_text_rect(&output, label).is_some();
+                if reached.iter().all(|reached| *reached) {
+                    break;
+                }
+                output = render_pass(
+                    &ctx,
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        events: vec![
+                            egui::Event::PointerMoved(heading.center()),
+                            egui::Event::MouseWheel {
+                                phase: egui::TouchPhase::Move,
+                                source: egui::MouseWheelSource::Unknown,
+                                unit: egui::MouseWheelUnit::Point,
+                                delta: egui::vec2(0.0, -5.0),
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    |ctx| ctx.root_ui(|ui| app.view(ui)),
+                );
             }
-            if reached.iter().all(|reached| *reached) {
-                break;
+            for (reached, label) in reached.into_iter().zip(labels) {
+                assert!(reached, "cannot scroll to {label} at {size:?}");
             }
-            output = render_pass(
-                &ctx,
-                egui::RawInput {
-                    screen_rect: Some(screen),
-                    events: vec![
-                        egui::Event::PointerMoved(heading.center()),
-                        egui::Event::MouseWheel {
-                            phase: egui::TouchPhase::Move,
-                            source: egui::MouseWheelSource::Unknown,
-                            unit: egui::MouseWheelUnit::Point,
-                            delta: egui::vec2(0.0, -5.0),
-                            modifiers: egui::Modifiers::NONE,
-                        },
-                    ],
-                    ..Default::default()
-                },
-                |ctx| ctx.root_ui(|ui| app.view(ui)),
-            );
+            assert!(app.job.is_none());
         }
-        for (reached, label) in reached.into_iter().zip(labels) {
-            assert!(reached, "cannot scroll to {label} at {size:?}");
-        }
-        assert!(app.job.is_none());
     }
 }
 
