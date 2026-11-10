@@ -28,4 +28,5 @@ pub use desktop::open_directory;
 #[cfg(all(windows, feature = "gui"))]
 pub use desktop::{attach_parent_console, system_font};
 pub(crate) use localization::system_languages;
+pub(crate) use paths::available_space;
 pub use paths::{app_directory, config_directory};

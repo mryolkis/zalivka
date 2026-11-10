@@ -2,6 +2,18 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+pub(crate) fn available_space(path: &std::path::Path) -> std::io::Result<u64> {
+    #[cfg(windows)]
+    {
+        super::windows::available_space(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let stat = rustix::fs::statvfs(path)?;
+        Ok(stat.f_frsize.saturating_mul(stat.f_bavail))
+    }
+}
+
 fn absolute_env(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .map(PathBuf::from)

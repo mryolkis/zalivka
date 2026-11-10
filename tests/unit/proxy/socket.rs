@@ -240,7 +240,7 @@ fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
     let mut roots = RootCertStore::empty();
     roots.add(cert).unwrap();
     let trusted = Arc::new(
-        ClientConfig::builder_with_provider(Arc::new(oxitls_rustcrypto_provider::provider()))
+        ClientConfig::builder_with_provider(Arc::new(rustls_rustcrypto::provider()))
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_root_certificates(roots)

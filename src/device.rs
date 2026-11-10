@@ -112,7 +112,7 @@ fn hex_number(value: &str) -> Result<u64> {
 }
 
 pub fn decode_hex(s: &str) -> Result<Vec<u8>> {
-    hex::decode(s).context("expected an even number of hexadecimal digits")
+    base16ct::mixed::decode_vec(s).context("expected an even number of hexadecimal digits")
 }
 
 pub fn parse_ecid(s: &str) -> std::result::Result<u64, String> {

@@ -217,7 +217,7 @@ fn verify_chain(leaf: &[u8], intermediate: &[u8], root: &[u8], now: UnixTime) ->
     let intermediates = [CertificateDer::from(intermediate)];
     let certificate =
         webpki::EndEntityCert::try_from(&leaf_der).context("invalid BAA leaf certificate")?;
-    let provider = oxitls_rustcrypto_provider::provider();
+    let provider = rustls_rustcrypto::provider();
     let path = certificate
         .verify_for_usage(
             provider.signature_verification_algorithms.all,

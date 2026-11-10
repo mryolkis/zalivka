@@ -368,7 +368,7 @@ fn https_proxy_uses_its_own_roots_with_tss_destination_trust() {
         .root_certs(ureq::tls::RootCerts::new_with_certs(&[
             ureq::tls::Certificate::from_der(certificate.as_ref()).to_owned(),
         ]))
-        .unversioned_rustls_crypto_provider(Arc::new(oxitls_rustcrypto_provider::provider()))
+        .unversioned_rustls_crypto_provider(Arc::new(rustls_rustcrypto::provider()))
         .build();
     let proxy_config = ureq::Agent::config_builder()
         .tls_config(tls)

@@ -206,7 +206,7 @@ fn automatic_download_reuses_compatible_cache_without_rehashing_the_archive() {
     let expected = directory.path().join(format!(
         "{}-{}.ipsw",
         release.build,
-        hex::encode(release.sha1)
+        base16ct::lower::encode_string(&release.sha1)
     ));
     std::fs::copy(file.path(), &expected).unwrap();
     let cached = catalog::ensure_cached(
@@ -291,7 +291,7 @@ fn cached_firmware_verifies_required_components_without_scanning_other_identitie
         let path = directory.path().join(format!(
             "{}-{}.ipsw",
             release.build,
-            hex::encode(release.sha1)
+            base16ct::lower::encode_string(&release.sha1)
         ));
         std::fs::copy(file.path(), &path).unwrap();
         let mut ipsw = catalog::ensure_cached(
@@ -327,7 +327,7 @@ fn cached_firmware_handoff_retains_the_open_archive() {
     let path = directory.path().join(format!(
         "{}-{}.ipsw",
         release.build,
-        hex::encode(release.sha1)
+        base16ct::lower::encode_string(&release.sha1)
     ));
     std::fs::copy(file.path(), &path).unwrap();
     let mut ipsw = catalog::ensure_cached(
@@ -366,7 +366,7 @@ fn cached_revive_selects_update_and_preserves_the_explicit_identity() {
     let path = directory.path().join(format!(
         "{}-{}.ipsw",
         release.build,
-        hex::encode(release.sha1)
+        base16ct::lower::encode_string(&release.sha1)
     ));
     std::fs::copy(file.path(), &path).unwrap();
     let mut device = device_info();
@@ -402,7 +402,7 @@ fn automatic_download_refuses_corrupt_cache_and_unsafe_build_names() {
     let path = directory.path().join(format!(
         "{}-{}.ipsw",
         release.build,
-        hex::encode(release.sha1)
+        base16ct::lower::encode_string(&release.sha1)
     ));
     std::fs::write(&path, b"corrupt").unwrap();
     assert!(

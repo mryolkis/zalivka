@@ -17,7 +17,7 @@ pub(crate) fn public_roots() -> ureq::tls::RootCerts {
 pub(crate) fn verifier(
     extra: Option<CertificateDer<'static>>,
 ) -> Result<Arc<dyn ServerCertVerifier>> {
-    let provider = Arc::new(oxitls_rustcrypto_provider::provider());
+    let provider = Arc::new(rustls_rustcrypto::provider());
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     let verifier = Arc::new(if let Some(root) = extra {
         rustls_platform_verifier::Verifier::new_with_extra_roots([root], provider)?

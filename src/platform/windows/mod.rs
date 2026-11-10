@@ -53,6 +53,30 @@ pub(crate) fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(Some(0)).collect()
 }
 
+pub(crate) fn available_space(path: &std::path::Path) -> std::io::Result<u64> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumePathNameW};
+
+    let path = wide(path);
+    let mut volume = vec![0u16; 32768];
+    let mut available = 0;
+    // SAFETY: path is NUL terminated; volume and available are valid output
+    // buffers. Resolve the volume first so file paths are accepted as well.
+    unsafe {
+        if GetVolumePathNameW(path.as_ptr(), volume.as_mut_ptr(), volume.len() as u32) == 0
+            || GetDiskFreeSpaceExW(
+                volume.as_ptr(),
+                &mut available,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ) == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    // The first output respects the caller's disk quota.
+    Ok(available)
+}
+
 pub(crate) fn windows_directory() -> Result<PathBuf> {
     let mut buffer = [0u16; 32768];
     let len = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;

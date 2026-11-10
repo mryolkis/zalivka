@@ -9,7 +9,7 @@ fn vectors() -> serde_json::Value {
 fn options(value: &serde_json::Value) -> Options {
     Options {
         key: Some(
-            hex::decode(value["key"].as_str().unwrap())
+            base16ct::mixed::decode_vec(value["key"].as_str().unwrap())
                 .unwrap()
                 .try_into()
                 .unwrap(),
@@ -176,7 +176,7 @@ fn real_apple_fcs_and_first_lzfse_segment_match_the_reference_tools() {
         "../../fixtures/ipsw-verification/aea-first-segment.json"
     ))
     .unwrap();
-    let key = hex::decode(expected["archive_key"].as_str().unwrap()).unwrap();
+    let key = base16ct::mixed::decode_vec(expected["archive_key"].as_str().unwrap()).unwrap();
     let public = match PublicFcs::from_prefix(bytes).unwrap() {
         Prefix::Public(public) => public,
         _ => panic!("real Apple public FCS metadata"),
@@ -195,7 +195,10 @@ fn real_apple_fcs_and_first_lzfse_segment_match_the_reference_tools() {
         expected["encrypted_size"].as_u64().unwrap(),
         &opts,
         |plaintext| {
-            outputs.push((plaintext.len(), hex::encode(Sha256::digest(plaintext))));
+            outputs.push((
+                plaintext.len(),
+                base16ct::lower::encode_string(&Sha256::digest(plaintext)),
+            ));
             Ok(())
         },
     );

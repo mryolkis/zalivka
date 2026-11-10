@@ -16,7 +16,7 @@ pub(crate) fn read_limited(reader: impl Read, limit: u64, error: &str) -> Result
 
 pub fn available(path: &Path) -> Result<u64> {
     let path = path.canonicalize().context("locating storage volume")?;
-    fs4::available_space(path).context("checking available storage")
+    crate::platform::available_space(&path).context("checking available storage")
 }
 
 pub fn require(path: &Path, bytes: u64) -> Result<()> {

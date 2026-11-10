@@ -219,7 +219,7 @@ pub fn ensure_cached(
     let path = directory.join(format!(
         "{}-{}.ipsw",
         release.build,
-        hex::encode(release.sha1)
+        base16ct::lower::encode_string(&release.sha1)
     ));
     if path.exists() {
         // Restore verifies the components it uses; do not reread the entire

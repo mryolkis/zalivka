@@ -1,12 +1,18 @@
 //! Loopback helpers shared by HTTP, TLS and proxy unit tests.
+use p256::{
+    ecdsa::{Signature, SigningKey, signature::Signer},
+    elliptic_curve::Generate,
+    pkcs8::EncodePrivateKey,
+};
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+    KeyIdMethod, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PublicKeyData,
 };
 use rustls::{
     ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
+use sha2::{Digest, Sha256};
 use std::{
     io::{self, Read},
     net::{TcpListener, TcpStream},
@@ -20,6 +26,41 @@ struct Loopback {
     root: CertificateDer<'static>,
     leaf: CertificateDer<'static>,
     key: PrivateKeyDer<'static>,
+}
+
+// Reuse the application's P-256 implementation for certificate signing.
+struct CertificateKey {
+    signing: SigningKey,
+    public: p256::Sec1Point,
+}
+
+impl CertificateKey {
+    fn generate() -> Result<Self, rcgen::Error> {
+        let signing =
+            SigningKey::try_generate().map_err(|_| rcgen::Error::KeyGenerationUnavailable)?;
+        let public = signing.verifying_key().to_sec1_point(false);
+        Ok(Self { signing, public })
+    }
+}
+
+impl PublicKeyData for CertificateKey {
+    fn der_bytes(&self) -> &[u8] {
+        self.public.as_bytes()
+    }
+
+    fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+        &PKCS_ECDSA_P256_SHA256
+    }
+}
+
+impl rcgen::SigningKey for CertificateKey {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
+        let signature: Signature = self
+            .signing
+            .try_sign(message)
+            .map_err(|_| rcgen::Error::RemoteKeyError)?;
+        Ok(signature.to_der().as_bytes().to_vec())
+    }
 }
 
 /// macOS refuses to trust TLS server certificates with an over-long validity
@@ -45,7 +86,10 @@ fn generate_loopback() -> Result<Loopback, rcgen::Error> {
     authority_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     authority_params.not_before = not_before;
     authority_params.not_after = not_after;
-    let authority_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+    authority_params.serial_number = Some(1u64.into());
+    let authority_key = CertificateKey::generate()?;
+    authority_params.key_identifier_method =
+        KeyIdMethod::PreSpecified(Sha256::digest(authority_key.der_bytes())[..20].to_vec());
     let authority = authority_params.self_signed(&authority_key)?;
 
     let mut server_params =
@@ -59,7 +103,10 @@ fn generate_loopback() -> Result<Loopback, rcgen::Error> {
     server_params.use_authority_key_identifier_extension = true;
     server_params.not_before = not_before;
     server_params.not_after = not_after;
-    let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+    server_params.serial_number = Some(2u64.into());
+    let server_key = CertificateKey::generate()?;
+    server_params.key_identifier_method =
+        KeyIdMethod::PreSpecified(Sha256::digest(server_key.der_bytes())[..20].to_vec());
     let server = server_params.signed_by(
         &server_key,
         &Issuer::from_params(&authority_params, &authority_key),
@@ -68,7 +115,14 @@ fn generate_loopback() -> Result<Loopback, rcgen::Error> {
     Ok(Loopback {
         root: authority.der().clone(),
         leaf: server.der().clone(),
-        key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key.serialize_der())),
+        key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            server_key
+                .signing
+                .to_pkcs8_der()
+                .map_err(|_| rcgen::Error::CouldNotParseKeyPair)?
+                .as_bytes()
+                .to_vec(),
+        )),
     })
 }
 
@@ -85,7 +139,7 @@ pub(crate) fn localhost_leaf() -> CertificateDer<'static> {
 
 pub(crate) fn tls_server_config() -> Arc<ServerConfig> {
     Arc::new(
-        ServerConfig::builder_with_provider(Arc::new(oxitls_rustcrypto_provider::provider()))
+        ServerConfig::builder_with_provider(Arc::new(rustls_rustcrypto::provider()))
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_no_client_auth()

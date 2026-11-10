@@ -261,7 +261,7 @@ fn accept(listener: TcpListener) -> TcpStream {
 }
 
 fn tls_configs() -> (Arc<ServerConfig>, Arc<ClientConfig>) {
-    let provider = Arc::new(oxitls_rustcrypto_provider::provider());
+    let provider = Arc::new(rustls_rustcrypto::provider());
     let certificate =
         CertificateDer::from(include_bytes!("../../../fixtures/proxy/fdr-lab.der").to_vec());
     let server = Arc::new(

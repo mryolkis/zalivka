@@ -88,7 +88,7 @@ pub(crate) fn tss_agent() -> ureq::Agent {
 pub(crate) fn tls_config(roots: ureq::tls::RootCerts) -> ureq::tls::TlsConfig {
     ureq::tls::TlsConfig::builder()
         .root_certs(roots)
-        .unversioned_rustls_crypto_provider(Arc::new(oxitls_rustcrypto_provider::provider()))
+        .unversioned_rustls_crypto_provider(Arc::new(rustls_rustcrypto::provider()))
         .build()
 }
 

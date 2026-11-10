@@ -716,7 +716,8 @@ fn encrypted_aea_digests_are_explicitly_deferred_and_archive_hash_can_be_checked
         .unwrap();
     assert_eq!(report.aea_content_digests_not_checked, ["image.dmg.aea"]);
     assert!(!report.archive_checksum_verified);
-    let checksum = hex::encode(sha2::Sha256::digest(std::fs::read(file.path()).unwrap()));
+    let checksum =
+        base16ct::lower::encode_string(&sha2::Sha256::digest(std::fs::read(file.path()).unwrap()));
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_zalivka"))
         .arg("verify")
         .arg(file.path())
@@ -1649,7 +1650,7 @@ fn full_verification_checks_aea_plaintext_and_the_cli_accepts_explicit_keys() {
         );
         let options = zalivka::aea::Options {
             key: Some(
-                hex::decode(vectors["key"].as_str().unwrap())
+                base16ct::mixed::decode_vec(vectors["key"].as_str().unwrap())
                     .unwrap()
                     .try_into()
                     .unwrap(),

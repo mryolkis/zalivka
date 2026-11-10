@@ -215,7 +215,7 @@ fn nonce_slots_use_positive_der_integers_and_apple_private_tags() {
 #[test]
 fn local_policy_and_im4r_nonce_slot_tbm_are_encoded() {
     assert_eq!(
-        hex::encode(img4::empty_local_policy()),
+        base16ct::lower::encode_string(&img4::empty_local_policy()),
         "30141604494d345016046c706f6c1603312e30040100"
     );
     let mut id = identity();

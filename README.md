@@ -257,6 +257,11 @@ On Debian/Ubuntu, Linux runtime dependencies are `libproxy1v5` and
 `libgssapi-krb5-2`, including the distribution's desktop/PAC libproxy modules.
 macOS uses built-in CFNetwork, SystemConfiguration and GSS frameworks.
 
+HTTPS downloads use the host's system certificate trust on Windows, macOS and
+Linux. A corporate TLS interception proxy can serve IPSW downloads when its CA
+is installed and trusted on that host. On Linux, restart Zalivka after changing
+the system CA bundle so the new roots are loaded.
+
 For FDR, the target Mac establishes TLS through Zalivka's tunnel. The network
 must allow CONNECT to `tbsc.apple.com:443` without TLS interception; the host's
 corporate trust roots do not apply to that connection.

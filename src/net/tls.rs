@@ -15,7 +15,7 @@ use ureq::unversioned::transport::{
 };
 
 pub(crate) fn config(extra: Option<CertificateDer<'static>>) -> Result<Arc<ClientConfig>> {
-    let provider = Arc::new(oxitls_rustcrypto_provider::provider());
+    let provider = Arc::new(rustls_rustcrypto::provider());
     Ok(Arc::new(
         ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()?

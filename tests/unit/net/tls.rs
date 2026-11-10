@@ -47,49 +47,60 @@ fn native_tls_transport_exchanges_http_data_and_reuses_a_verified_connection() {
             connect_with_config(details, raw.boxed(), self.0.clone()).map(Some)
         }
     }
-    let server_config = crate::test_net::tls_server_config();
-    let client_config = config(Some(crate::test_net::localhost_root())).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = thread::spawn(move || {
-        let (socket, _) = listener.accept().unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        socket
-            .set_write_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let connection = rustls::ServerConnection::new(server_config).unwrap();
-        let mut stream = StreamOwned::new(connection, socket);
-        for number in 1..=2 {
-            assert!(
-                crate::test_net::read_header(&mut stream)
-                    .starts_with(&format!("GET /{number} HTTP/1.1"))
-            );
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        let server_config = crate::test_net::tls_server_config();
+        let client_config = Arc::new(
+            ClientConfig::builder_with_provider(Arc::new(rustls_rustcrypto::provider()))
+                .with_protocol_versions(&[version])
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(
+                    verifier(Some(crate::test_net::localhost_root())).unwrap(),
+                )
+                .with_no_client_auth(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
-            stream.flush().unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let connection = rustls::ServerConnection::new(server_config).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            for number in 1..=2 {
+                assert!(
+                    crate::test_net::read_header(&mut stream)
+                        .starts_with(&format!("GET /{number} HTTP/1.1"))
+                );
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                    .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        let agent = ureq::Agent::with_parts(
+            ureq::Agent::config_builder()
+                .proxy(None)
+                .tls_config(crate::net::tls_config(
+                    ureq::tls::RootCerts::PlatformVerifier,
+                ))
+                .build(),
+            Client(client_config),
+            ureq::unversioned::resolver::DefaultResolver::default(),
+        );
+        for number in 1..=2 {
+            let mut response = agent
+                .get(format!("https://localhost:{port}/{number}"))
+                .call()
+                .unwrap();
+            assert_eq!(response.body_mut().read_to_string().unwrap(), "OK");
         }
-    });
-    let agent = ureq::Agent::with_parts(
-        ureq::Agent::config_builder()
-            .proxy(None)
-            .tls_config(crate::net::tls_config(
-                ureq::tls::RootCerts::PlatformVerifier,
-            ))
-            .build(),
-        Client(client_config),
-        ureq::unversioned::resolver::DefaultResolver::default(),
-    );
-    for number in 1..=2 {
-        let mut response = agent
-            .get(format!("https://localhost:{port}/{number}"))
-            .call()
-            .unwrap();
-        assert_eq!(response.body_mut().read_to_string().unwrap(), "OK");
+        server.join().unwrap();
     }
-    server.join().unwrap();
 }
 
 #[test]
@@ -119,7 +130,7 @@ fn tss_tls_validates_apple_chain_hostname_signature_and_expiration() {
     roots.add(root).unwrap();
     let chain = rustls::client::WebPkiServerVerifier::builder_with_provider(
         Arc::new(roots),
-        Arc::new(oxitls_rustcrypto_provider::provider()),
+        Arc::new(rustls_rustcrypto::provider()),
     )
     .build()
     .unwrap();
