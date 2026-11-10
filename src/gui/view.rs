@@ -96,6 +96,14 @@ impl App {
                             {
                                 self.pick(Picker::Log, &ctx);
                             }
+                            if ui.small_button(tr("Open logs folder")).clicked()
+                                && let Err(error) =
+                                    zalivka::storage::log_directory().and_then(|directory| {
+                                        zalivka::platform::open_directory(&directory)
+                                    })
+                            {
+                                self.error("Could not open the logs folder", format!("{error:#}"));
+                            }
                             if ui
                                 .add_enabled(
                                     !self.logs.is_empty(),

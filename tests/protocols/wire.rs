@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn disconnected_plists_report_partial_header_or_body_without_losing_error_kind() {
+    for (input, expected) in [
+        (vec![0, 0], "reading plist length: received 2 of 4 bytes"),
+        (
+            vec![0, 0, 0, 10, b'<', b'?'],
+            "reading plist body: received 2 of 10 bytes",
+        ),
+    ] {
+        let error = wire::receive(&mut input.as_slice()).unwrap_err();
+        assert!(format!("{error:#}").contains(expected));
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+    }
+}
+
+#[test]
 fn unframed_xml_uses_element_boundaries_and_preserves_following_messages_and_binary_data() {
     for xml in [
         &b"<plist><!-- </plist> --><dict><key>Command</key><string>Payload</string></dict></plist>"[..],

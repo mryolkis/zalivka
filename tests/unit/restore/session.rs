@@ -12,6 +12,7 @@ enum End {
     FailAck,
     FailClose,
     RemoveAfterAck,
+    FailDiagnostic,
 }
 
 struct Attempt {
@@ -111,11 +112,6 @@ impl PacketTransport for Device {
         if port != RESTORED_PORT || data.is_empty() {
             return Ok(());
         }
-        // USB can report removal after an OUT transfer reached the device.
-        // The host must not replay StartRestore on the next connection.
-        if self.attempt.end == End::FailStart {
-            return self.disconnect();
-        }
         self.main_frame.extend_from_slice(data);
         while self.main_frame.len() >= 4 {
             let length = u32::from_be_bytes(self.main_frame[..4].try_into()?) as usize + 4;
@@ -124,7 +120,34 @@ impl PacketTransport for Device {
             }
             let message = wire::receive(&mut &self.main_frame[..length])?;
             self.main_frame.drain(..length);
-            if wire::string(&message, &["Request"]).ok() == Some("StartRestore") {
+            if wire::string(&message, &["Request"]).ok() == Some("QueryValue") {
+                if self.attempt.end == End::FailDiagnostic {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "diagnostic query timed out",
+                    )
+                    .into());
+                }
+                let key = wire::string(&message, &["QueryKey"])?;
+                let mut response = Vec::new();
+                wire::send(
+                    &mut response,
+                    &wire::dict([(key, wire::dict([] as [(&str, Value); 0]))]),
+                )?;
+                self.input.push_back(tcp_on(
+                    RESTORED_PORT,
+                    self.main_local,
+                    self.main_seq,
+                    0x10,
+                    &response,
+                ));
+                self.main_seq += response.len() as u32;
+            } else if wire::string(&message, &["Request"]).ok() == Some("StartRestore") {
+                // USB can report removal after StartRestore reached the device.
+                // The host must not replay it on the next connection.
+                if self.attempt.end == End::FailStart {
+                    return self.disconnect();
+                }
                 self.messages()?;
             } else if wire::string(&message, &["MsgType"]).ok() == Some("ReceivedFinalStatusMsg") {
                 match self.attempt.end {
@@ -208,25 +231,32 @@ fn run(attempts: Vec<Attempt>, attestation_mode: u64, log: Option<File>) -> Run 
     let mut attempts = attempts.into_iter();
     let mut output = Vec::new();
     let result = progress.run(|| {
-        crate::restore::session::run(&mut state, None, log, attestation, |_| {
-            let attempt = attempts.next().context("unexpected extra reconnection")?;
-            let version = attempt.version;
-            let packets = Arc::new(Mutex::new(Vec::new()));
-            output.push(packets.clone());
-            let session = Session::new(Device {
-                attempt,
-                input: VecDeque::new(),
-                output: packets,
-                main_local: 0,
-                main_seq: 1,
-                main_frame: Vec::new(),
-                removed: false,
-                close_failed: false,
-                deadline: Instant::now() + Duration::from_secs(5),
-            })?;
-            let main = session.connect(RESTORED_PORT)?;
-            Ok((session, main, version))
-        })
+        crate::restore::session::run(
+            &mut state,
+            None,
+            log,
+            crate::restore::diagnostics::Diagnostics::new(None),
+            attestation,
+            |_| {
+                let attempt = attempts.next().context("unexpected extra reconnection")?;
+                let version = attempt.version;
+                let packets = Arc::new(Mutex::new(Vec::new()));
+                output.push(packets.clone());
+                let session = Session::new(Device {
+                    attempt,
+                    input: VecDeque::new(),
+                    output: packets,
+                    main_local: 0,
+                    main_seq: 1,
+                    main_frame: Vec::new(),
+                    removed: false,
+                    close_failed: false,
+                    deadline: Instant::now() + Duration::from_secs(5),
+                })?;
+                let main = session.connect(RESTORED_PORT)?;
+                Ok((session, main, version))
+            },
+        )
     });
     // No background request may retain the archive context after the loop exits.
     assert_eq!(Arc::strong_count(&state.context), 1);
@@ -269,6 +299,13 @@ fn request(asynchronous: bool, kind: &str) -> Value {
 }
 
 fn replies(run: &Run, attempt: usize, port: u16) -> Vec<Value> {
+    all_replies(run, attempt, port)
+        .into_iter()
+        .filter(|v| wire::string(v, &["Request"]).ok() != Some("QueryValue"))
+        .collect()
+}
+
+fn all_replies(run: &Run, attempt: usize, port: u16) -> Vec<Value> {
     let bytes = bytes_on(&run.output[attempt], port);
     let mut input = bytes.as_slice();
     let mut messages = Vec::new();
@@ -338,8 +375,72 @@ fn service_lifecycle_serves_requests_joins_workers_and_records_every_message() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(recorded, messages);
+    let mut expected = vec![
+        wire::dict([("SavedDebugInfo", wire::dict([] as [(&str, Value); 0]))]),
+        wire::dict([("Logs", wire::dict([] as [(&str, Value); 0]))]),
+    ];
+    expected.extend(messages);
+    assert_eq!(recorded, expected);
     assert!(has_success(&run));
+}
+
+#[test]
+fn diagnostic_timeout_reconnects_before_start_and_never_repeats_queries() {
+    let run = run(
+        vec![
+            Attempt::new(vec![], End::FailDiagnostic),
+            Attempt::new(vec![status(0)], End::Close),
+        ],
+        0,
+        None,
+    );
+    run.result.as_ref().unwrap();
+    let first = all_replies(&run, 0, RESTORED_PORT);
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        wire::string(&first[0], &["QueryKey"]).unwrap(),
+        "SavedDebugInfo"
+    );
+    assert!(bytes_on(&run.output[0], 1082).is_empty());
+    let second = all_replies(&run, 1, RESTORED_PORT);
+    assert_eq!(
+        wire::string(&second[0], &["Request"]).unwrap(),
+        "StartRestore"
+    );
+    assert_eq!(
+        second
+            .iter()
+            .filter(|m| wire::string(m, &["Request"]).ok() == Some("StartRestore"))
+            .count(),
+        1
+    );
+    assert!(has_success(&run));
+}
+
+#[test]
+fn saved_logs_are_queried_before_start_and_crash_reports_keep_their_content() {
+    let crash = wire::dict([
+        ("MsgType", "RestoredCrash".into()),
+        (
+            "Backtrace",
+            "panic backtrace frame that must survive beyond a short preview"
+                .repeat(10)
+                .into(),
+        ),
+    ]);
+    let run = run(vec![Attempt::new(vec![crash], End::Close)], 0, None);
+    assert!(format!("{:#}", run.result.as_ref().unwrap_err()).contains("restored crashed"));
+    let sent = all_replies(&run, 0, RESTORED_PORT);
+    for (message, key) in sent.iter().take(2).zip(["SavedDebugInfo", "Logs"]) {
+        assert_eq!(wire::string(message, &["QueryKey"]).unwrap(), key);
+    }
+    assert_eq!(
+        wire::string(&sent[2], &["Request"]).unwrap(),
+        "StartRestore"
+    );
+    assert!(!has_success(&run));
+    let events = run.events.lock().unwrap();
+    assert!(events.iter().any(|e| matches!(e, Event::Log(r) if r.message.contains("RestoredCrash.Backtrace") && r.message.contains("short previewpanic backtrace"))));
 }
 
 #[test]
@@ -390,7 +491,7 @@ fn uncertain_start_write_is_not_replayed_but_fdr_failure_before_start_can_retry(
         };
         let run = run(vec![Attempt::new(vec![], end), second], 0, None);
         run.result.as_ref().unwrap();
-        let first = bytes_on(&run.output[0], RESTORED_PORT);
+        let first = replies(&run, 0, RESTORED_PORT);
         assert_eq!(first.is_empty(), end == End::FailFdr);
         let sent = replies(&run, 1, RESTORED_PORT);
         assert_eq!(sent.len(), if end == End::FailFdr { 2 } else { 1 });

@@ -45,6 +45,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read panic, USB and restore logs from an already running restore environment.
+    RestoreLogs {
+        #[arg(long, value_parser = parse_ecid)]
+        ecid: u64,
+        /// New directory for diagnostic plists; existing directories are never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Read iBoot variables; DFU optionally loads a signed iBSS into RAM, without starting restore.
     BootState {
         ipsw: PathBuf,
@@ -178,6 +186,10 @@ pub(super) fn run() -> Result<()> {
     zalivka::platform::attach_parent_console();
     let cli = Cli::parse();
     match cli.command {
+        Command::RestoreLogs { ecid, output } => {
+            restore::collect_logs(ecid, &output)?;
+            println!("Restore diagnostics saved to {}", output.display());
+        }
         #[cfg(target_os = "macos")]
         Command::EnterDfu => zalivka::macos::enter_dfu()?,
         #[cfg(target_os = "macos")]

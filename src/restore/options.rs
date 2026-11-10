@@ -86,6 +86,7 @@ pub fn options(id: &Identity) -> Result<Value> {
                     ("RestoreProtocol", true),
                     ("RestoreAttestation", true),
                     ("RestoredCrash", true),
+                    ("CrashLog", true),
                 ]
                 .into_iter()
                 .map(|(name, optional)| (name, optional.into())),

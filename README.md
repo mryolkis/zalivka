@@ -403,6 +403,51 @@ Logs omit binary payload dumps. Plist records show key fields, collection sizes
 and payload lengths. Long strings use a marked preview. CLI JSON reports and
 requested restored JSONL transcripts retain their full structured data.
 
+Restore and Revive now query `SavedDebugInfo` and `Logs` before `StartRestore`.
+Depending on the firmware and the previous boot, this can include `PanicLog`,
+`USBLog`, the previous exit status and restore logs. The technical journal expands
+these reports, crash messages and the complete `StartRestore` options. It also
+records the host version, firmware identity and boot plan. On failure, it records
+the last checkpoint, operation and data request, time since the last message, and
+the Apple USB and system usbmuxd inventories. Partial plist reads report how many
+header or body bytes arrived before EOF or an I/O error. Inventory changes are
+logged while waiting for the restore service. Enumeration does not claim or reset
+USB devices.
+Before booting the restore kernel, iBoot diagnostics record its build, boot stage,
+available failure reasons and boot breadcrumbs. The separate `boot-state`
+command also queries restore/OTA outcome and `restore-step-*` variables.
+
+The GUI automatically saves original diagnostic plists in a `.diagnostics`
+directory beside each operation's `.log` and `.jsonl` files. In the CLI, request
+the same evidence files using `--transcript`:
+
+```sh
+zalivka revive firmware.ipsw --ecid HEX_ECID --transcript attempt.jsonl 2>attempt.log
+```
+
+This creates `attempt.jsonl` and `attempt.diagnostics/`. Keep the journal, transcript
+and diagnostic directory together when reporting a failure. Diagnostic file-write
+failures are reported without aborting restoration. Text rendering is bounded;
+the original plist/transcript retains the full report, including binary payloads.
+Gzip-compressed and embedded plist reports are decoded for the technical journal
+when possible. Logs and saved reports may contain identifiers and device data.
+
+To collect available evidence from a target **already running the restore service**,
+without uploading firmware or starting a restore:
+
+```sh
+zalivka restore-logs --ecid HEX_ECID --output recovered-logs
+```
+
+The output directory must be new. Run this command with no other restore client
+connected to the target. The target ECID is checked before reading logs.
+This command does not boot a target out of DFU. If a panic disconnects the target,
+its panic report may only become available after the restore environment boots
+again; the next Revive/Restore attempt collects saved logs before starting work.
+An absent `PanicLog` does not prove that no panic occurred. Unsupported diagnostic
+queries are reported; a failed query forces a fresh connection before
+`StartRestore` so a late response cannot corrupt the restore message stream.
+
 ## License
 
 Zalivka source code is available under the [MIT License](LICENSE), except the

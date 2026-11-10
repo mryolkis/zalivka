@@ -3,6 +3,7 @@ use super::{
     AsyncRequests, RestoreSession,
     attestation::Attestation,
     connection::confirm_restore_service,
+    diagnostics::Diagnostics,
     events::{log_checkpoint, log_progress, operation_weights, record_message},
     options,
 };
@@ -155,9 +156,11 @@ impl RestoreSession {
         log: &mut Option<File>,
         attestation: &mut Attestation,
         provisioning_error: &mut bool,
+        diagnostics: &mut Diagnostics,
     ) -> Result<Value> {
         loop {
             let message = connection.receive(log)?;
+            diagnostics.observe(&message);
             match wire::string(&message, &["MsgType"])? {
                 "DataRequestMsg" => {
                     self.serve(&connection.session, &mut connection.main, &message)?
@@ -190,17 +193,10 @@ impl RestoreSession {
                         wire::send(&mut connection.main, &reply)?;
                     }
                 }
-                "RestoredCrash" => bail!("restored crashed: {message:?}"),
-                "PreviousRestoreLogMsg" => {
-                    for line in wire::string(&message, &["PreviousRestoreLog"])
-                        .unwrap_or("unavailable")
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                    {
-                        crate::log!(Trace, "restored:log", "Previous: {line}");
-                    }
-                }
+                "RestoredCrash" => bail!(
+                    "restored crashed; see RestoredCrash diagnostics and the saved plist/transcript"
+                ),
+                "PreviousRestoreLogMsg" | "CrashLog" => {}
                 name => bail!("unsupported restored message {name}; the restore did not complete"),
             }
         }
@@ -213,15 +209,18 @@ pub(super) fn run(
     state: &mut RestoreSession,
     mut bootx_error: Option<anyhow::Error>,
     mut log: Option<File>,
+    mut diagnostics: Diagnostics,
     mut attestation: Attestation,
     mut connect: impl FnMut(&crate::device::DeviceInfo) -> Result<(Session, MuxStream, u64)>,
 ) -> Result<()> {
     let mut started = false;
     let mut provisioning_error = false;
     let mut protocol = None;
+    let mut queried_diagnostics = false;
     for attempt in 0..=3 {
-        let (session, main, version) =
-            confirm_restore_service(bootx_error.take(), || connect(&state.context.device))?;
+        let (session, mut main, version) =
+            confirm_restore_service(bootx_error.take(), || connect(&state.context.device))
+                .inspect_err(|error| diagnostics.failure(error, None))?;
         if let Some(previous) = protocol {
             ensure!(
                 version == previous,
@@ -229,26 +228,38 @@ pub(super) fn run(
             );
         }
         protocol = Some(version);
+        if !started && !queried_diagnostics {
+            queried_diagnostics = true;
+            if let Err(error) = diagnostics.query(&mut main, &mut log) {
+                crate::log!(
+                    Warning,
+                    "diagnostics",
+                    "Reading saved restore logs: {error:#}; reconnecting before StartRestore without repeating diagnostic queries"
+                );
+                session.cancel();
+                continue;
+            }
+        }
         let outcome = (|| -> Result<_> {
             let mut connection = Connection::new(&session, main)?;
             if !started {
                 // A partially written StartRestore must never be replayed.
                 started = true;
-                wire::send(
-                    &mut connection.main,
-                    &wire::dict([
-                        ("Request", "StartRestore".into()),
-                        ("Label", "zalivka".into()),
-                        ("RestoreProtocolVersion", version.into()),
-                        ("RestoreOptions", options(&state.context.restore.identity)?),
-                    ]),
-                )?;
+                let request = wire::dict([
+                    ("Request", "StartRestore".into()),
+                    ("Label", "zalivka".into()),
+                    ("RestoreProtocolVersion", version.into()),
+                    ("RestoreOptions", options(&state.context.restore.identity)?),
+                ]);
+                diagnostics.capture("StartRestore", &request, crate::logging::Level::Debug);
+                wire::send(&mut connection.main, &request)?;
             }
             let message = state.await_final_status(
                 &mut connection,
                 &mut log,
                 &mut attestation,
                 &mut provisioning_error,
+                &mut diagnostics,
             )?;
             Ok((connection, message))
         })();
@@ -256,7 +267,9 @@ pub(super) fn run(
             Ok((mut connection, message)) => {
                 // Final status leaves the reconnect loop. Worker, attestation,
                 // ACK and closure failures are terminal regardless of USB state.
-                connection.finish(&message, &attestation)?;
+                connection
+                    .finish(&message, &attestation)
+                    .inspect_err(|error| diagnostics.failure(error, None))?;
                 crate::log!(
                     Debug,
                     "restore",
@@ -277,15 +290,20 @@ pub(super) fn run(
                 }
                 return Ok(());
             }
-            Err(error) if session.disconnected() && attempt < 3 => {
-                session.cancel();
-                crate::log!(
-                    Warning,
-                    "restore:usb",
-                    "Connection lost: {error:#}; waiting for Mac"
-                );
+            Err(error) => {
+                let removed = session.disconnected();
+                diagnostics.failure(&error, Some(removed));
+                if removed && attempt < 3 {
+                    session.cancel();
+                    crate::log!(
+                        Warning,
+                        "restore:usb",
+                        "Connection lost: {error:#}; waiting for Mac"
+                    );
+                } else {
+                    return Err(error);
+                }
             }
-            Err(error) => return Err(error),
         }
     }
     unreachable!()

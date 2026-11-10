@@ -1,5 +1,27 @@
 use super::*;
 
+#[test]
+fn restore_logs_needs_only_an_ecid_and_new_output_directory() {
+    match Cli::try_parse_from([
+        "zalivka",
+        "restore-logs",
+        "--ecid",
+        "000370603a8a4026",
+        "--output",
+        "evidence",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::RestoreLogs { ecid, output } => {
+            assert_eq!(ecid, 0x000370603a8a4026);
+            assert_eq!(output, PathBuf::from("evidence"));
+        }
+        _ => panic!("wrong command"),
+    }
+    assert!(Cli::try_parse_from(["zalivka", "restore-logs", "--ecid", "1234"]).is_err());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn native_dfu_helper_accepts_a_literal_prompt_and_stays_hidden() {

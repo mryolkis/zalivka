@@ -4,6 +4,7 @@ mod boot;
 mod connection;
 mod data;
 mod data_type;
+mod diagnostics;
 mod events;
 mod file_data;
 mod images;
@@ -16,6 +17,7 @@ mod session;
 
 pub use boot::{IBootStep, probe_boot_state};
 pub use connection::query_value;
+pub use diagnostics::collect_logs;
 pub use images::cpio_header;
 pub use options::{boot_arguments, options, supported_data_types};
 pub use requests::AsyncRequests;
@@ -151,8 +153,28 @@ pub(crate) fn run(
     let log = transcript
         .map(|p| File::options().write(true).create_new(true).open(p))
         .transpose()?;
+    let mut diagnostics =
+        diagnostics::Diagnostics::new(transcript.map(|path| path.with_extension("diagnostics")));
+    diagnostics.host();
+    diagnostics.capture(
+        "device",
+        &serde_json::to_string(&usb.info)?.into(),
+        crate::logging::Level::Debug,
+    );
+    diagnostics.capture(
+        "identity-info",
+        wire::get(&identity.value, &["Info"])?,
+        crate::logging::Level::Debug,
+    );
+    diagnostics.capture(
+        "boot-plan",
+        &serde_json::to_string(&stages)?.into(),
+        crate::logging::Level::Debug,
+    );
     let mut restore = SignedIdentity { identity, ticket };
-    let (device, bootx_error) = restore.boot(&mut ipsw, usb, &stages)?;
+    let (device, bootx_error) = restore
+        .boot(&mut ipsw, usb, &stages)
+        .inspect_err(|error| diagnostics.failure(error, None))?;
     let recovery = recovery
         .map(|identity| -> Result<SignedIdentity> {
             let request = if restore.identity.is_macos()? {
@@ -178,6 +200,7 @@ pub(crate) fn run(
         &mut state,
         bootx_error,
         log,
+        diagnostics,
         attestation,
         connection::wait_restored,
     )

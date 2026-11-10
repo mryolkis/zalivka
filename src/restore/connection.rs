@@ -49,11 +49,37 @@ pub(super) fn confirm_restore_service<T>(
 }
 
 pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, u64)> {
+    wait_restored_ecid(device.ecid, Some(device), Duration::from_secs(180))
+}
+
+pub(super) fn wait_restored_ecid(
+    ecid: u64,
+    expected: Option<&DeviceInfo>,
+    timeout: Duration,
+) -> Result<(Session, MuxStream, u64)> {
     crate::log!(Info, "restore", "Waiting for the Mac restore service");
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + timeout;
     let mut last_error = None;
     let mut reported_error = None;
+    let mut last_inventory = None;
+    let mut next_inventory = Instant::now();
     loop {
+        if Instant::now() >= next_inventory {
+            match super::diagnostics::usb_snapshot() {
+                Ok(inventory) if last_inventory.as_ref() != Some(&inventory) => {
+                    super::diagnostics::describe(
+                        "waiting-usb",
+                        &inventory,
+                        crate::logging::Level::Debug,
+                        crate::logging::publish,
+                    );
+                    last_inventory = Some(inventory);
+                }
+                Err(error) => crate::log!(Debug, "restore:usb", "Reading USB inventory: {error:#}"),
+                _ => {}
+            }
+            next_inventory = Instant::now() + Duration::from_secs(5);
+        }
         // Enumeration can fail during re-enumeration or daemon startup. Preserve
         // that diagnostic and retry within the same restore-service deadline.
         let candidates = match Session::candidates() {
@@ -78,16 +104,30 @@ pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, 
                 let hardware = query_value(&mut stream, "HardwareInfo")?;
                 let hw = wire::get(&hardware, &["HardwareInfo"])?;
                 ensure!(
-                    wire::number(wire::get(hw, &["UniqueChipID"])?)? == device.ecid,
+                    wire::number(wire::get(hw, &["UniqueChipID"])?)? == ecid,
                     "restore service ECID mismatch"
                 );
-                ensure!(
-                    wire::number(wire::get(hw, &["ChipID"])?)? == u64::from(device.chip_id),
-                    "restore service chip mismatch"
+                if let Some(device) = expected {
+                    ensure!(
+                        wire::number(wire::get(hw, &["ChipID"])?)? == u64::from(device.chip_id),
+                        "restore service chip mismatch"
+                    );
+                    ensure!(
+                        wire::number(wire::get(hw, &["BoardID"])?)? == u64::from(device.board_id),
+                        "restore service board mismatch"
+                    );
+                }
+                super::diagnostics::describe(
+                    "restore-service",
+                    &query,
+                    crate::logging::Level::Debug,
+                    crate::logging::publish,
                 );
-                ensure!(
-                    wire::number(wire::get(hw, &["BoardID"])?)? == u64::from(device.board_id),
-                    "restore service board mismatch"
+                super::diagnostics::describe(
+                    "HardwareInfo",
+                    hw,
+                    crate::logging::Level::Debug,
+                    crate::logging::publish,
                 );
                 stream.set_read_timeout(Duration::from_secs(300));
                 Ok((session, stream, version))
@@ -109,7 +149,7 @@ pub(super) fn wait_restored(device: &DeviceInfo) -> Result<(Session, MuxStream, 
                 .unwrap_or_else(|| anyhow::anyhow!("no USB multiplex device found"))
                 .context(format!(
                     "restore service did not appear for ECID {:016x}",
-                    device.ecid
+                    ecid
                 )));
         }
         std::thread::sleep(Duration::from_secs(1));

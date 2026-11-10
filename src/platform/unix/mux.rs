@@ -33,6 +33,11 @@ pub(crate) fn candidates() -> Result<Vec<Session>> {
     candidates_at(Path::new(SOCKET))
 }
 
+/// Read the daemon's inventory without connecting to or claiming a device.
+pub(crate) fn diagnostic_devices() -> Result<Value> {
+    Ok(Value::Array(list_devices(Path::new(SOCKET))?))
+}
+
 fn candidates_at(path: &Path) -> Result<Vec<Session>> {
     Ok(device_ids(path)?
         .into_iter()

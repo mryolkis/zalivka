@@ -149,6 +149,16 @@ pub fn probe_boot_state(path: &Path, ecid: u64, load_ibss: bool) -> Result<serde
         "upgrade-fallback-boot-command",
         "apfs-preboot-uuid",
         "panicmedic-timestamps",
+        "restore-outcome",
+        "restore-step-ids",
+        "restore-step-names",
+        "restore-step-results",
+        "restore-step-warnings",
+        "restore-step-error",
+        "restore-step-domains",
+        "restore-step-codes",
+        "restore-step-uptime",
+        "ota-outcome",
         "usbcfwflasherResult",
         "boot-stage",
         "build-version",
@@ -275,6 +285,30 @@ impl SignedIdentity {
             "Preparing bootloader: stage {}",
             if stage1 { 1 } else { 2 }
         );
+        if !stage1 {
+            for name in [
+                "build-version",
+                "build-style",
+                "boot-stage",
+                "recovery-reason",
+                "iboot-failure-reason",
+                "iboot-failure-reason-str",
+                "boot-breadcrumbs",
+                "failboot-breadcrumbs",
+            ] {
+                match dfu::getenv(usb, name) {
+                    Ok(value) if !value.is_empty() => {
+                        crate::log!(Debug, "boot:env", "{name}={value:?}")
+                    }
+                    Ok(_) => crate::log!(Debug, "boot:env", "{name}: unset or unavailable"),
+                    Err(error) => crate::log!(
+                        Debug,
+                        "boot:env",
+                        "Reading {name}: {error:#}; continuing boot preparation"
+                    ),
+                }
+            }
+        }
         for step in steps {
             match step {
                 IBootStep::Component(name) => {

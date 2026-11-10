@@ -251,7 +251,7 @@ pub fn try_receive(r: &mut impl Read) -> Result<Option<Value>> {
 
 pub fn receive(r: &mut impl Read) -> Result<Value> {
     let mut len = [0; 4];
-    r.read_exact(&mut len).context("reading plist length")?;
+    read_frame_part(r, &mut len, "length")?;
     receive_body(r, u32::from_be_bytes(len))
 }
 
@@ -262,11 +262,36 @@ pub(crate) fn receive_body(r: &mut impl Read, len: u32) -> Result<Value> {
         "invalid plist frame length {len}"
     );
     let mut buf = vec![0; len];
-    r.read_exact(&mut buf).context("reading plist body")?;
+    read_frame_part(r, &mut buf, "body")?;
     let value = decode_plist(&buf)?;
     crate::log!(Trace, "plist", "RX frame={len} B");
     crate::logging::plist("plist", "RX", &value);
     Ok(value)
+}
+
+fn read_frame_part(r: &mut impl Read, buffer: &mut [u8], part: &str) -> Result<()> {
+    let mut received = 0;
+    while received < buffer.len() {
+        let error = match r.read(&mut buffer[received..]) {
+            Ok(0) => std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "service closed the plist stream",
+            ),
+            Ok(n) => {
+                received += n;
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => error,
+        };
+        return Err(error).with_context(|| {
+            format!(
+                "reading plist {part}: received {received} of {} bytes",
+                buffer.len()
+            )
+        });
+    }
+    Ok(())
 }
 
 /// ASR uses unframed XML. Keep the caller's buffer across messages so read-ahead

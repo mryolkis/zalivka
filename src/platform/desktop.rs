@@ -35,7 +35,7 @@ pub fn open_directory(directory: &Path) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("opening firmware directory")?;
+        .context("opening directory")?;
     std::thread::spawn(move || {
         let _ = child.wait();
     });

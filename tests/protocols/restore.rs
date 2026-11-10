@@ -149,11 +149,22 @@ fn restore_capability_tables_match_26a434_compatibility_contract() {
                 }
             }
         }
-        for name in ["FDRSubmit", "CrashLog"] {
-            assert!(
-                wire::get(&request, &["RestoreOptions", "SupportedMessageTypes", name]).is_err()
-            );
-        }
+        assert!(
+            wire::get(
+                &request,
+                &["RestoreOptions", "SupportedMessageTypes", "FDRSubmit"]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            wire::get(
+                &request,
+                &["RestoreOptions", "SupportedMessageTypes", "CrashLog"]
+            )
+            .unwrap()
+            .as_boolean(),
+            Some(true)
+        );
         for name in [
             "AuthInstallCACert",
             "RecoveryOSIBEC",
