@@ -470,9 +470,7 @@ impl Ipsw {
         if unresolved.is_empty() {
             return Ok(());
         }
-        let variant = identity::recovery_variant(&id.value)?
-            .unwrap_or(wire::string(&id.value, &["Info", "Variant"])?);
-        let class = wire::string(&id.value, &["Info", "DeviceClass"])?;
+        let (variant, class) = identity::manifest_location(&id.value)?;
         let path = format!("Firmware/Manifests/restore/{variant}/apticket.{class}.im4m");
         validate_path(&path)?;
         if !self.contains(&path) {

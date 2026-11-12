@@ -236,10 +236,10 @@ impl Ipsw {
         let bytes = self.read_limited(path, 16 * 1024 * 1024)?;
         let ticket = img4::Manifest::parse(&bytes)
             .with_context(|| format!("parsing embedded IM4M {path}"))?;
-        let chip = ticket
+        ticket
             .number(b"CHIP")?
             .context("embedded IM4M has no CHIP")?;
-        let board = ticket
+        ticket
             .number(b"BORD")?
             .context("embedded IM4M has no BORD")?;
         let digests = ticket.digests()?;
@@ -257,20 +257,14 @@ impl Ipsw {
         let mut matching_hardware = 0;
         let mut mapped = false;
         for (index, value) in self.identity_values() {
-            let class = wire::string(value, &["Info", "DeviceClass"])?;
-            let declared_variant =
-                wire::optional(value, &["Info", "MacOSVariant"])?.and_then(plist::Value::as_string);
-            if !basename.starts_with(&format!("apticket.{class}."))
-                || declared_variant.is_some_and(|expected| expected != variant)
-            {
+            let (declared_variant, class) = super::identity::manifest_location(value)?;
+            if !basename.starts_with(&format!("apticket.{class}.")) || declared_variant != variant {
                 continue;
             }
             candidates += 1;
-            if wire::number(wire::get(value, &["ApChipID"])?)? != chip
-                || wire::number(wire::get(value, &["ApBoardID"])?)? != board
-            {
-                continue;
-            }
+            // Build identities require both IDs; generic AP requests may omit them.
+            wire::get(value, &["ApChipID"])?;
+            wire::get(value, &["ApBoardID"])?;
             if ticket.check_hardware(value).is_err() {
                 continue;
             }

@@ -1747,6 +1747,18 @@ fn embedded_tickets_check_all_matching_identities_and_reject_mismatched_measurem
             assert_eq!(report.im4m_manifests[0].identity_indexes, [0, 1]);
             assert_eq!(report.im4m_manifests[0].verified_digests, 1);
             assert!(!report.im4m_manifests[0].signature_verified);
+            for key in ["ApChipID", "ApBoardID"] {
+                let mut ipsw = Ipsw::open(file.path()).unwrap();
+                for id in Arc::make_mut(&mut ipsw.manifest)
+                    .as_dictionary_mut()
+                    .unwrap()["BuildIdentities"]
+                    .as_array_mut()
+                    .unwrap()
+                {
+                    id.as_dictionary_mut().unwrap().remove(key);
+                }
+                assert!(ipsw.verify_all_with_options(&Default::default()).is_err());
+            }
         }
     }
 }
@@ -1854,11 +1866,22 @@ fn embedded_ticket_selection_continues_past_a_different_identity_for_the_same_ha
             tss::ticket(&ticket).unwrap(),
         )],
     );
-    let report = Ipsw::open(file.path())
-        .unwrap()
-        .verify_all_with_options(&Default::default())
-        .unwrap();
-    assert_eq!(report.im4m_manifests[0].identity_indexes, [1]);
+    for key in ["MacOSVariant", "RecoveryVariant", "Variant"] {
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        let info = Arc::make_mut(&mut ipsw.manifest)
+            .as_dictionary_mut()
+            .unwrap()["BuildIdentities"]
+            .as_array_mut()
+            .unwrap()[1]
+            .as_dictionary_mut()
+            .unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap();
+        let variant = info.remove("MacOSVariant").unwrap();
+        info.insert(key.into(), variant);
+        let report = ipsw.verify_all_with_options(&Default::default()).unwrap();
+        assert_eq!(report.im4m_manifests[0].identity_indexes, [1]);
+    }
 }
 
 #[test]

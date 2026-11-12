@@ -23,7 +23,7 @@ use windows_sys::{
         },
         Foundation::{
             ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, GENERIC_READ,
-            GENERIC_WRITE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            GENERIC_WRITE, INVALID_HANDLE_VALUE, STATUS_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -258,6 +258,12 @@ impl<'a> IoctlRequest<'a> {
             {
                 return Ok(false);
             }
+            // Like HasOverlappedIoCompleted: an operation can finish with an
+            // error. Keep cancellation only for an actual outstanding request.
+            // SAFETY: the request owns OVERLAPPED; Windows updates Internal.
+            self.pending =
+                unsafe { ptr::read_volatile(ptr::addr_of!((*self.overlapped.get()).Internal)) }
+                    == STATUS_PENDING as usize;
             return Err(error);
         }
         self.pending = false;

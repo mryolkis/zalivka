@@ -273,6 +273,7 @@ fn raw_read_reports_worker_exit_cancellation_and_keeps_the_handle_usable() {
         error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
         Some(ERROR_OPERATION_ABORTED as i32)
     );
+    assert!(!read.pending);
     drop(read);
 
     let mut next = device.read_using(1, 4096, read_pipe).unwrap();
@@ -304,6 +305,7 @@ fn raw_read_reports_worker_exit_cancellation_and_keeps_the_handle_usable() {
         error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
         Some(ERROR_BROKEN_PIPE as i32)
     );
+    assert!(!broken.pending);
 }
 
 fn event_device() -> AppleUsb {
@@ -464,7 +466,7 @@ fn cancelling_one_request_keeps_other_reads_and_the_shared_handle_alive() {
 }
 
 #[test]
-fn synchronous_completion_preserves_the_wait_error_when_cancellation_also_fails() {
+fn failed_synchronous_completion_preserves_the_error_without_cancelling_again() {
     use windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE;
     let (device, client) = connected_pipe("failed-synchronous-completion");
     let request = device.read_using(1, 4096, read_pipe).unwrap();
@@ -474,7 +476,7 @@ fn synchronous_completion_preserves_the_wait_error_when_cancellation_also_fails(
         error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
         Some(ERROR_BROKEN_PIPE as i32)
     );
-    assert!(format!("{error:#}").contains("cancelling Apple USB request also failed"));
+    assert_eq!(error.chain().count(), 1, "{error:#}");
 }
 
 #[test]

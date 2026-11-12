@@ -25,6 +25,13 @@ pub(super) fn recovery_variant(value: &Value) -> Result<Option<&str>> {
     Ok(selected)
 }
 
+pub(super) fn manifest_location(value: &Value) -> Result<(&str, &str)> {
+    Ok((
+        recovery_variant(value)?.unwrap_or(wire::string(value, &["Info", "Variant"])?),
+        wire::string(value, &["Info", "DeviceClass"])?,
+    ))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Behavior {
     Erase,
