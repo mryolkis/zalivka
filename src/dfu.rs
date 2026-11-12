@@ -142,12 +142,16 @@ pub fn upload(
         progress.finish();
         return Ok(());
     }
-    let state = usb.control_in(0xa1, 5, 0, 0, 1)?;
+    let state = usb
+        .control_in(0xa1, 5, 0, 0, 1)
+        .context("DFU GETSTATE before upload")?;
     ensure!(state.len() == 1, "invalid DFU GETSTATE reply");
+    crate::log!(Debug, "dfu", "State before upload: {}", state[0]);
     match state[0] {
         2 => {}
         10 => {
-            usb.control_out(0x21, 4, 0, 0, &[])?;
+            usb.control_out(0x21, 4, 0, 0, &[])
+                .context("DFU CLRSTATUS before upload")?;
             bail!("DFU error cleared; re-enter DFU before retrying");
         }
         state => bail!("expected DFU idle state 2, got {state}; re-enter DFU"),
@@ -155,14 +159,28 @@ pub fn upload(
     let mut packets = packets(data, mode)?.peekable();
     let mut remaining = data.len();
     while let Some((block, bytes)) = packets.next() {
-        usb.control_out(0x21, 1, block, 0, &bytes)?;
+        let offset = data.len() - remaining;
+        usb.control_out(0x21, 1, block, 0, &bytes)
+            .with_context(|| {
+                format!(
+                    "DFU DNLOAD block {block}; offset={offset}/{}; packet={} B",
+                    data.len(),
+                    bytes.len()
+                )
+            })?;
         let sent = remaining.min(bytes.len());
         progress.advance(sent as u64);
         remaining -= sent;
         // Apple sends a suffix-only continuation with the same block index.
         // GETSTATUS must follow that continuation, not separate it from the payload.
         if packets.peek().is_none_or(|next| next.0 != block) {
-            wait_download(usb)?;
+            wait_download(usb).with_context(|| {
+                format!(
+                    "DFU GETSTATUS after block {block}; submitted={}/{} B",
+                    data.len() - remaining,
+                    data.len()
+                )
+            })?;
         }
     }
     progress.finish();
@@ -172,9 +190,12 @@ pub fn upload(
         } else {
             BLOCK_SIZE
         };
-        usb.control_out(0x21, 1, data.len().div_ceil(block_size) as u16, 0, &[])?;
-        for _ in 0..2 {
-            status(usb)?;
+        let block = data.len().div_ceil(block_size) as u16;
+        crate::log!(Debug, "dfu", "Finishing upload: zero-length block {block}");
+        usb.control_out(0x21, 1, block, 0, &[])
+            .with_context(|| format!("DFU final zero-length DNLOAD block {block}"))?;
+        for poll in 1..=2 {
+            status(usb).with_context(|| format!("DFU manifestation GETSTATUS {poll}/2"))?;
         }
         usb.reset().context(ResetFailure)?;
     }

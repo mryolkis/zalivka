@@ -398,6 +398,99 @@ fn dfu_error_never_resets_or_sends_remaining_data() {
 }
 
 #[test]
+fn dfu_transfer_errors_identify_the_failed_request_without_replaying_it() {
+    for (size, read_error, write_error, writes, requests, context) in [
+        (2049, Some(0), None, 0, 1, "DFU GETSTATE before upload"),
+        (
+            2049,
+            None,
+            Some(0),
+            1,
+            2,
+            "DFU DNLOAD block 0; offset=0/2049; packet=2048 B",
+        ),
+        (
+            2049,
+            None,
+            Some(1),
+            2,
+            4,
+            "DFU DNLOAD block 1; offset=2048/2049; packet=17 B",
+        ),
+        (
+            2048,
+            None,
+            Some(1),
+            2,
+            3,
+            "DFU DNLOAD block 0; offset=2048/2048; packet=16 B",
+        ),
+        (
+            2049,
+            Some(1),
+            None,
+            1,
+            3,
+            "DFU GETSTATUS after block 0; submitted=2048/2049 B",
+        ),
+        (
+            2049,
+            Some(2),
+            None,
+            2,
+            5,
+            "DFU GETSTATUS after block 1; submitted=2049/2049 B",
+        ),
+        (
+            2049,
+            None,
+            Some(2),
+            3,
+            6,
+            "DFU final zero-length DNLOAD block 2",
+        ),
+        (2049, Some(3), None, 3, 7, "DFU manifestation GETSTATUS 1/2"),
+        (2049, Some(4), None, 3, 8, "DFU manifestation GETSTATUS 2/2"),
+    ] {
+        let failures = |after: Option<usize>| {
+            after
+                .map(|after| {
+                    std::iter::repeat_n(None, after)
+                        .chain(Some(Some(121)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut usb = MockUsb {
+            reads: [
+                vec![2],
+                vec![0, 0, 0, 0, 5, 0],
+                vec![0, 0, 0, 0, 5, 0],
+                vec![0, 0, 0, 0, 6, 0],
+                vec![0, 0, 0, 0, 8, 0],
+            ]
+            .into(),
+            read_errors: failures(read_error),
+            control_errors: failures(write_error),
+            ..Default::default()
+        };
+        let error = dfu::upload(&mut usb, Mode::Dfu, &vec![0xaa; size], true).unwrap_err();
+        assert_eq!(error.to_string(), context);
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(121)
+        );
+        assert!(!error.is::<dfu::ResetFailure>());
+        assert_eq!(usb.controls.len(), writes, "{context}");
+        assert_eq!(usb.requests.len(), requests, "{context}");
+        assert_eq!(usb.resets, 0, "{context}");
+    }
+}
+
+#[test]
 fn dfu_reset_failure_marks_a_completed_upload_and_preserves_the_os_error() {
     let mut usb = MockUsb {
         reads: [
@@ -525,6 +618,7 @@ fn kernel_boot_attempts_bootx_once_even_when_the_transfer_notification_fails() {
 #[derive(Default)]
 struct MockUsb {
     reads: VecDeque<Vec<u8>>,
+    read_errors: VecDeque<Option<i32>>,
     controls: Vec<(u8, u8, u16, Vec<u8>)>,
     control_buffers: Vec<usize>,
     bulk: Vec<Vec<u8>>,
@@ -538,6 +632,9 @@ struct MockUsb {
 impl RecoveryTransport for MockUsb {
     fn control_in(&mut self, k: u8, r: u8, v: u16, _: u16, length: u16) -> Result<Vec<u8>> {
         self.requests.push((k, r, v));
+        if let Some(Some(code)) = self.read_errors.pop_front() {
+            return Err(std::io::Error::from_raw_os_error(code).into());
+        }
         let reply = self
             .reads
             .pop_front()
