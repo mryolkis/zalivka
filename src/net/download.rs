@@ -155,10 +155,16 @@ pub(super) fn download_from(
         let mut restarts = 0;
         loop {
             crate::progress::check_cancelled()?;
+            let previous_total = download.total;
             let step = match request(download.total) {
                 Ok(response) => download.receive(response, directory)?,
                 Err(error) => DownloadStep::Interrupted(error),
             };
+            // Count consecutive failures without progress, including a body
+            // that delivered new bytes before its connection was interrupted.
+            if download.total > previous_total {
+                attempts = 0;
+            }
             match step {
                 DownloadStep::Complete => break,
                 DownloadStep::More => {}

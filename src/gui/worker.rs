@@ -405,7 +405,6 @@ impl Completion {
 
     fn flush_logs(&mut self, context: &progress::Context, journal: &Mutex<Journal>) {
         if let Err(error) = context.flush_logs() {
-            self.success = false;
             self.journal_error.get_or_insert_with(|| error.to_string());
         }
         self.cancelled = context.cancelled();
@@ -496,6 +495,29 @@ impl Completion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_log_worker_preserves_the_operation_result() {
+        for success in [false, true] {
+            let context = progress::Context::new(|_| {})
+                .with_async_logs(|| panic!("injected log worker failure"))
+                .unwrap();
+            let journal = Mutex::new(Journal::new(tempfile::tempfile().unwrap()));
+            let completion = Completion {
+                success,
+                ..Completion::default()
+            }
+            .finish(Action::Verify, Instant::now(), &context, &journal);
+            assert_eq!(completion.success, success);
+            assert!(completion.journal_error.is_some());
+            let notice = completion.notice(Action::Verify);
+            assert_eq!(
+                notice.tone,
+                if success { Tone::Neutral } else { Tone::Error }
+            );
+            assert!(notice.journal_error.is_some());
+        }
+    }
 
     #[test]
     fn polling_gui_logs_does_not_wait_for_the_journal_mutex() {

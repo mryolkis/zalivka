@@ -9,15 +9,72 @@ use std::{
 };
 use ureq::{Proxy, ProxyProtocol};
 
-pub(crate) enum Stream {
-    Tcp(TcpStream),
-    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+pub(crate) struct Socket {
+    tcp: TcpStream,
+    deadline: Option<Instant>,
 }
+
+pub(crate) enum Stream {
+    Tcp(Socket),
+    Tls(Box<StreamOwned<ClientConnection, Socket>>),
+}
+
+fn remaining_budget(deadline: Instant) -> io::Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "upstream connection timed out",
+        ))
+    } else {
+        Ok(remaining)
+    }
+}
+
+impl Socket {
+    fn limit_handshake(&self) -> io::Result<()> {
+        if let Some(deadline) = self.deadline {
+            let remaining = remaining_budget(deadline)?;
+            self.tcp.set_read_timeout(Some(remaining))?;
+            self.tcp.set_write_timeout(Some(remaining))?;
+        }
+        Ok(())
+    }
+}
+impl Read for Socket {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        self.limit_handshake()?;
+        self.tcp.read(out)
+    }
+}
+impl Write for Socket {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.limit_handshake()?;
+        self.tcp.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.limit_handshake()?;
+        self.tcp.flush()
+    }
+}
+
 impl Stream {
-    fn tcp(&self) -> &TcpStream {
+    fn socket(&self) -> &Socket {
         match self {
             Self::Tcp(s) => s,
             Self::Tls(s) => &s.sock,
+        }
+    }
+    fn tcp(&self) -> &TcpStream {
+        &self.socket().tcp
+    }
+    fn socket_mut(&mut self) -> &mut Socket {
+        match self {
+            Self::Tcp(s) => s,
+            Self::Tls(s) => &mut s.sock,
         }
     }
 }
@@ -76,8 +133,9 @@ fn tcp_connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
         }
         match TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(3))) {
             Ok(stream) => {
-                stream.set_read_timeout(Some(timeout))?;
-                stream.set_write_timeout(Some(timeout))?;
+                let remaining = remaining_budget(deadline)?;
+                stream.set_read_timeout(Some(remaining))?;
+                stream.set_write_timeout(Some(remaining))?;
                 stream.set_nodelay(true)?;
                 return Ok(stream);
             }
@@ -98,6 +156,7 @@ pub(crate) fn connect_blocking(host: &str, port: u16, proxy: Option<Proxy>) -> R
 
 fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Result<Stream> {
     super::target_uri(host, port)?;
+    let deadline = Instant::now() + timeout;
     let mut stream = if let Some(proxy) = proxy {
         crate::log!(
             Debug,
@@ -107,10 +166,10 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
             proxy.host(),
             proxy.port()
         );
-        let mut stream = proxy_stream(&proxy, timeout)?;
+        let mut stream = proxy_stream(&proxy, deadline)?;
         match proxy.protocol() {
             ProxyProtocol::Http | ProxyProtocol::Https => {
-                http_connect(&mut stream, host, port, &proxy, timeout)?
+                http_connect(&mut stream, host, port, &proxy, remaining_budget(deadline)?)?
             }
             ProxyProtocol::Socks4
             | ProxyProtocol::Socks4A
@@ -121,19 +180,30 @@ fn open(host: &str, port: u16, proxy: Option<Proxy>, timeout: Duration) -> Resul
         stream
     } else {
         crate::log!(Debug, "proxy:connect", "{host}:{port} direct");
-        Stream::Tcp(tcp_connect(host, port, timeout)?)
+        Stream::Tcp(Socket {
+            tcp: tcp_connect(host, port, remaining_budget(deadline)?)?,
+            deadline: Some(deadline),
+        })
     };
     stream.flush()?;
+    // The deadline covers connection setup only. Established FDR tunnels use
+    // their regular read polling and write inactivity timeouts.
+    stream.socket_mut().deadline = None;
+    stream.tcp().set_read_timeout(Some(timeout))?;
+    stream.tcp().set_write_timeout(Some(timeout))?;
     Ok(stream)
 }
 
-fn proxy_stream(proxy: &Proxy, timeout: Duration) -> Result<Stream> {
-    let tcp =
-        tcp_connect(proxy.host(), proxy.port(), timeout).context("connecting configured proxy")?;
+fn proxy_stream(proxy: &Proxy, deadline: Instant) -> Result<Stream> {
+    let tcp = tcp_connect(proxy.host(), proxy.port(), remaining_budget(deadline)?)
+        .context("connecting configured proxy")?;
     if proxy.protocol() == ProxyProtocol::Https {
-        tls_transport(tcp, proxy.host(), crate::net::tls::config(None)?)
+        tls_transport(tcp, proxy.host(), crate::net::tls::config(None)?, deadline)
     } else {
-        Ok(Stream::Tcp(tcp))
+        Ok(Stream::Tcp(Socket {
+            tcp,
+            deadline: Some(deadline),
+        }))
     }
 }
 
@@ -144,10 +214,19 @@ impl super::connect::Connection for Stream {
         Ok(())
     }
 }
-fn tls_transport(tcp: TcpStream, host: &str, config: Arc<ClientConfig>) -> Result<Stream> {
+fn tls_transport(
+    tcp: TcpStream,
+    host: &str,
+    config: Arc<ClientConfig>,
+    deadline: Instant,
+) -> Result<Stream> {
     let host = socket_host(host);
     let name = ServerName::try_from(host.to_owned()).context("invalid HTTPS proxy hostname")?;
-    let mut tls = StreamOwned::new(ClientConnection::new(config, name)?, tcp);
+    let socket = Socket {
+        tcp,
+        deadline: Some(deadline),
+    };
+    let mut tls = StreamOwned::new(ClientConnection::new(config, name)?, socket);
     while tls.conn.is_handshaking() {
         tls.conn.complete_io(&mut tls.sock)?;
     }
@@ -160,8 +239,12 @@ fn http_connect(
     proxy: &Proxy,
     timeout: Duration,
 ) -> Result<()> {
+    let deadline = stream
+        .socket()
+        .deadline
+        .unwrap_or_else(|| Instant::now() + timeout);
     super::connect::connect(stream, (host, port), proxy, timeout, |remaining| {
-        proxy_stream(proxy, remaining)
+        proxy_stream(proxy, deadline.min(Instant::now() + remaining))
     })
 }
 fn socks_connect(stream: &mut Stream, host: &str, port: u16, proxy: &Proxy) -> Result<()> {

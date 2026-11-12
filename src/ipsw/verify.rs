@@ -49,7 +49,9 @@ pub struct ComponentVerification {
 pub struct ManifestVerification {
     pub path: String,
     pub identity_indexes: Vec<usize>,
+    /// Minimum number verified across matching identities.
     pub verified_digests: usize,
+    /// Types unmapped in at least one matching identity.
     pub unmapped_payload_types: Vec<String>,
     pub signature_verified: bool,
     pub skipped_reason: Option<String>,
@@ -299,9 +301,15 @@ impl Ipsw {
                 }
             }
             if !mismatch && checked > 0 {
+                report.verified_digests = if report.identity_indexes.is_empty() {
+                    checked
+                } else {
+                    report.verified_digests.min(checked)
+                };
                 report.identity_indexes.push(index);
-                report.verified_digests = checked;
-                report.unmapped_payload_types = unknown;
+                report.unmapped_payload_types.extend(unknown);
+                report.unmapped_payload_types.sort_unstable();
+                report.unmapped_payload_types.dedup();
             }
         }
         if candidates == 0 {

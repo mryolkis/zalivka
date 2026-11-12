@@ -464,6 +464,20 @@ fn cancelling_one_request_keeps_other_reads_and_the_shared_handle_alive() {
 }
 
 #[test]
+fn synchronous_completion_preserves_the_wait_error_when_cancellation_also_fails() {
+    use windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE;
+    let (device, client) = connected_pipe("failed-synchronous-completion");
+    let request = device.read_using(1, 4096, read_pipe).unwrap();
+    drop(client);
+    let error = request.finish(Duration::from_secs(1)).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
+        Some(ERROR_BROKEN_PIPE as i32)
+    );
+    assert!(format!("{error:#}").contains("cancelling Apple USB request also failed"));
+}
+
+#[test]
 fn endpoint_submission_failure_preserves_device_removal_and_shuts_down() {
     let mut reader = BulkReader::new_using(event_device(), 1, removed_device).unwrap();
     let error = reader.read().unwrap_err();

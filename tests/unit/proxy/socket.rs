@@ -15,7 +15,13 @@ fn empty_tls_read_does_not_start_a_handshake_or_touch_the_socket() {
         ServerName::try_from("localhost").unwrap(),
     )
     .unwrap();
-    let mut stream = Stream::Tls(Box::new(StreamOwned::new(connection, socket)));
+    let mut stream = Stream::Tls(Box::new(StreamOwned::new(
+        connection,
+        Socket {
+            tcp: socket,
+            deadline: None,
+        },
+    )));
     assert_eq!(stream.read(&mut []).unwrap(), 0);
     assert_eq!(
         peer.read(&mut [0]).unwrap_err().kind(),
@@ -273,6 +279,7 @@ fn https_proxy_verifies_the_certificate_and_preserves_target_bytes() {
             tcp_connect("127.0.0.1", address.port(), Duration::from_secs(5)).unwrap(),
             host,
             config,
+            Instant::now() + Duration::from_secs(5),
         );
         if success {
             let mut stream = transport.unwrap();
@@ -308,4 +315,64 @@ fn every_successful_connect_status_starts_an_opaque_tunnel() {
         assert_eq!(read_bytes(&mut stream, 6), b"opaque");
         server.join().unwrap();
     }
+}
+
+#[test]
+fn socks_handshake_reads_share_one_connection_deadline() {
+    let proxy_listener = listener();
+    let proxy = Proxy::new(&format!(
+        "socks5h://{}",
+        proxy_listener.local_addr().unwrap()
+    ))
+    .unwrap();
+    let server = thread::spawn(move || {
+        let mut socket = accept(&proxy_listener);
+        let mut greeting = [0; 3];
+        socket.read_exact(&mut greeting).unwrap();
+        assert_eq!(greeting, [5, 1, 0]);
+        thread::sleep(Duration::from_millis(150));
+        socket.write_all(&[5, 0]).unwrap();
+        let mut request = [0; 10];
+        socket.read_exact(&mut request).unwrap();
+        thread::sleep(Duration::from_millis(150));
+        let _ = socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]);
+    });
+    let error = open("127.0.0.1", 443, Some(proxy), Duration::from_millis(220))
+        .err()
+        .expect("handshake exceeded its total deadline");
+    assert!(matches!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::TimedOut
+    ));
+    server.join().unwrap();
+}
+
+#[test]
+fn fragmented_tls_handshake_reads_share_the_connection_deadline() {
+    let proxy_listener = listener();
+    let address = proxy_listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut socket = accept(&proxy_listener);
+        socket.read_exact(&mut [0]).unwrap();
+        socket.write_all(&[0x16, 0x03]).unwrap();
+        thread::sleep(Duration::from_millis(150));
+        let _ = socket.write_all(&[0x03]);
+        thread::sleep(Duration::from_millis(150));
+        let _ = socket.write_all(&[0, 1, 0]);
+    });
+    let deadline = Instant::now() + Duration::from_millis(220);
+    let result = tls_transport(
+        tcp_connect("127.0.0.1", address.port(), Duration::from_secs(5)).unwrap(),
+        "localhost",
+        crate::net::tls::config(None).unwrap(),
+        deadline,
+    );
+    let error = result
+        .err()
+        .expect("TLS handshake exceeded its total deadline");
+    assert!(matches!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ));
+    server.join().unwrap();
 }

@@ -114,7 +114,7 @@ fn retry_budget_is_shared_by_http_errors_and_interrupted_bodies() {
     std::fs::write(&part, b"firmware").unwrap();
     let (url, server) = firmware_server(vec![
         "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
-        "HTTP/1.1 206 Partial Content\r\nContent-Length: 8\r\nContent-Range: bytes 8-15/16\r\nConnection: close\r\n\r\n pay".into(),
+        "HTTP/1.1 206 Partial Content\r\nContent-Length: 8\r\nContent-Range: bytes 8-15/16\r\nConnection: close\r\n\r\n".into(),
     ]);
     let agent = agent_with_body_timeout(None);
     let result = download_from(
@@ -134,7 +134,7 @@ fn retry_budget_is_shared_by_http_errors_and_interrupted_bodies() {
     );
     assert!(result.is_err());
     assert!(!destination.exists());
-    assert_eq!(std::fs::read(part).unwrap(), b"firmware pay");
+    assert_eq!(std::fs::read(part).unwrap(), b"firmware");
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 2);
     assert!(requests.iter().all(|r| r.contains("range: bytes=8-\r\n")));
@@ -439,4 +439,33 @@ fn a_partial_symlink_cannot_truncate_an_unrelated_file() {
         .is_err()
     );
     assert_eq!(std::fs::read(original).unwrap(), b"preserve me");
+}
+
+#[test]
+fn new_download_bytes_restore_the_retry_budget_for_ranges_and_interrupted_bodies() {
+    for limited_range in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("retry.ipsw");
+        let first = if limited_range {
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/3\r\nConnection: close\r\n\r\na"
+        } else {
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\na"
+        };
+        let (url, server) = firmware_server(vec![
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            first.into(),
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 1-2/3\r\nConnection: close\r\n\r\nb".into(),
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\nContent-Range: bytes 2-2/3\r\nConnection: close\r\n\r\nc".into(),
+        ]);
+        let agent = agent_with_body_timeout(None);
+        download_from(&destination, &Sha256::digest(b"abc"), 1, |offset| {
+            send_http(&agent, &firmware_request(&url, offset)?)
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"abc");
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[2].contains("range: bytes=1-\r\n"));
+        assert!(requests[3].contains("range: bytes=2-\r\n"));
+    }
 }

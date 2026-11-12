@@ -861,3 +861,30 @@ fn selected_identity_retains_fourcc_names_for_fileless_server_generated_measurem
     ));
     tss::validate_ticket_for_identity(&request, &response, &id).unwrap();
 }
+
+#[test]
+fn unresolved_component_names_cannot_match_another_tss_measurement() {
+    let digest = vec![0xab; 48];
+    let entry = wire::dict([
+        ("Trusted", true.into()),
+        ("Digest", Value::Data(digest.clone())),
+    ]);
+    let request = wire::dict([("UnmappedComponent", entry.clone())]);
+    let fields = measurement_property(b"DGST", &img4::element(4, &digest));
+    let response = measurement_ticket(&measurement_property(
+        b"ibss",
+        &img4::element(0x31, &fields),
+    ));
+    let mut id = identity();
+    manifest_mut(&mut id).insert("UnmappedComponent".into(), entry);
+    for result in [
+        tss::validate_ticket(&request, &response),
+        tss::validate_ticket_for_identity(&request, &response, &id),
+    ] {
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("cannot resolve UnmappedComponent"),
+            "{error}"
+        );
+    }
+}

@@ -289,6 +289,16 @@ impl<'a> IoctlRequest<'a> {
 
     fn finish(mut self, timeout: Duration) -> Result<Vec<u8>> {
         let waited = self.wait(timeout);
+        if let Err(error) = waited {
+            // Drain the request before releasing its buffers, while keeping
+            // the completion failure as the cause even if cancellation fails.
+            return match self.cancel() {
+                Ok(()) => Err(error.into()),
+                Err(cancel_error) => Err(anyhow::Error::from(error)).context(format!(
+                    "cancelling Apple USB request also failed: {cancel_error}"
+                )),
+            };
+        }
         if !matches!(waited, Ok(true)) {
             let timed_out = matches!(waited, Ok(false));
             if let Err(error) = self.cancel() {

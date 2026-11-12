@@ -81,10 +81,8 @@ fn validate_measurements<'a>(
                 [20, 32, 48].contains(&expected.len()),
                 "unsupported signing Digest for {name}"
             );
-            let matches = tag.map_or_else(
-                || digests.values().any(|actual| *actual == expected),
-                |tag| digests.get(&tag).is_some_and(|actual| *actual == expected),
-            );
+            let tag = tag.with_context(|| format!("cannot resolve {name} measurement type"))?;
+            let matches = digests.get(&tag).is_some_and(|actual| *actual == expected);
             ensure!(
                 matches,
                 "Apple ticket digest mismatch or missing measurement for {name}; refusing to boot"

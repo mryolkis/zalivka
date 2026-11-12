@@ -256,6 +256,17 @@ impl Progress {
             return;
         }
         self.completed = self.completed.saturating_add(bytes);
+        if let Some(total) = self.total
+            && self.completed > total
+        {
+            crate::log!(
+                Warning,
+                "transfer",
+                "{}: measured bytes ({}) exceed the declared total ({total}); total is now unknown",
+                self.stage,
+                self.completed
+            );
+        }
         self.total = self.total.filter(|total| *total >= self.completed);
         let now = Instant::now();
         if now.duration_since(self.sampled_at) >= INTERVAL {

@@ -1860,3 +1860,42 @@ fn embedded_ticket_selection_continues_past_a_different_identity_for_the_same_ha
         .unwrap();
     assert_eq!(report.im4m_manifests[0].identity_indexes, [1]);
 }
+
+#[test]
+fn embedded_ticket_summary_is_conservative_across_identities_in_either_order() {
+    use super::tss_tests::{hardware_properties, measurement_property, measurement_ticket};
+    let mut objects = hardware_properties(0x8103, 0x0a, 1);
+    for tag in [b"ibss", b"ibec"] {
+        let measurement =
+            measurement_property(b"DGST", &img4::element(4, &Sha384::digest(im4p(b"test"))));
+        objects.extend(measurement_property(
+            tag,
+            &img4::element(0x31, &measurement),
+        ));
+    }
+    let response = measurement_ticket(&objects);
+    let path = "Firmware/Manifests/restore/macOS Customer/apticket.j313ap.im4m";
+    let mut partial = identity();
+    manifest_mut(&mut partial).remove("iBEC");
+    let file = fixture_files(
+        Some(partial),
+        false,
+        &[(path, tss::ticket(&response).unwrap())],
+    );
+    for reversed in [false, true] {
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        if reversed {
+            Arc::make_mut(&mut ipsw.manifest)
+                .as_dictionary_mut()
+                .unwrap()["BuildIdentities"]
+                .as_array_mut()
+                .unwrap()
+                .reverse();
+        }
+        let report = ipsw.verify_all_with_options(&Default::default()).unwrap();
+        let ticket = &report.im4m_manifests[0];
+        assert_eq!(ticket.identity_indexes, [0, 1]);
+        assert_eq!(ticket.verified_digests, 1);
+        assert_eq!(ticket.unmapped_payload_types, ["ibec"]);
+    }
+}

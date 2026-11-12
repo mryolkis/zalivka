@@ -138,3 +138,27 @@ fn inaccurate_totals_do_not_hide_measured_progress() {
     assert_eq!((update.completed, update.total), (13, None));
     assert!(update.bytes_per_second.is_finite());
 }
+
+#[test]
+fn exceeding_a_total_warns_once_and_retains_measured_bytes() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let output = events.clone();
+    Context::new(move |event| output.lock().unwrap().push(event)).run(|| {
+        let mut progress = Progress::new("test transfer", Some(10), 0);
+        progress.advance(11);
+        progress.advance(2);
+        assert_eq!(progress.completed(), 13);
+        assert_eq!(progress.total, None);
+    });
+    let events = events.lock().unwrap();
+    let warnings: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Log(record) if record.level == crate::logging::Level::Warning => Some(record),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].message.contains("test transfer"));
+    assert!(warnings[0].message.contains("exceed the declared total"));
+}
