@@ -1,12 +1,9 @@
 //! Buffered disk journal and bounded GUI history for one operation.
 use super::{Level, Record};
-use anyhow::{Context, Result};
 use std::{
     collections::VecDeque,
     fs::File,
-    io::{BufWriter, Read, Write},
-    path::{Path, PathBuf},
-    sync::Mutex,
+    io::{BufWriter, Write},
 };
 
 pub(super) struct Journal {
@@ -70,52 +67,6 @@ impl Journal {
     }
 }
 
-pub(super) fn save_log(
-    path: PathBuf,
-    source: Option<&Path>,
-    text: &str,
-    journal: Option<&Mutex<Journal>>,
-) -> Result<PathBuf> {
-    let same = source
-        .and_then(|source| source.canonicalize().ok())
-        .zip(path.canonicalize().ok())
-        .is_some_and(|(source, destination)| source == destination);
-    let source = if let Some(source) = source {
-        let file = File::open(source)?;
-        // Capture a complete record boundary, then release writers while the
-        // potentially large snapshot is copied in the background.
-        let mut journal = journal.map(|journal| journal.lock().unwrap_or_else(|e| e.into_inner()));
-        if let Some(journal) = &mut journal {
-            let _ = journal.flush();
-            if let Some(error) = journal.error() {
-                anyhow::bail!("Disk journal incomplete: {error}");
-            }
-        }
-        let length = file.metadata()?.len();
-        Some((file, length))
-    } else {
-        None
-    };
-    if same {
-        return Ok(path);
-    }
-    // Write beside the destination, then replace it only after a complete copy.
-    // Distinct paths can be hard links to the active log; copying directly to
-    // such a destination would truncate the source before it can be read.
-    let directory = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut saved = tempfile::NamedTempFile::new_in(directory)?;
-    if let Some((file, length)) = source {
-        std::io::copy(&mut file.take(length), &mut saved)?;
-    } else {
-        saved.write_all(text.as_bytes())?;
-    }
-    saved.persist(&path).context("saving operation log")?;
-    Ok(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,20 +112,6 @@ mod tests {
         assert!(!journal.flush());
         assert_eq!(journal.pending.len(), 4000);
         assert_eq!(journal.pending.front().unwrap().level, Level::Info);
-        let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("saved.log");
-        let journal = Mutex::new(journal);
-        save_log(
-            destination.clone(),
-            Some(file.path()),
-            "visible tail",
-            Some(&journal),
-        )
-        .unwrap();
-        assert_eq!(
-            std::fs::read(&destination).unwrap(),
-            std::fs::read(file.path()).unwrap()
-        );
         assert_eq!(
             std::fs::read_to_string(file.path())
                 .unwrap()

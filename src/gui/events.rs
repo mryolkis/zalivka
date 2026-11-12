@@ -1,7 +1,7 @@
 //! Apply background events and finish jobs only after their logs are drained.
 use super::theme::Tone;
 use super::worker::Output;
-use super::{App, Event, Notice, Picker, SCAN_INTERVAL, UI_REFRESH_INTERVAL, journal};
+use super::{App, Event, Picker, SCAN_INTERVAL, UI_REFRESH_INTERVAL};
 use eframe::egui;
 use std::time::Instant;
 use zalivka::progress;
@@ -89,52 +89,9 @@ impl App {
                             Picker::Cache => self.setup.cache = path.display().to_string(),
                             Picker::Tokens => self.setup.tokens = path.display().to_string(),
                             Picker::Connect => self.setup.connect_data = path.display().to_string(),
-                            Picker::Log => {
-                                self.collect_job_logs();
-                                let source = self.log_path.clone();
-                                let journal = self.job.as_ref().map(|job| job.journal.clone());
-                                let logs = self.job.as_ref().map(|job| job.context.clone());
-                                let text = if source.is_none() {
-                                    format!(
-                                        "Incomplete journal: saved the last {} records from memory.\n{}\n",
-                                        self.logs.len(),
-                                        self.journal_text(true)
-                                    )
-                                } else {
-                                    String::new()
-                                };
-                                let spawn = self.background(ctx, "save", move || {
-                                    if let Some(logs) = logs
-                                        && let Err(error) = logs.flush_logs()
-                                    {
-                                        return Event::Saved(Err(error.to_string()));
-                                    }
-                                    let result = journal::save_log(
-                                        path,
-                                        source.as_deref(),
-                                        &text,
-                                        journal.as_deref(),
-                                    )
-                                    .map_err(|e| format!("{e:#}"));
-                                    Event::Saved(result)
-                                });
-                                if let Err(e) = spawn {
-                                    self.error("Journal not saved", e);
-                                }
-                            }
                         }
                     }
                 }
-                Event::Saved(Ok(path)) => {
-                    self.notice = Some(Notice {
-                        title: "Journal saved".into(),
-                        detail: path.display().to_string(),
-                        journal_error: None,
-                        tone: Tone::Success,
-                        expires_at: Some(Instant::now() + super::NOTICE_LIFETIME),
-                    });
-                }
-                Event::Saved(Err(e)) => self.error("Journal not saved", e),
             }
         }
         if !self.collect_job_logs() {

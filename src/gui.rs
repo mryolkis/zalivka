@@ -77,7 +77,6 @@ enum Picker {
     Cache,
     Tokens,
     Connect,
-    Log,
 }
 enum Event {
     Scan {
@@ -87,7 +86,6 @@ enum Event {
     Worker(u64, Output),
     Firmware(u64, std::result::Result<catalog::Release, String>),
     Picked(Picker, Option<PathBuf>),
-    Saved(std::result::Result<PathBuf, String>),
 }
 
 struct Notice {
@@ -233,7 +231,7 @@ impl App {
             self.log_path = None;
             self.error(
                 "The disk journal is incomplete",
-                format!("{error}. You can save the recent journal history from memory."),
+                format!("{error}. You can copy the recent journal history from this window."),
             );
             self.journal_open = true;
         }
@@ -321,7 +319,6 @@ impl App {
             Picker::Cache => "Firmware folder",
             Picker::Tokens => "Token file",
             Picker::Connect => "DAWTKN file",
-            Picker::Log => "Save journal",
         });
         if let Err(e) = self.background(ctx, "file", move || {
             let dialog = rfd::FileDialog::new();
@@ -336,10 +333,6 @@ impl App {
                     .add_filter("Property list", &["plist"])
                     .pick_file(),
                 Picker::Connect => dialog.set_title(&title).pick_file(),
-                Picker::Log => dialog
-                    .set_title(&title)
-                    .set_file_name("zalivka.log")
-                    .save_file(),
             };
             Event::Picked(picker, path)
         }) {

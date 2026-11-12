@@ -1,6 +1,6 @@
 //! Main window layout, journal and frame updates.
 use super::widgets::{caption, pill, tint};
-use super::{App, Level, Notice, Picker, SCAN_INTERVAL, Tone, UI_REFRESH_INTERVAL};
+use super::{App, Level, Notice, SCAN_INTERVAL, Tone, UI_REFRESH_INTERVAL};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::time::Instant;
 use zalivka::localization::{format as trf, text as tr};
@@ -100,33 +100,47 @@ impl App {
             .show(ui, |ui| {
                 ui.spacing_mut().interact_size.y = 24.0;
                 ui.spacing_mut().item_spacing.y = row_spacing;
+                let actions_width = ["Open logs folder", "Copy", "Hide"]
+                    .into_iter()
+                    .map(|label| {
+                        ui.painter()
+                            .layout_no_wrap(
+                                tr(label),
+                                egui::TextStyle::Button.resolve(ui.style()),
+                                ui.visuals().text_color(),
+                            )
+                            .size()
+                            .x
+                            + 2.0 * ui.spacing().button_padding.x
+                    })
+                    .sum::<f32>()
+                    + 2.0 * ui.spacing().item_spacing.x;
                 let header = ui.horizontal_wrapped(|ui| {
                     ui.strong(tr("Journal"));
                     ui.checkbox(&mut self.log_details, tr("Technical details"));
-                    if ui
-                        .add_enabled(
-                            !self.logs.is_empty() && !self.picking,
-                            egui::Button::new(tr("Save journal")).small(),
-                        )
-                        .clicked()
-                    {
-                        self.pick(Picker::Log, &ctx);
+                    if ui.available_size_before_wrap().x < actions_width {
+                        ui.end_row();
                     }
-                    if ui.small_button(tr("Open logs folder")).clicked()
-                        && let Err(error) = zalivka::storage::log_directory()
-                            .and_then(|directory| zalivka::platform::open_directory(&directory))
-                    {
-                        self.error("Could not open the logs folder", format!("{error:#}"));
-                    }
-                    if ui
-                        .add_enabled(!self.logs.is_empty(), egui::Button::new(tr("Copy")).small())
-                        .clicked()
-                    {
-                        ctx.copy_text(self.journal_text(self.log_details));
-                    }
-                    if ui.small_button(tr("Hide")).clicked() {
-                        self.journal_open = false;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button(tr("Hide")).clicked() {
+                            self.journal_open = false;
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.logs.is_empty(),
+                                egui::Button::new(tr("Copy")).small(),
+                            )
+                            .clicked()
+                        {
+                            ctx.copy_text(self.journal_text(self.log_details));
+                        }
+                        if ui.small_button(tr("Open logs folder")).clicked()
+                            && let Err(error) = zalivka::storage::log_directory()
+                                .and_then(|directory| zalivka::platform::open_directory(&directory))
+                        {
+                            self.error("Could not open the logs folder", format!("{error:#}"));
+                        }
+                    });
                 });
                 // Measure wrapping instead of assuming a single toolbar row:
                 // translated controls can need more space after a window resize.

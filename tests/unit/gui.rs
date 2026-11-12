@@ -796,29 +796,6 @@ fn a_failure_writing_the_final_record_cannot_report_a_complete_journal() {
 }
 
 #[test]
-fn memory_journal_export_includes_hidden_details_and_marks_the_partial_copy() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("memory.log");
-    let mut app = english_app();
-    app.journal_line(Record::new(Level::Debug, "test", "protocol details"));
-    app.journal_line(Record::new(Level::Info, "test", "visible record"));
-    assert!(!app.log_details);
-    app.tx
-        .send(Event::Picked(Picker::Log, Some(path.clone())))
-        .unwrap();
-    let ctx = egui::Context::default();
-    app.poll(&ctx);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !path.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    let saved = std::fs::read_to_string(path).unwrap();
-    assert!(saved.contains("protocol details"));
-    assert!(saved.contains("visible record"));
-    assert!(saved.starts_with("Incomplete journal:"));
-}
-
-#[test]
 fn native_completion_follows_final_events_and_journal_writes() {
     let log = tempfile::NamedTempFile::new().unwrap();
     let mut app = english_app();
@@ -1735,67 +1712,6 @@ fn checkpoints_and_operation_completion_preserve_an_active_transfer() {
 }
 
 #[test]
-fn saving_a_journal_preserves_full_log_and_does_not_overwrite_its_source() {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("full.log");
-    let target = directory.path().join("saved.log");
-    let full = "complete log\n".repeat(5000);
-    std::fs::write(&source, &full).unwrap();
-    assert_eq!(
-        journal::save_log(source.clone(), Some(&source), "visible tail", None).unwrap(),
-        source
-    );
-    assert_eq!(std::fs::read_to_string(&source).unwrap(), full);
-    journal::save_log(target.clone(), Some(&source), "visible tail", None).unwrap();
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), full);
-    journal::save_log(target.clone(), None, "visible tail", None).unwrap();
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "visible tail");
-    assert!(
-        journal::save_log(
-            target.clone(),
-            Some(&directory.path().join("missing")),
-            "tail",
-            None
-        )
-        .is_err()
-    );
-    assert_eq!(std::fs::read_to_string(target).unwrap(), "visible tail");
-}
-
-#[test]
-fn saving_a_journal_through_a_hard_link_preserves_the_active_source() {
-    use std::io::{Read, Seek, SeekFrom, Write};
-
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("active.log");
-    let destination = directory.path().join("export.log");
-    let mut active = File::options()
-        .create_new(true)
-        .read(true)
-        .write(true)
-        .open(&source)
-        .unwrap();
-    active.write_all(b"complete log\n").unwrap();
-    std::fs::hard_link(&source, &destination).unwrap();
-
-    journal::save_log(destination.clone(), Some(&source), "tail", None).unwrap();
-    assert_eq!(
-        std::fs::read_to_string(&destination).unwrap(),
-        "complete log\n"
-    );
-    active.write_all(b"next event\n").unwrap();
-    active.seek(SeekFrom::Start(0)).unwrap();
-    let mut full = String::new();
-    active.read_to_string(&mut full).unwrap();
-    assert_eq!(full, "complete log\nnext event\n");
-    assert_eq!(std::fs::read_to_string(source).unwrap(), full);
-    assert_eq!(
-        std::fs::read_to_string(destination).unwrap(),
-        "complete log\n"
-    );
-}
-
-#[test]
 fn dialogs_stay_open_and_escape_cancels_without_starting_a_job() {
     for (theme, action) in [egui::Theme::Dark, egui::Theme::Light]
         .into_iter()
@@ -1950,9 +1866,8 @@ fn ordinary_notifications_expire_after_five_seconds_and_replacements_restart_the
     let mut app = english_app();
     app.scanning = true;
     let before = Instant::now();
-    app.tx
-        .send(Event::Saved(Ok(PathBuf::from("first.log"))))
-        .unwrap();
+    app.job = Some(job(Action::Doctor));
+    app.tx.send(Event::Worker(7, finished(true))).unwrap();
     let mut output = egui::FullOutput::default();
     for frame in 0..30 {
         output = render_app(&mut app, &ctx, frame);
@@ -1970,12 +1885,13 @@ fn ordinary_notifications_expire_after_five_seconds_and_replacements_restart_the
     let _ = render_app(&mut app, &ctx, 30);
     assert!(app.notice.is_none());
 
-    for (frame, path) in [(31, "second.log"), (32, "third.log")] {
+    for (frame, action) in [(31, Action::Verify), (32, Action::Doctor)] {
         let before = Instant::now();
-        app.tx.send(Event::Saved(Ok(PathBuf::from(path)))).unwrap();
+        app.job = Some(job(action));
+        app.tx.send(Event::Worker(7, finished(true))).unwrap();
         let _ = render_app(&mut app, &ctx, frame);
         let notice = app.notice.as_mut().unwrap();
-        assert_eq!(notice.detail, path);
+        assert_eq!(notice.title, action.completed_title());
         let deadline = notice.expires_at.unwrap();
         assert!(deadline >= before + Duration::from_secs(5));
         assert!(deadline <= Instant::now() + Duration::from_secs(5));
@@ -2073,14 +1989,7 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
                 use zalivka::localization::text;
                 (
                     text("Mac restore"),
-                    [
-                        "Copy",
-                        "Save journal",
-                        "Open logs folder",
-                        "Hide",
-                        "Technical details",
-                    ]
-                    .map(text),
+                    ["Copy", "Open logs folder", "Hide", "Technical details"].map(text),
                     ["Device", "Firmware", "Start Revive", "Erase and restore"].map(text),
                 )
             };
@@ -2117,6 +2026,27 @@ fn small_windows_keep_content_visible_and_all_steps_reachable_with_the_journal_o
                     "journal control {label} clipped at {size:?}"
                 );
             }
+            let [copy, folder, hide, details] = control_labels
+                .each_ref()
+                .map(|label| visible_text_rect(&output, label).unwrap());
+            assert!(folder.right() < copy.left() && copy.right() < hide.left());
+            assert!((folder.center().y - hide.center().y).abs() < 1.0);
+            assert!(screen.right() - hide.right() < 60.0);
+            assert!(
+                folder.left() > details.right() || folder.top() >= details.bottom(),
+                "{language}: journal actions overlap the details filter at {size:?}: folder={folder:?}, details={details:?}"
+            );
+            assert!(
+                visible_text_rect(
+                    &output,
+                    if language == "ru" {
+                        "Сохранить журнал"
+                    } else {
+                        "Save journal"
+                    }
+                )
+                .is_none()
+            );
             let journal_rows: Vec<_> = output
                 .shapes
                 .iter()
