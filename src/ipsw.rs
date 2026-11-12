@@ -451,6 +451,52 @@ impl Ipsw {
             types.insert(path.to_owned(), img4::payload_type(&prefix));
         }
         id.file_types = types;
+        self.resolve_measurement_types(id)?;
+        Ok(())
+    }
+
+    /// Use the IPSW's global AP manifest to name measurements of raw images.
+    /// Never infer a type from the personalized ticket we are about to validate.
+    fn resolve_measurement_types(&mut self, id: &mut Identity) -> Result<()> {
+        id.measurement_types.clear();
+        let mut unresolved = Vec::new();
+        for (name, entry) in id.manifest()? {
+            if id.payload_type(name)?.is_none()
+                && let Some(digest) = component_digest(entry)?
+            {
+                unresolved.push((name.clone(), digest.to_vec()));
+            }
+        }
+        if unresolved.is_empty() {
+            return Ok(());
+        }
+        let variant = wire::optional(&id.value, &["Info", "MacOSVariant"])?
+            .unwrap_or(id.info("Variant")?)
+            .as_string()
+            .context("invalid global manifest variant")?;
+        let class = wire::string(&id.value, &["Info", "DeviceClass"])?;
+        let path = format!("Firmware/Manifests/restore/{variant}/apticket.{class}.im4m");
+        validate_path(&path)?;
+        if !self.contains(&path) {
+            return Ok(());
+        }
+        let bytes = self.read_limited(&path, 16 * 1024 * 1024)?;
+        let manifest = img4::Manifest::parse(&bytes)
+            .with_context(|| format!("parsing global AP manifest {path}"))?;
+        manifest
+            .check_hardware(&id.value)
+            .with_context(|| format!("checking global AP manifest {path}"))?;
+        let digests = manifest.digests()?;
+        for (name, expected) in unresolved {
+            let mut matching = digests.iter().filter(|(_, actual)| **actual == expected);
+            if let Some((&tag, _)) = matching.next() {
+                ensure!(
+                    matching.next().is_none(),
+                    "ambiguous global IM4M measurement type for {name}"
+                );
+                id.measurement_types.insert(name, tag);
+            }
+        }
         Ok(())
     }
 }

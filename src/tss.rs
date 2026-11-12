@@ -57,7 +57,7 @@ fn validate_measurements<'a>(
             Some(*b"lpol")
         } else {
             let explicit = identity
-                .map(|id| id.payload_type(name))
+                .map(|id| id.measurement_type(name))
                 .transpose()?
                 .flatten();
             explicit.or_else(|| {

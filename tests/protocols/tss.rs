@@ -863,6 +863,143 @@ fn selected_identity_retains_fourcc_names_for_fileless_server_generated_measurem
 }
 
 #[test]
+fn raw_measurements_resolve_from_global_manifests_without_component_name_tables() {
+    for (name, tag) in [
+        ("BaseSystem", *b"bsys"),
+        ("OS", *b"rosi"),
+        ("FutureFilesystem", *b"nx42"),
+        ("RenamedFilesystem", *b"disk"),
+    ] {
+        let bytes = b"raw image without an IM4P header";
+        let digest = Sha384::digest(bytes).to_vec();
+        let mut entry = component_entry("disk.dmg.aea", bytes);
+        entry.as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .remove("Img4PayloadType");
+        let mut id = identity();
+        manifest_mut(&mut id).insert(name.into(), entry);
+        let original = id.value.clone();
+        let response = |tag: &[u8; 4], digest: &[u8]| {
+            let fields = measurement_property(b"DGST", &img4::element(4, digest));
+            let mut objects = hardware_properties(0x8103, 10, 1);
+            objects.extend(measurement_property(tag, &img4::element(0x31, &fields)));
+            measurement_ticket(&objects)
+        };
+        let global = response(&tag, &digest);
+        let file = fixture_files(
+            Some(id.clone()),
+            false,
+            &[
+                ("disk.dmg.aea", bytes),
+                (
+                    "Firmware/Manifests/restore/macOS Customer/apticket.j313ap.im4m",
+                    tss::ticket(&global).unwrap(),
+                ),
+            ],
+        );
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        ipsw.validate_identity(&mut id).unwrap();
+        assert_eq!(id.value, original);
+        assert_eq!(id.payload_type(name).unwrap(), None);
+        let request = wire::dict([(
+            name,
+            wire::dict([
+                ("Trusted", true.into()),
+                ("Digest", Value::Data(digest.clone())),
+            ]),
+        )]);
+        tss::validate_ticket_for_identity(&request, &global, &id.clone()).unwrap();
+        // A personalized response cannot serve as its own reference.
+        assert!(tss::validate_ticket(&request, &global).is_err());
+        for invalid in [
+            response(&tag, &[0xcd; 48]),
+            response(b"ibss", &digest),
+            measurement_ticket(&[]),
+        ] {
+            assert!(
+                tss::validate_ticket_for_identity(&request, &invalid, &id).is_err(),
+                "{name}"
+            );
+        }
+        // An explicit manifest type still takes precedence over inference.
+        manifest_mut(&mut id)[name].as_dictionary_mut().unwrap()["Info"]
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Img4PayloadType".into(), "next".into());
+        tss::validate_ticket_for_identity(&request, &response(b"next", &digest), &id).unwrap();
+        assert!(tss::validate_ticket_for_identity(&request, &global, &id).is_err());
+    }
+}
+
+#[test]
+fn raw_measurement_inference_requires_the_selected_global_ap_manifest() {
+    let bytes = b"raw disk";
+    let digest = Sha384::digest(bytes).to_vec();
+    let mut entry = component_entry("raw.dmg", bytes);
+    entry.as_dictionary_mut().unwrap()["Info"]
+        .as_dictionary_mut()
+        .unwrap()
+        .remove("Img4PayloadType");
+    let mut id = identity();
+    manifest_mut(&mut id).insert("FutureFilesystem".into(), entry);
+    let fields = measurement_property(b"DGST", &img4::element(4, &digest));
+    let object = measurement_property(b"nx42", &img4::element(0x31, &fields));
+    let mut objects = hardware_properties(0x8103, 10, 1);
+    objects.extend(&object);
+    let response = measurement_ticket(&objects);
+    let request = wire::dict([(
+        "FutureFilesystem",
+        wire::dict([("Trusted", true.into()), ("Digest", Value::Data(digest))]),
+    )]);
+    for path in [
+        "unrelated.im4m",
+        "Firmware/Manifests/restore/macOS Customer/apticket.other.im4m",
+        "Firmware/Manifests/restore/Other Variant/apticket.j313ap.im4m",
+        "Firmware/Manifests/restore/cryptex1/macOS Customer/apticket.j313ap.im4m",
+    ] {
+        let file = fixture_files(
+            Some(id.clone()),
+            false,
+            &[("raw.dmg", bytes), (path, tss::ticket(&response).unwrap())],
+        );
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        let mut selected = id.clone();
+        ipsw.validate_identity(&mut selected).unwrap();
+        assert!(
+            tss::validate_ticket_for_identity(&request, &response, &selected).is_err(),
+            "{path}"
+        );
+    }
+    for invalid in [
+        [hardware_properties(0x8103, 11, 1), object.clone()].concat(),
+        [hardware_properties(0x8103, 10, 2), object.clone()].concat(),
+        [hardware_properties(0x8104, 10, 1), object.clone()].concat(),
+        object,
+        [
+            objects,
+            measurement_property(b"dupe", &img4::element(0x31, &fields)),
+        ]
+        .concat(),
+    ] {
+        let global = measurement_ticket(&invalid);
+        let file = fixture_files(
+            Some(id.clone()),
+            false,
+            &[
+                ("raw.dmg", bytes),
+                (
+                    "Firmware/Manifests/restore/macOS Customer/apticket.j313ap.im4m",
+                    tss::ticket(&global).unwrap(),
+                ),
+            ],
+        );
+        let mut ipsw = Ipsw::open(file.path()).unwrap();
+        assert!(ipsw.validate_identity(&mut id.clone()).is_err());
+    }
+}
+
+#[test]
 fn unresolved_component_names_cannot_match_another_tss_measurement() {
     let digest = vec![0xab; 48];
     let entry = wire::dict([

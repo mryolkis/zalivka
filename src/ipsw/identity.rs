@@ -56,6 +56,7 @@ pub struct Identity {
     pub index: usize,
     pub value: Value,
     pub(super) file_types: HashMap<String, Option<[u8; 4]>>,
+    pub(super) measurement_types: HashMap<String, [u8; 4]>,
 }
 
 impl Identity {
@@ -90,6 +91,7 @@ impl Identity {
             index,
             value,
             file_types: HashMap::new(),
+            measurement_types: HashMap::new(),
         }
     }
 
@@ -124,6 +126,13 @@ impl Identity {
             .and_then(|path| self.file_types.get(path))
             .copied()
             .flatten())
+    }
+
+    /// A raw image can have a ticket measurement without being an IM4P payload.
+    pub(crate) fn measurement_type(&self, name: &str) -> Result<Option<[u8; 4]>> {
+        Ok(self
+            .payload_type(name)?
+            .or_else(|| self.measurement_types.get(name).copied()))
     }
 
     pub fn require_component_type(&self, tag: &[u8; 4]) -> Result<&str> {
