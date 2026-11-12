@@ -6,7 +6,7 @@ use plist::Value;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-fn recovery_variant(value: &Value) -> Result<Option<&str>> {
+pub(super) fn recovery_variant(value: &Value) -> Result<Option<&str>> {
     let info = wire::dictionary(wire::get(value, &["Info"])?)?;
     let mut selected = None;
     for key in ["MacOSVariant", "RecoveryVariant"] {

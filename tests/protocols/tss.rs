@@ -879,6 +879,19 @@ fn raw_measurements_resolve_from_global_manifests_without_component_name_tables(
             .remove("Img4PayloadType");
         let mut id = identity();
         manifest_mut(&mut id).insert(name.into(), entry);
+        if name == "FutureFilesystem" {
+            let info = id.value.as_dictionary_mut().unwrap()["Info"]
+                .as_dictionary_mut()
+                .unwrap();
+            let variant = info.remove("MacOSVariant").unwrap();
+            info.insert("RecoveryVariant".into(), variant);
+        } else if name == "RenamedFilesystem" {
+            let info = id.value.as_dictionary_mut().unwrap()["Info"]
+                .as_dictionary_mut()
+                .unwrap();
+            let variant = info.remove("MacOSVariant").unwrap();
+            info.insert("Variant".into(), variant);
+        }
         let original = id.value.clone();
         let response = |tag: &[u8; 4], digest: &[u8]| {
             let fields = measurement_property(b"DGST", &img4::element(4, digest));
@@ -930,6 +943,54 @@ fn raw_measurements_resolve_from_global_manifests_without_component_name_tables(
         tss::validate_ticket_for_identity(&request, &response(b"next", &digest), &id).unwrap();
         assert!(tss::validate_ticket_for_identity(&request, &global, &id).is_err());
     }
+}
+
+#[test]
+fn real_apple_global_manifest_resolves_renamed_raw_components() {
+    let bytes = include_bytes!("../fixtures/ipsw-verification/restore.im4m");
+    let reference = img4::Manifest::parse(bytes).unwrap();
+    let digests = reference.digests().unwrap();
+    let mut id = identity();
+    id.value
+        .as_dictionary_mut()
+        .unwrap()
+        .insert("ApBoardID".into(), 38u64.into());
+    let mut request = plist::Dictionary::new();
+    for (name, path, tag) in [
+        ("ArchiveAlpha", "alpha.aea", b"bsys"),
+        ("ArchiveBeta", "beta.aea", b"rosi"),
+    ] {
+        let entry = wire::dict([
+            ("Trusted", true.into()),
+            ("Digest", Value::Data(digests[tag].to_vec())),
+        ]);
+        request.insert(name.into(), entry.clone());
+        let mut entry = entry;
+        entry
+            .as_dictionary_mut()
+            .unwrap()
+            .insert("Info".into(), wire::dict([("Path", path.into())]));
+        manifest_mut(&mut id).insert(name.into(), entry);
+    }
+    // Only type resolution is under test; these placeholders are not restored.
+    let file = fixture_files(
+        Some(id.clone()),
+        false,
+        &[
+            ("alpha.aea", b"raw image"),
+            ("beta.aea", b"raw image"),
+            (
+                "Firmware/Manifests/restore/macOS Customer/apticket.j313ap.im4m",
+                bytes,
+            ),
+        ],
+    );
+    Ipsw::open(file.path())
+        .unwrap()
+        .validate_identity(&mut id)
+        .unwrap();
+    let response = wire::dict([("ApImg4Ticket", Value::Data(bytes.to_vec()))]);
+    tss::validate_ticket_for_identity(&Value::Dictionary(request), &response, &id).unwrap();
 }
 
 #[test]
