@@ -58,6 +58,7 @@ pub(super) fn wait_restored_ecid(
     timeout: Duration,
 ) -> Result<(Session, MuxStream, u64)> {
     crate::log!(Info, "restore", "Waiting for the Mac restore service");
+    let mut events = crate::usb::DeviceEvents::new();
     let deadline = Instant::now() + timeout;
     let mut last_error = None;
     let mut reported_error = None;
@@ -152,6 +153,8 @@ pub(super) fn wait_restored_ecid(
                     ecid
                 )));
         }
-        std::thread::sleep(Duration::from_secs(1));
+        let timeout =
+            Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now()));
+        events.wait(timeout);
     }
 }

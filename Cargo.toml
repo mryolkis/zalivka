@@ -25,6 +25,7 @@ crc32fast = "1.5"
 base16ct = { version = "1", features = ["alloc"] }
 oxiri = "0.3"
 nusb = "0.2.9"
+futures-core = "0.3"
 plist = { version = "~1.10.3", features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] }
 quick-xml = "0.42"
 serde = { version = "1", features = ["derive"] }

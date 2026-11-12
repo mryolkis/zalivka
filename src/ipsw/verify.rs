@@ -69,9 +69,7 @@ struct EntryDigests {
 
 #[derive(Default)]
 struct EntryVerification {
-    bytes: u64,
     digests: usize,
-    aea_deferred: bool,
     aea: Option<aea::Verification>,
     payload_type: Option<[u8; 4]>,
 }
@@ -136,9 +134,14 @@ impl Ipsw {
             report.manifest_digests += verified.digests;
             report.uncompressed_bytes = report
                 .uncompressed_bytes
-                .checked_add(verified.bytes)
+                .checked_add(length)
                 .context("IPSW size overflow")?;
-            if verified.aea_deferred {
+            if !requirements_for_file.components.is_empty()
+                && verified
+                    .aea
+                    .as_ref()
+                    .is_some_and(|aea| !aea.content_verified)
+            {
                 report.aea_content_digests_not_checked.push(name.clone());
             }
             types.insert(name.clone(), verified.payload_type);
@@ -165,7 +168,7 @@ impl Ipsw {
             }
             report.files.push(FileVerification {
                 path: name.clone(),
-                bytes: verified.bytes,
+                bytes: length,
                 manifest_digests: verified.digests,
                 crc_only: verified.digests == 0
                     && !verified
@@ -182,7 +185,7 @@ impl Ipsw {
                 index + 1,
                 report.entries,
                 name,
-                verified.bytes / 1048576,
+                length / 1048576,
             );
         }
         for (index, identity) in self.identity_values() {
@@ -328,7 +331,6 @@ impl Ipsw {
 
 struct ProgressReader<R> {
     inner: R,
-    bytes: u64,
     progress: crate::progress::Progress,
 }
 
@@ -336,7 +338,6 @@ impl<R: Read> Read for ProgressReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         crate::progress::check_cancelled()?;
         let size = self.inner.read(buffer)?;
-        self.bytes += size as u64;
         self.progress.advance(size as u64);
         Ok(size)
     }
@@ -366,14 +367,9 @@ impl EntryDigests {
             crate::progress::Progress::new(format!("Verifying {name}"), Some(length), 0);
         let mut n =
             read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
-        let aea = buffer[..n].starts_with(b"AEA1");
-        if aea {
+        if buffer[..n].starts_with(b"AEA1") {
             let inner = std::io::Cursor::new(&buffer[..n]).chain(reader);
-            let mut measured = ProgressReader {
-                inner,
-                bytes: 0,
-                progress,
-            };
+            let mut measured = ProgressReader { inner, progress };
             let mut hashes = HashMap::new();
             for component in &self.components {
                 if let Entry::Vacant(slot) = hashes.entry(component.expected.len()) {
@@ -393,12 +389,10 @@ impl EntryDigests {
             // EOF, so ZIP CRC and length checks cover the entire stored entry.
             std::io::copy(&mut measured, &mut std::io::sink())
                 .with_context(|| format!("checking ZIP entry {name}"))?;
-            ensure!(measured.bytes == length, "truncated ZIP entry {name}");
-            let mut verified = EntryVerification {
-                bytes: measured.bytes,
-                aea_deferred: !self.components.is_empty() && !report.content_verified,
-                ..Default::default()
-            };
+            ensure!(
+                measured.progress.completed() == length,
+                "truncated ZIP entry {name}"
+            );
             if report.content_verified {
                 let actual: HashMap<_, _> = hashes
                     .into_iter()
@@ -410,11 +404,17 @@ impl EntryDigests {
                         "AEA plaintext manifest digest mismatch: {name}"
                     );
                 }
-                verified.digests = self.components.len();
             }
-            verified.aea = Some(report);
             measured.progress.finish();
-            return Ok(verified);
+            return Ok(EntryVerification {
+                digests: if report.content_verified {
+                    self.components.len()
+                } else {
+                    0
+                },
+                aea: Some(report),
+                payload_type: None,
+            });
         }
         let mut bundle =
             (!self.components.is_empty() && firmware::plist_prefix(&buffer[..n])).then(Vec::new);
@@ -431,11 +431,9 @@ impl EntryDigests {
             None
         };
         let mut inputs = vec![DigestInput::File];
-        // AEA manifest digests describe decrypted content, not the ZIP bytes.
         let checks = self
             .components
             .iter()
-            .filter(|_| !aea)
             .map(|component| (component, DigestInput::retag(&buffer[..n], component.tag)))
             .collect::<Vec<_>>();
         let mut hashes = HashMap::new();
@@ -450,7 +448,6 @@ impl EntryDigests {
             }
         }
         let mut verified = EntryVerification {
-            aea_deferred: aea && !self.components.is_empty(),
             payload_type: img4::payload_type(&buffer[..n]),
             ..Default::default()
         };
@@ -466,13 +463,12 @@ impl EntryDigests {
                 bytes.extend_from_slice(&buffer[..n]);
             }
             for ((_, input), hash) in &mut hashes {
-                input.update(hash.as_mut(), &buffer[..n], verified.bytes);
+                input.update(hash.as_mut(), &buffer[..n], progress.completed());
             }
-            verified.bytes += n as u64;
             progress.advance(n as u64);
             n = read_chunk(reader, buffer).with_context(|| format!("checking ZIP entry {name}"))?;
         }
-        ensure!(verified.bytes == length, "truncated ZIP entry {name}");
+        ensure!(progress.completed() == length, "truncated ZIP entry {name}");
         if let Some(file) = &mut container {
             for range in firmware::payload_ranges_from(file, length)? {
                 let input = DigestInput::Payload(range.start, range.end);

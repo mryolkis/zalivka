@@ -231,7 +231,7 @@ impl Progress {
             logged_at: now,
             finished: false,
         };
-        Event::Transfer(progress.update(now, false)).emit();
+        Event::Transfer(progress.update(now)).emit();
         crate::logging::emit(
             progress.level(),
             "transfer",
@@ -259,7 +259,7 @@ impl Progress {
         self.total = self.total.filter(|total| *total >= self.completed);
         let now = Instant::now();
         if now.duration_since(self.sampled_at) >= INTERVAL {
-            let update = self.update(now, false);
+            let update = self.update(now);
             if now.duration_since(self.logged_at) >= Duration::from_secs(30) {
                 crate::logging::emit(
                     self.level(),
@@ -279,7 +279,7 @@ impl Progress {
             return;
         }
         self.finished = true;
-        let update = self.update(Instant::now(), true);
+        let update = self.update(Instant::now());
         crate::logging::emit(
             self.level(),
             "transfer",
@@ -290,7 +290,7 @@ impl Progress {
 
     pub fn report(&self) {
         if !self.finished {
-            Event::Transfer(self.update(Instant::now(), false)).emit();
+            Event::Transfer(self.update(Instant::now())).emit();
         }
     }
 
@@ -302,8 +302,8 @@ impl Progress {
         }
     }
 
-    fn update(&self, now: Instant, finished: bool) -> Update {
-        let (elapsed, bytes) = if finished {
+    fn update(&self, now: Instant) -> Update {
+        let (elapsed, bytes) = if self.finished {
             (
                 now.duration_since(self.started).as_secs_f64(),
                 self.completed - self.initial_bytes,
@@ -325,7 +325,7 @@ impl Progress {
                 0.0
             },
             elapsed_seconds: now.duration_since(self.started).as_secs_f64(),
-            finished,
+            finished: self.finished,
         }
     }
 }
@@ -335,7 +335,8 @@ impl Drop for Progress {
         // Interrupted requests and partial HTTP ranges also end their stream.
         // A retry gets a new identity; do not leave the previous card behind.
         if !self.finished {
-            Event::Transfer(self.update(Instant::now(), true)).emit();
+            self.finished = true;
+            Event::Transfer(self.update(Instant::now())).emit();
         }
     }
 }

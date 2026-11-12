@@ -9,17 +9,26 @@ use crate::platform::windows::{
 use anyhow::bail;
 use anyhow::{Context, Result, ensure};
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-use nusb::transfer::{Buffer, In};
+use nusb::transfer::In;
 use nusb::{
     Device, Interface, MaybeFuture,
-    transfer::{Bulk, ControlIn, ControlOut, Out},
+    transfer::{Buffer, Bulk, ControlIn, ControlOut, Out},
 };
-use std::time::Duration;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
-    time::Instant,
+    sync::Arc,
+    task::{Context as TaskContext, Poll, Waker},
 };
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
+};
+
+#[cfg(any(not(any(target_os = "linux", target_os = "macos")), test))]
+#[path = "completion.rs"]
+mod completion;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use completion::CompletionReady;
 
 /// Use the normal OS USB backend first, then Apple's installed Windows filter.
 pub(crate) enum UsbInterface {
@@ -53,6 +62,8 @@ impl UsbInterface {
             Self::Native(_) => {
                 if cfg!(windows) {
                     "winusb"
+                } else if cfg!(target_os = "macos") {
+                    "iokit"
                 } else {
                     "usbfs"
                 }
@@ -102,7 +113,10 @@ impl UsbInterface {
 
     pub(super) fn bulk_out(&self, address: u8) -> Result<BulkOutput> {
         match self {
-            Self::Native(i) => Ok(BulkOutput::Native(i.endpoint(address)?)),
+            Self::Native(i) => Ok(BulkOutput::Native {
+                endpoint: i.endpoint(address)?,
+                buffers: Vec::new(),
+            }),
             #[cfg(windows)]
             Self::Apple(i) => Ok(BulkOutput::Apple(i.clone(), i.pipe(address)?)),
         }
@@ -111,7 +125,10 @@ impl UsbInterface {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(super) fn bulk_in(&self, address: u8) -> Result<BulkInput> {
         match self {
-            Self::Native(i) => Ok(BulkInput::Native(i.endpoint(address)?)),
+            Self::Native(i) => Ok(BulkInput::Native {
+                endpoint: i.endpoint(address)?,
+                ready: Arc::new(CompletionReady::default()),
+            }),
             #[cfg(windows)]
             Self::Apple(i) => Ok(BulkInput::Apple(BulkReader::new(
                 i.clone(),
@@ -122,54 +139,55 @@ impl UsbInterface {
 }
 
 pub(super) enum BulkOutput {
-    Native(nusb::Endpoint<Bulk, Out>),
+    Native {
+        endpoint: nusb::Endpoint<Bulk, Out>,
+        buffers: Vec<Buffer>,
+    },
     #[cfg(windows)]
     Apple(AppleUsb, u8),
 }
 
 impl BulkOutput {
-    pub(super) fn write(&mut self, data: &[u8]) -> Result<()> {
+    pub(super) fn write_batch(
+        &mut self,
+        packets: &[&[u8]],
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<()> {
         match self {
-            Self::Native(ep) => {
-                let sent = ep.transfer_blocking(data.to_vec().into(), TIMEOUT);
-                sent.status?;
-                ensure!(sent.actual_len == data.len(), "short USB bulk write");
-                Ok(())
-            }
-            #[cfg(windows)]
-            Self::Apple(i, pipe) => i.bulk_out(*pipe, data, TIMEOUT),
-        }
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    pub(super) fn write_batch(&mut self, packets: &[&[u8]], cancelled: &AtomicBool) -> Result<()> {
-        match self {
-            Self::Native(ep) => {
+            Self::Native { endpoint, buffers } => {
                 let result = (|| {
-                    for packet in packets {
-                        ensure!(
-                            !cancelled.load(Ordering::Acquire),
-                            "USB mux session cancelled"
-                        );
-                        ep.submit(packet.to_vec().into());
-                    }
                     let deadline = Instant::now() + TIMEOUT;
-                    for packet in packets {
-                        ensure!(
-                            !cancelled.load(Ordering::Acquire),
-                            "USB mux session cancelled"
-                        );
-                        let sent = ep
-                            .wait_next_complete(deadline.saturating_duration_since(Instant::now()))
-                            .context("USB bulk write burst timed out")?;
-                        sent.status?;
-                        ensure!(sent.actual_len == packet.len(), "short USB bulk write");
+                    // Bound both outstanding requests and retained allocations.
+                    for burst in packets.chunks(8) {
+                        for packet in burst {
+                            ensure!(
+                                !cancelled.is_some_and(|c| c.load(Ordering::Acquire)),
+                                "USB mux session cancelled"
+                            );
+                            let buffer =
+                                fill_buffer(buffers.pop(), packet, |len| endpoint.allocate(len));
+                            endpoint.submit(buffer);
+                        }
+                        for packet in burst {
+                            ensure!(
+                                !cancelled.is_some_and(|c| c.load(Ordering::Acquire)),
+                                "USB mux session cancelled"
+                            );
+                            let sent = endpoint
+                                .wait_next_complete(
+                                    deadline.saturating_duration_since(Instant::now()),
+                                )
+                                .context("USB bulk write burst timed out")?;
+                            buffers.push(sent.buffer);
+                            sent.status?;
+                            ensure!(sent.actual_len == packet.len(), "short USB bulk write");
+                        }
                     }
                     Ok(())
                 })();
                 if result.is_err() {
                     // Retain all buffers until the cancelled requests complete.
-                    cancel_and_drain(ep);
+                    cancel_and_drain(endpoint);
                 }
                 result
             }
@@ -182,7 +200,7 @@ impl BulkOutput {
                 // the shared mux batch and ready-ACK processing still apply.
                 for packet in packets {
                     ensure!(
-                        !cancelled.load(Ordering::Acquire),
+                        !cancelled.is_some_and(|c| c.load(Ordering::Acquire)),
                         "USB mux session cancelled"
                     );
                     device.bulk_out(*pipe, packet, TIMEOUT)?;
@@ -195,7 +213,10 @@ impl BulkOutput {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) enum BulkInput {
-    Native(nusb::Endpoint<Bulk, In>),
+    Native {
+        endpoint: nusb::Endpoint<Bulk, In>,
+        ready: Arc<CompletionReady>,
+    },
     #[cfg(windows)]
     Apple(BulkReader),
 }
@@ -204,34 +225,43 @@ pub(super) enum BulkInput {
 impl BulkInput {
     pub(super) fn input_ready(&self) -> Option<crate::mux::InputReady> {
         match self {
+            Self::Native { ready, .. } => {
+                let ready = ready.clone();
+                Some(crate::mux::InputReady::new(move |timeout| {
+                    Ok(ready.wait(timeout))
+                }))
+            }
             #[cfg(windows)]
             Self::Apple(reader) => reader.input_ready(),
-            _ => None,
         }
     }
 
     pub(super) fn read(&mut self) -> Result<Vec<u8>> {
-        // The IN request stays pending in the driver. Poll completion without
-        // waiting under the mux lock; yield_link sleeps outside it when idle.
-        let timeout = Duration::ZERO;
         match self {
-            Self::Native(ep) => {
-                if ep.pending() == 0 {
-                    ep.submit(Buffer::new(65536));
+            Self::Native { endpoint, ready } => {
+                // Keep input queued while mux workers process earlier packets.
+                while endpoint.pending() < 4 {
+                    endpoint.submit(endpoint.allocate(65536));
                 }
-                let Some(mut completion) = ep.wait_next_complete(timeout) else {
+                ready.clear();
+                let waker = Waker::from(ready.clone());
+                let mut cx = TaskContext::from_waker(&waker);
+                let Poll::Ready(mut completion) = endpoint.poll_next_complete(&mut cx) else {
                     return Ok(Vec::new());
                 };
                 match completion.status {
-                    Ok(()) | Err(nusb::transfer::TransferError::Cancelled) => {
-                        let data = completion.buffer[..completion.actual_len].to_vec();
-                        // clear() preserves the capacity and requested read length.
-                        completion.buffer.clear();
-                        ep.submit(completion.buffer);
-                        Ok(data)
-                    }
-                    Err(error) => Err(error.into()),
+                    // Windows may cancel IN when its submitting service worker
+                    // exits. Preserve any partial input and rearm on this worker.
+                    Ok(()) | Err(nusb::transfer::TransferError::Cancelled) => {}
+                    Err(error) => return Err(error.into()),
                 }
+                let data = completion.buffer[..completion.actual_len].to_vec();
+                completion.buffer.clear();
+                endpoint.submit(completion.buffer);
+                // Poll again before waiting: the next queued request may already
+                // be complete and has not yet registered its own waker.
+                ready.signal();
+                Ok(data)
             }
             #[cfg(windows)]
             Self::Apple(reader) => reader.read(),
@@ -240,12 +270,26 @@ impl BulkInput {
 }
 
 /// Cancellation is asynchronous: retire every request before releasing its buffer.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn cancel_and_drain<Dir: nusb::transfer::EndpointDirection>(
-    endpoint: &mut nusb::Endpoint<Bulk, Dir>,
-) {
+fn cancel_and_drain(endpoint: &mut nusb::Endpoint<Bulk, Out>) {
     endpoint.cancel_all();
     while endpoint.pending() != 0 {
         let _ = endpoint.wait_next_complete(Duration::from_secs(1));
     }
 }
+
+fn fill_buffer(
+    buffer: Option<Buffer>,
+    data: &[u8],
+    allocate: impl FnOnce(usize) -> Buffer,
+) -> Buffer {
+    let mut buffer = buffer
+        .filter(|buffer| buffer.capacity() >= data.len())
+        .unwrap_or_else(|| allocate(data.len()));
+    buffer.clear();
+    buffer.extend_from_slice(data);
+    buffer
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/platform/usb/backend.rs"]
+mod tests;

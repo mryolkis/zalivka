@@ -171,6 +171,42 @@ fn scanning_devices_does_not_start_a_continuous_animation() {
 }
 
 #[test]
+fn hotplug_during_a_scan_remains_pending_after_its_old_result() {
+    let mut app = english_app();
+    let ctx = egui::Context::default();
+    app.scanning = true;
+    app.usb_scan_pending = true;
+    app.detect(&ctx);
+    assert!(
+        app.usb_scan_pending,
+        "an in-flight scan must not consume a new USB event"
+    );
+    app.tx
+        .send(Event::Scan {
+            devices: Ok(vec![]),
+        })
+        .unwrap();
+    app.poll(&ctx);
+    assert!(!app.scanning);
+    assert!(
+        app.usb_scan_pending,
+        "the next scan must observe the USB change"
+    );
+}
+
+#[test]
+fn hotplug_retries_cover_interface_startup_then_restore_the_fallback_interval() {
+    let mut app = english_app();
+    assert_eq!(app.scan_interval(), SCAN_INTERVAL);
+    app.usb_retry_until = Some(Instant::now() + Duration::from_secs(5));
+    assert_eq!(app.scan_interval(), USB_RETRY_INTERVAL);
+    app.usb_retry_until = Some(Instant::now() - Duration::from_secs(1));
+    assert_eq!(app.scan_interval(), SCAN_INTERVAL);
+    app.scan_error = Some("interface not ready".into());
+    assert_eq!(app.scan_interval(), SCAN_INTERVAL);
+}
+
+#[test]
 fn throttled_background_paints_do_not_delay_input_or_drop_worker_updates() {
     let mut app = english_app();
     app.job = Some(job(Action::Restore));
@@ -2145,6 +2181,217 @@ fn journal_keeps_restore_buttons_visible_without_scrolling_in_both_languages() {
 }
 
 #[test]
+fn journal_geometry_stays_stable_while_the_window_height_changes() {
+    for language in ["en", "ru"] {
+        for width in [480.0, 1280.0] {
+            for (empty, long) in [(true, false), (false, false), (false, true)] {
+                let ctx = egui::Context::default();
+                configure(&ctx);
+                let mut app = english_app();
+                app.localization.select(language);
+                app.journal_open = true;
+                app.scanning = true;
+                if !empty {
+                    for _ in 0..40 {
+                        let message = if long {
+                            format!("Journal row {}", "long ".repeat(100))
+                        } else {
+                            "Journal row".into()
+                        };
+                        app.journal_line(Record::new(Level::Info, "test", message));
+                    }
+                }
+                let mut previous: Option<(f32, egui::Rect)> = None;
+                for height in [
+                    1000.0, 800.0, 701.0, 700.0, 699.0, 630.0, 480.0, 360.0, 800.0, 1000.0,
+                ] {
+                    let mut rects = Vec::new();
+                    for _ in 0..5 {
+                        let output = render_pass(
+                            &ctx,
+                            egui::RawInput {
+                                screen_rect: Some(egui::Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    egui::vec2(width, height),
+                                )),
+                                ..Default::default()
+                            },
+                            |ctx| {
+                                ctx.root_ui(|ui| {
+                                    let id = ui.scope_id().with_salt(egui::IdSalt::new("journal"));
+                                    app.view(ui);
+                                    rects.push(
+                                        egui::containers::panel::PanelState::load(ctx, id)
+                                            .unwrap()
+                                            .outer_rect,
+                                    );
+                                })
+                            },
+                        );
+                        if !empty {
+                            assert!(
+                                output.shapes.iter().any(|shape| {
+                                    if let egui::Shape::Text(text) = &shape.shape
+                                        && text.galley.text().contains("Journal row")
+                                    {
+                                        let rect = text.galley.rect.translate(text.pos.to_vec2());
+                                        return rect.top() >= shape.clip_rect.top()
+                                            && rect.bottom() <= shape.clip_rect.bottom();
+                                    }
+                                    false
+                                }),
+                                "no complete journal row: {language}, {width}x{height}, long={long}, panel={:?}, rows={:?}",
+                                rects.last(),
+                                output
+                                    .shapes
+                                    .iter()
+                                    .filter_map(|shape| {
+                                        if let egui::Shape::Text(text) = &shape.shape
+                                            && text.galley.text().contains("Journal row")
+                                        {
+                                            return Some((
+                                                text.galley.rect.translate(text.pos.to_vec2()),
+                                                shape.clip_rect,
+                                            ));
+                                        }
+                                        None
+                                    })
+                                    .collect::<Vec<_>>()
+                            );
+                        }
+                    }
+                    for pair in rects.windows(2) {
+                        assert!(
+                            (pair[0].height() - pair[1].height()).abs() < 1.0,
+                            "journal height oscillates: {language}, width={width}, height={height}, empty={empty}: {rects:?}"
+                        );
+                    }
+                    let rect = *rects.last().unwrap();
+                    if let Some((previous_height, previous_rect)) = previous
+                        && (height - previous_height).abs() <= 1.0
+                    {
+                        assert!(
+                            (rect.height() - previous_rect.height()).abs() <= 1.0,
+                            "a one-point window resize jumps the journal: {previous_rect:?} -> {rect:?}"
+                        );
+                    }
+                    previous = Some((height, rect));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn journal_toolbar_centers_its_labels_and_buttons_in_one_or_two_rows() {
+    for language in ["en", "ru"] {
+        for width in [480.0, 700.0, 1280.0] {
+            let ctx = egui::Context::default();
+            configure(&ctx);
+            let mut app = english_app();
+            app.localization.select(language);
+            app.journal_open = true;
+            app.scanning = true;
+            app.journal_line(Record::new(Level::Info, "test", "Journal row"));
+            let labels = {
+                let _language = app.localization.enter();
+                [
+                    "Journal",
+                    "Technical details",
+                    "Open logs folder",
+                    "Copy",
+                    "Hide",
+                ]
+                .map(zalivka::localization::text)
+            };
+            let mut panel = egui::Rect::NOTHING;
+            for height in [1000.0, 701.0, 699.0, 480.0] {
+                let output = render_pass(
+                    &ctx,
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, height),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        ctx.root_ui(|ui| {
+                            let id = ui.scope_id().with_salt(egui::IdSalt::new("journal"));
+                            app.view(ui);
+                            panel = egui::containers::panel::PanelState::load(ctx, id)
+                                .unwrap()
+                                .outer_rect;
+                        })
+                    },
+                );
+                let [title, details, folder, copy, hide] = labels.each_ref().map(|label| {
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| {
+                            if let egui::Shape::Text(text) = &shape.shape
+                                && text.galley.text() == label
+                            {
+                                let rect = text.galley.rect.translate(text.pos.to_vec2());
+                                if panel.contains_rect(rect) {
+                                    return Some(rect);
+                                }
+                            }
+                            None
+                        })
+                        .unwrap_or_else(|| panic!("{language}, {width}x{height}: missing {label}"))
+                });
+                assert!((title.center().y - details.center().y).abs() < 1.0);
+                for button in [folder, copy, hide] {
+                    assert!((button.center().y - folder.center().y).abs() < 1.0);
+                    let background = output
+                        .shapes
+                        .iter()
+                        .filter_map(|shape| {
+                            if let egui::Shape::Rect(rect) = &shape.shape
+                                && rect.rect.contains_rect(button)
+                                && rect.rect.height() <= 40.0
+                            {
+                                return Some(rect.rect);
+                            }
+                            None
+                        })
+                        .min_by(|a, b| a.area().total_cmp(&b.area()))
+                        .unwrap();
+                    assert!(
+                        background.height() >= 27.0,
+                        "compressed journal button: {background:?}"
+                    );
+                    assert!((background.center().y - button.center().y).abs() < 1.0);
+                }
+                let separator = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| {
+                        if let egui::Shape::LineSegment { points, .. } = &shape.shape
+                            && (points[1].x - points[0].x).abs() > panel.width() - 2.0
+                            && (points[1].y - points[0].y).abs() < 0.1
+                            && points[0].y > title.bottom()
+                            && points[0].y < panel.bottom()
+                        {
+                            return Some(points[0].y);
+                        }
+                        None
+                    })
+                    .expect("journal toolbar separator");
+                let controls_center = (title.center().y + folder.center().y) * 0.5;
+                let header_center = (panel.top() + 1.0 + separator) * 0.5;
+                assert!(
+                    (controls_center - header_center).abs() < 1.5,
+                    "toolbar is not centered: {language}, {width}x{height}: controls={controls_center}, header={header_center}, panel={panel:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn narrow_cards_keep_text_and_controls_inside_their_bounds() {
     for width in [480.0, 700.0, 840.0, 1020.0, 1280.0] {
         for automatic in [false, true] {
@@ -2495,6 +2742,7 @@ fn dfu_completion_rescans_without_retaining_an_unrelated_ecid() {
     assert!(app.setup.ecid.is_empty());
     assert!(app.firmware.is_none());
     assert!(app.last_scan.elapsed() >= SCAN_INTERVAL);
+    assert!(app.usb_scan_pending);
 }
 
 #[test]

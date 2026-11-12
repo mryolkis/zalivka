@@ -4,29 +4,55 @@ use super::TIMEOUT;
 use crate::device::{DeviceInfo, Mode};
 #[cfg(windows)]
 use crate::platform::windows::apple::AppleUsb;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use nusb::{
-    MaybeFuture,
+    Interface, MaybeFuture,
     transfer::{Buffer, Bulk, In, Out},
 };
 
 pub(crate) struct Portal {
+    number: u8,
     output: nusb::Endpoint<Bulk, Out>,
     input: nusb::Endpoint<Bulk, In>,
 }
 
 impl Portal {
-    fn exchange(&mut self, request: &[u8], length: usize) -> Result<Vec<u8>> {
-        let sent = self
-            .output
-            .transfer_blocking(request.to_vec().into(), TIMEOUT);
+    fn open(interface: &Interface, number: u8, endpoint: u8) -> Result<Self> {
+        Ok(Self {
+            number,
+            output: interface.endpoint(endpoint)?,
+            input: interface.endpoint(endpoint | 0x80)?,
+        })
+    }
+
+    fn exchange(
+        &mut self,
+        index: u16,
+        args: &[u32],
+        data: &[u8],
+        words: u16,
+        length: usize,
+    ) -> Result<Vec<u8>> {
+        let request = packet(self.number, index, args, data, words)?;
+        let request_len = request.len();
+        let sent = self.output.transfer_blocking(request.into(), TIMEOUT);
         sent.status?;
-        ensure!(sent.actual_len == request.len(), "short KIS USB write");
+        ensure!(sent.actual_len == request_len, "short KIS USB write");
         let capacity = length.next_multiple_of(self.input.max_packet_size());
         let received = self.input.transfer_blocking(Buffer::new(capacity), TIMEOUT);
         received.status?;
         ensure!(received.actual_len <= length, "oversized KIS reply");
-        Ok(received.buffer[..received.actual_len].to_vec())
+        Ok(received.buffer.into_vec())
+    }
+
+    fn write32(&mut self, index: u16, value: u32) -> Result<()> {
+        let reply = self.exchange(index, &[value], &[], 1, 20)?;
+        check_reply(&reply)?;
+        ensure!(
+            u32_at(&reply, 12)? == 4,
+            "KIS register write was not acknowledged"
+        );
+        Ok(())
     }
 }
 
@@ -51,60 +77,24 @@ impl Kis {
             }
         };
         let _ = info;
-        let mut kis = Self::Native(Box::new([
-            Portal {
-                output: interface.endpoint(1)?,
-                input: interface.endpoint(0x81)?,
-            },
-            Portal {
-                output: interface.endpoint(3)?,
-                input: interface.endpoint(0x83)?,
-            },
-        ]));
+        let mut portals = Box::new([
+            Portal::open(&interface, 1, 1)?,
+            Portal::open(&interface, 0x10, 3)?,
+        ]);
         for (index, value) in [(0x0a, 0x21u32), (0x14, 1)] {
-            kis.write32(1, index, value)?;
+            portals[0].write32(index, value)?;
         }
-        Ok(kis)
-    }
-
-    fn exchange(
-        &mut self,
-        portal: u8,
-        index: u16,
-        args: &[u32],
-        data: &[u8],
-        words: u16,
-        reply_len: usize,
-    ) -> Result<Vec<u8>> {
-        let request = packet(portal, index, args, data, words)?;
-        match self {
-            Self::Native(portals) => match portal {
-                1 => portals[0].exchange(&request, reply_len),
-                0x10 => portals[1].exchange(&request, reply_len),
-                _ => bail!("unsupported KIS portal"),
-            },
-            #[cfg(windows)]
-            Self::Apple(_) => bail!("raw KIS portals require WinUSB"),
-        }
-    }
-
-    fn write32(&mut self, portal: u8, index: u16, value: u32) -> Result<()> {
-        let reply = self.exchange(portal, index, &[value], &[], 1, 20)?;
-        check_reply(&reply)?;
-        ensure!(
-            u32_at(&reply, 12)? == 4,
-            "KIS register write was not acknowledged"
-        );
-        Ok(())
+        Ok(Self::Native(portals))
     }
 
     pub(crate) fn info(&mut self) -> Result<DeviceInfo> {
-        #[cfg(windows)]
-        if let Self::Apple(apple) = self {
-            return apple.kis_info();
+        match self {
+            Self::Native(portals) => {
+                device_info(&portals[1].exchange(0x100, &[], &[], 0xc0, 788)?)
+            }
+            #[cfg(windows)]
+            Self::Apple(apple) => apple.kis_info(),
         }
-        let reply = self.exchange(0x10, 0x100, &[], &[], 0xc0, 788)?;
-        device_info(&reply)
     }
 
     pub(crate) fn upload(&mut self, data: &[u8], finish: bool) -> Result<()> {
@@ -119,9 +109,8 @@ impl Kis {
             match self {
                 #[cfg(windows)]
                 Self::Apple(apple) => apple.kis_upload_chunk(address, chunk)?,
-                _ => {
-                    let reply = self.exchange(
-                        0x10,
+                Self::Native(portals) => {
+                    let reply = portals[1].exchange(
                         0x0d,
                         &[address as u32, (address >> 32) as u32, chunk.len() as u32],
                         chunk,
@@ -138,7 +127,7 @@ impl Kis {
             match self {
                 #[cfg(windows)]
                 Self::Apple(apple) => apple.kis_boot(data.len() as u32)?,
-                _ => self.write32(0x10, 0x103, data.len() as u32)?,
+                Self::Native(portals) => portals[1].write32(0x103, data.len() as u32)?,
             }
         }
         Ok(())

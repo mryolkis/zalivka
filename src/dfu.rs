@@ -131,9 +131,10 @@ pub fn upload(
     );
     if mode == Mode::Recovery {
         usb.control_out(0x41, 0, 0, 0, &[])?;
-        for chunk in data.chunks(0x8000) {
-            usb.bulk_out(chunk)?;
-            progress.advance(chunk.len() as u64);
+        for burst in data.chunks(8 * 0x8000) {
+            let packets: Vec<_> = burst.chunks(0x8000).collect();
+            usb.bulk_out_batch(&packets)?;
+            progress.advance(burst.len() as u64);
         }
         if data.len().is_multiple_of(512) {
             usb.bulk_out(&[])?;

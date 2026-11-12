@@ -17,7 +17,11 @@ use eframe::egui;
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
+    task::{Wake, Waker},
     time::{Duration, Instant},
 };
 use zalivka::{
@@ -29,10 +33,24 @@ use zalivka::{
 };
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
+const IDLE_SCAN_INTERVAL: Duration = Duration::from_secs(10);
+const USB_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 // Progress arrives twice per second. Background work must not drive the GPU
 // at the display's refresh rate; egui still repaints immediately for user input.
 const UI_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const NOTICE_LIFETIME: Duration = Duration::from_secs(5);
+
+struct UsbRepaint(egui::Context);
+
+impl Wake for UsbRepaint {
+    fn wake(self: Arc<Self>) {
+        self.0.request_repaint();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.request_repaint();
+    }
+}
 
 fn trim_logs(records: &mut VecDeque<Record>) {
     if records.len() > 4000 {
@@ -65,7 +83,9 @@ pub(crate) fn run() -> Result<()> {
         options,
         Box::new(|cc| {
             configure(&cc.egui_ctx);
-            Ok(Box::new(App::new()))
+            let mut app = App::new();
+            app.usb_events = Some(usb::DeviceEvents::new());
+            Ok(Box::new(app))
         }),
     )
     .map_err(|error| anyhow::anyhow!("opening desktop interface: {error}"))
@@ -129,6 +149,10 @@ struct App {
     host: std::result::Result<Option<drivers::HostStatus>, String>,
     windows_reboot_required: bool,
     last_scan: Instant,
+    usb_events: Option<usb::DeviceEvents>,
+    usb_waker: Option<Waker>,
+    usb_scan_pending: bool,
+    usb_retry_until: Option<Instant>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
     next_job: u64,
@@ -159,6 +183,10 @@ impl App {
             host: Ok(None),
             windows_reboot_required: false,
             last_scan: Instant::now() - SCAN_INTERVAL,
+            usb_events: None,
+            usb_waker: None,
+            usb_scan_pending: true,
+            usb_retry_until: None,
             tx,
             rx,
             next_job: 0,
@@ -261,6 +289,7 @@ impl App {
             return;
         }
         self.scanning = true;
+        self.usb_scan_pending = false;
         self.last_scan = Instant::now();
         if let Err(e) = self.background(ctx, "detect", || Event::Scan {
             devices: usb::detect().map_err(|e| format!("{e:#}")),
@@ -278,6 +307,36 @@ impl App {
                 self.checking_host = false;
                 self.host = Err(error.to_string());
             }
+        }
+    }
+    fn poll_usb(&mut self, ctx: &egui::Context) {
+        if let Some(events) = &mut self.usb_events {
+            let waker = self
+                .usb_waker
+                .get_or_insert_with(|| Waker::from(Arc::new(UsbRepaint(ctx.clone()))));
+            if events.poll(waker) {
+                self.usb_scan_pending = true;
+                // A Windows composite device may appear before its interfaces.
+                self.usb_retry_until = Some(Instant::now() + Duration::from_secs(5));
+            }
+        }
+    }
+
+    fn scan_interval(&self) -> Duration {
+        if self
+            .usb_retry_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            USB_RETRY_INTERVAL
+        } else if self
+            .usb_events
+            .as_ref()
+            .is_some_and(usb::DeviceEvents::available)
+            && self.scan_error.is_none()
+        {
+            IDLE_SCAN_INTERVAL
+        } else {
+            SCAN_INTERVAL
         }
     }
     fn refresh_firmware(&mut self, ctx: &egui::Context, retry: bool) {

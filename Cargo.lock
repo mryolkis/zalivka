@@ -4613,6 +4613,7 @@ dependencies = [
  "ctr",
  "eframe",
  "flate2",
+ "futures-core",
  "hkdf",
  "hmac",
  "hpke",

@@ -6,8 +6,6 @@ mod channel;
 mod packet;
 #[path = "stream.rs"]
 mod stream;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-use crate::usb::MuxUsb;
 use anyhow::{Context, Result, ensure};
 use bytes::{Bytes, BytesMut};
 use channel::{Channel, State};
@@ -73,22 +71,6 @@ pub trait PacketTransport: Send {
         Ok(())
     }
 }
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-impl PacketTransport for MuxUsb {
-    fn write_packet(&mut self, b: &[u8]) -> Result<()> {
-        self.write_packet(b)
-    }
-    fn read_packet(&mut self) -> Result<Vec<u8>> {
-        self.read_packet()
-    }
-    fn input_ready(&self) -> Option<InputReady> {
-        self.input_ready()
-    }
-    fn write_packets(&mut self, packets: &[Vec<u8>], cancelled: &AtomicBool) -> Result<()> {
-        self.write_packets(packets, cancelled)
-    }
-}
-
 struct Link {
     usb: Box<dyn PacketTransport>,
     version: u32,

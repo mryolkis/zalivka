@@ -35,16 +35,14 @@ pub fn transfer(
 ) -> Result<()> {
     let _trace = crate::logging::firmware_transfer();
     let mut stream = BufReader::new(stream);
-    let initiate = wire::receive_xml(&mut stream)?;
+    let mut message = wire::receive_xml(&mut stream)?;
     ensure!(
-        wire::string(&initiate, &["Command"])? == "Initiate",
+        wire::string(&message, &["Command"])? == "Initiate",
         "ASR did not send Initiate"
     );
-    let mut checksum = checksum_mode(&initiate, false)?;
-    info(stream.get_mut(), length, checksum)?;
+    let mut checksum = false;
     let mut requests = 0u64;
     loop {
-        let message = wire::receive_xml(&mut stream)?;
         match wire::string(&message, &["Command"])? {
             "Initiate" => {
                 checksum = checksum_mode(&message, checksum)?;
@@ -68,6 +66,7 @@ pub fn transfer(
             "Payload" => break,
             command => bail!("unsupported ASR command {command}"),
         }
+        message = wire::receive_xml(&mut stream)?;
     }
     image.seek(SeekFrom::Start(0))?;
     // Keep the negotiated checksum boundaries, but fill several blocks before
@@ -77,10 +76,9 @@ pub fn transfer(
     let mut total = 0;
     let mut progress = crate::progress::Progress::new("ASR filesystem transfer", Some(length), 0);
     while total < length {
-        let mut payload = 0;
         let mut sent = 0;
         for block in buf.chunks_mut(stride) {
-            let n = (length - total - payload).min(CHUNK as u64) as usize;
+            let n = (length - total).min(CHUNK as u64) as usize;
             if n == 0 {
                 break;
             }
@@ -95,12 +93,11 @@ pub fn transfer(
             } else {
                 sent += n;
             }
-            payload += n as u64;
+            total += n as u64;
         }
 
         stream.get_mut().write_all(&buf[..sent])?;
-        total += payload;
-        progress.advance(payload);
+        progress.advance(total - progress.completed());
     }
 
     stream.get_mut().flush()?;

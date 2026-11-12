@@ -136,9 +136,9 @@ fn fragmented_reads_and_interrupts_preserve_container_and_retagged_digests() {
         let result = requirements
             .verify(&mut reader, "image", bytes.len() as u64, &mut [0; 1024])
             .unwrap();
-        assert_eq!(result.bytes, bytes.len() as u64);
+        assert_eq!(reader.data.position(), bytes.len() as u64);
         assert_eq!(result.digests, 2);
-        assert!(!result.aea_deferred);
+        assert!(result.aea.is_none());
     }
 }
 

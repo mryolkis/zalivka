@@ -385,6 +385,8 @@ pub(super) fn reconnect_after_ibss<T>(
 }
 
 pub(super) fn wait_recovery(ecid: u64, mode: Option<Mode>) -> Result<RecoveryUsb> {
+    let mut events = crate::usb::DeviceEvents::new();
+    // Preserve the settling delay so the previous boot stage is not reopened.
     std::thread::sleep(Duration::from_secs(1));
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut error;
@@ -397,6 +399,8 @@ pub(super) fn wait_recovery(ecid: u64, mode: Option<Mode>) -> Result<RecoveryUsb
         if Instant::now() >= deadline {
             return Err(error.context("device did not reconnect after boot stage"));
         }
-        std::thread::sleep(Duration::from_millis(500));
+        let timeout =
+            Duration::from_millis(500).min(deadline.saturating_duration_since(Instant::now()));
+        events.wait(timeout);
     }
 }

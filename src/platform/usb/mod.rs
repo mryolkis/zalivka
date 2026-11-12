@@ -1,5 +1,6 @@
 mod backend;
 mod descriptors;
+mod events;
 mod kis;
 use crate::{
     device::{DeviceInfo, Mode},
@@ -11,6 +12,7 @@ use backend::BulkInput;
 use backend::BulkOutput;
 pub(crate) use backend::UsbInterface;
 pub(crate) use descriptors::{mux_interface, recovery_interface};
+pub use events::DeviceEvents;
 pub(crate) use kis::Kis;
 use nusb::{
     Device, MaybeFuture,
@@ -143,6 +145,8 @@ impl RecoveryUsb {
     }
 
     pub(crate) fn wait_at_port(previous: &nusb::DeviceInfo, hardware: (u32, u32)) -> Result<Self> {
+        // Subscribe before enumerating so a transition cannot fall between them.
+        let mut events = DeviceEvents::new();
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let mut last_error = anyhow::anyhow!("SoC DFU has not appeared on the original USB port");
         loop {
@@ -164,9 +168,7 @@ impl RecoveryUsb {
                 match opened {
                     Ok(usb) => {
                         anyhow::ensure!(
-                            usb.info.hardware_ids() == hardware
-                                && usb.topology.bus_id() == previous.bus_id()
-                                && usb.topology.port_chain() == previous.port_chain(),
+                            usb.info.hardware_ids() == hardware,
                             "USB device changed while reconnecting after Port DFU"
                         );
                         return Ok(usb);
@@ -177,7 +179,9 @@ impl RecoveryUsb {
             if std::time::Instant::now() >= deadline {
                 return Err(last_error);
             }
-            std::thread::sleep(Duration::from_millis(500));
+            let timeout = Duration::from_millis(500)
+                .min(deadline.saturating_duration_since(std::time::Instant::now()));
+            events.wait(timeout);
         }
     }
 
@@ -315,17 +319,18 @@ impl RecoveryTransport for RecoveryUsb {
                 data,
             },
             TIMEOUT,
-        )?;
-        Ok(())
+        )
     }
     fn bulk_out(&mut self, data: &[u8]) -> Result<()> {
+        self.bulk_out_batch(&[data])
+    }
+    fn bulk_out_batch(&mut self, packets: &[&[u8]]) -> Result<()> {
         let RecoveryConnection::Standard { bulk, .. } = &mut self.connection else {
             bail!("KIS has no Recovery bulk endpoint")
         };
-        let ep = bulk
-            .as_mut()
-            .context("device has no recovery bulk endpoint")?;
-        ep.write(data)
+        bulk.as_mut()
+            .context("device has no recovery bulk endpoint")?
+            .write_batch(packets, None)
     }
     fn reset(&mut self) -> Result<()> {
         #[cfg(windows)]
@@ -387,8 +392,7 @@ mod enumeration_tests;
 /// USB mux interface, selected by the vendor-specific ff/fe/02 interface triple.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) struct MuxUsb {
-    _device: Device,
-    _interface: UsbInterface,
+    // Endpoints retain their interface and device (including Apple handles).
     input: BulkInput,
     output: BulkOutput,
     packet_size: usize,
@@ -435,25 +439,24 @@ impl MuxUsb {
         Ok(Self {
             input,
             output,
-            _device: device,
-            _interface: interface,
             packet_size: selected.packet_size,
         })
     }
+}
 
-    pub(crate) fn write_packet(&mut self, data: &[u8]) -> Result<()> {
-        self.output.write(data)?;
-        if data.len().is_multiple_of(self.packet_size) {
-            self.output.write(&[])?;
-        }
-        Ok(())
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+impl crate::mux::PacketTransport for MuxUsb {
+    fn write_packet(&mut self, data: &[u8]) -> Result<()> {
+        let transfers = [data, &[]];
+        let count = if data.len().is_multiple_of(self.packet_size) {
+            2
+        } else {
+            1
+        };
+        self.output.write_batch(&transfers[..count], None)
     }
 
-    pub(crate) fn write_packets(
-        &mut self,
-        packets: &[Vec<u8>],
-        cancelled: &AtomicBool,
-    ) -> Result<()> {
+    fn write_packets(&mut self, packets: &[Vec<u8>], cancelled: &AtomicBool) -> Result<()> {
         // Keep each mux packet in its own USB request, including the existing
         // zero-length terminator when it ends on a physical packet boundary.
         let mut transfers = Vec::with_capacity(packets.len() * 2);
@@ -463,14 +466,14 @@ impl MuxUsb {
                 transfers.push(&[]);
             }
         }
-        self.output.write_batch(&transfers, cancelled)
+        self.output.write_batch(&transfers, Some(cancelled))
     }
 
-    pub(crate) fn read_packet(&mut self) -> Result<Vec<u8>> {
+    fn read_packet(&mut self) -> Result<Vec<u8>> {
         self.input.read()
     }
 
-    pub(crate) fn input_ready(&self) -> Option<crate::mux::InputReady> {
+    fn input_ready(&self) -> Option<crate::mux::InputReady> {
         self.input.input_ready()
     }
 }

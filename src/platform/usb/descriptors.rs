@@ -47,39 +47,33 @@ fn select_mux_interface<'a>(
     configurations: impl Iterator<Item = ConfigurationDescriptor<'a>>,
     active: Option<u8>,
 ) -> Option<MuxInterface> {
-    let mut fallback = None;
-    for configuration in configurations {
-        for interface in configuration.interface_alt_settings() {
-            if (
-                interface.class(),
-                interface.subclass(),
-                interface.protocol(),
-            ) != MUX_INTERFACE
-            {
-                continue;
-            }
-            let (Some(output), Some(input)) = (
-                bulk_endpoint(&interface, false),
-                bulk_endpoint(&interface, true),
-            ) else {
-                continue;
-            };
-            let selected = MuxInterface {
-                configuration: configuration.configuration_value(),
-                number: interface.interface_number(),
-                alternate: interface.alternate_setting(),
-                output: output.address(),
-                input: input.address(),
-                packet_size: output.max_packet_size(),
-            };
-            // WinUSB cannot change configurations. Prefer the one selected by the OS.
-            if Some(selected.configuration) == active {
-                return Some(selected);
-            }
-            fallback.get_or_insert(selected);
-        }
-    }
-    fallback
+    configurations
+        .flat_map(|configuration| {
+            configuration
+                .interface_alt_settings()
+                .filter_map(move |interface| {
+                    if (
+                        interface.class(),
+                        interface.subclass(),
+                        interface.protocol(),
+                    ) != MUX_INTERFACE
+                    {
+                        return None;
+                    }
+                    let output = bulk_endpoint(&interface, false)?;
+                    let input = bulk_endpoint(&interface, true)?;
+                    Some(MuxInterface {
+                        configuration: configuration.configuration_value(),
+                        number: interface.interface_number(),
+                        alternate: interface.alternate_setting(),
+                        output: output.address(),
+                        input: input.address(),
+                        packet_size: output.max_packet_size(),
+                    })
+                })
+        })
+        // WinUSB cannot change configurations. Ties retain descriptor order.
+        .min_by_key(|interface| Some(interface.configuration) != active)
 }
 
 pub(crate) fn mux_interface(device: &nusb::Device) -> Result<MuxInterface> {

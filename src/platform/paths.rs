@@ -20,16 +20,18 @@ fn absolute_env(name: &str) -> Option<PathBuf> {
         .filter(|path| path.is_absolute())
 }
 
+fn base_directory(xdg: &str, fallback: &str) -> Option<PathBuf> {
+    let (configured, home, fallback) = if cfg!(windows) {
+        ("LOCALAPPDATA", "USERPROFILE", "AppData/Local")
+    } else {
+        (xdg, "HOME", fallback)
+    };
+    absolute_env(configured).or_else(|| absolute_env(home).map(|path| path.join(fallback)))
+}
+
 /// Root shared by firmware cache, diagnostic logs and USB driver backups.
 pub fn app_directory() -> Result<PathBuf> {
-    let root = if cfg!(windows) {
-        absolute_env("LOCALAPPDATA")
-            .or_else(|| absolute_env("USERPROFILE").map(|path| path.join("AppData").join("Local")))
-    } else {
-        absolute_env("XDG_CACHE_HOME")
-            .or_else(|| absolute_env("HOME").map(|path| path.join(".cache")))
-    };
-    let root = root.map_or_else(
+    let root = base_directory("XDG_CACHE_HOME", ".cache").map_or_else(
         || std::env::current_dir().map(|path| path.join(".cache")),
         Ok,
     )?;
@@ -37,14 +39,7 @@ pub fn app_directory() -> Result<PathBuf> {
 }
 
 pub fn config_directory() -> Result<PathBuf> {
-    let root = if cfg!(windows) {
-        absolute_env("LOCALAPPDATA")
-            .or_else(|| absolute_env("USERPROFILE").map(|path| path.join("AppData/Local")))
-    } else {
-        absolute_env("XDG_CONFIG_HOME")
-            .or_else(|| absolute_env("HOME").map(|path| path.join(".config")))
-    };
-    Ok(root
+    Ok(base_directory("XDG_CONFIG_HOME", ".config")
         .context("could not locate the settings folder")?
         .join("zalivka"))
 }

@@ -46,11 +46,7 @@ pub(crate) fn copy_keys(target: &mut Dictionary, source: &Dictionary, keys: &[&s
 }
 
 pub fn get<'a>(v: &'a Value, path: &[&str]) -> Result<&'a Value> {
-    path.iter().try_fold(v, |v, key| {
-        v.as_dictionary()
-            .and_then(|d| d.get(key))
-            .with_context(|| format!("missing plist key {}", path.join(".")))
-    })
+    optional(v, path)?.with_context(|| format!("missing plist key {}", path.join(".")))
 }
 
 /// Missing keys are optional; a present value with the wrong shape is an error.

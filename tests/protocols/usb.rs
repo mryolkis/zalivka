@@ -456,6 +456,42 @@ fn recovery_bulk_and_nul_terminated_commands() {
 }
 
 #[test]
+fn recovery_bursts_preserve_packet_boundaries_and_only_the_final_terminator() {
+    for len in [1usize, 511, 512, 32768, 32769, 8 * 32768, 8 * 32768 + 512] {
+        let data: Vec<_> = (0..len).map(|i| i as u8).collect();
+        let mut usb = MockUsb::default();
+        dfu::upload(&mut usb, Mode::Recovery, &data, false).unwrap();
+        assert_eq!(usb.bulk.concat(), data);
+        let mut sizes: Vec<_> = data.chunks(32768).map(<[u8]>::len).collect();
+        if len.is_multiple_of(512) {
+            sizes.push(0);
+        }
+        assert_eq!(usb.bulk.iter().map(Vec::len).collect::<Vec<_>>(), sizes);
+        assert!(usb.bulk_batches.iter().all(|batch| batch.len() <= 8));
+        assert_eq!(usb.bulk_batches.len(), len.div_ceil(8 * 32768));
+        assert_eq!(usb.controls, [(0x41, 0, 0, vec![])]);
+        assert_eq!(usb.resets, 0);
+    }
+}
+
+#[test]
+fn recovery_bulk_failure_stops_without_replay_or_a_success_terminator() {
+    let mut usb = MockUsb {
+        bulk_error_after: Some(2),
+        ..Default::default()
+    };
+    let error = dfu::upload(&mut usb, Mode::Recovery, &vec![42; 16 * 32768], false).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<nusb::transfer::TransferError>(),
+        Some(&nusb::transfer::TransferError::Disconnected)
+    );
+    assert_eq!(usb.bulk.len(), 2);
+    assert_eq!(usb.bulk_batches.len(), 1);
+    assert!(usb.bulk.iter().all(|packet| packet.len() == 32768));
+    assert_eq!(usb.resets, 0);
+}
+
+#[test]
 fn kernel_boot_attempts_bootx_once_even_when_the_transfer_notification_fails() {
     for notification_error in [None, Some(2)] {
         for bootx_error in [None, Some(2)] {
@@ -492,6 +528,8 @@ struct MockUsb {
     controls: Vec<(u8, u8, u16, Vec<u8>)>,
     control_buffers: Vec<usize>,
     bulk: Vec<Vec<u8>>,
+    bulk_batches: Vec<Vec<usize>>,
+    bulk_error_after: Option<usize>,
     resets: usize,
     reset_error: Option<i32>,
     control_errors: VecDeque<Option<i32>>,
@@ -520,7 +558,18 @@ impl RecoveryTransport for MockUsb {
         Ok(())
     }
     fn bulk_out(&mut self, b: &[u8]) -> Result<()> {
+        if self.bulk_error_after == Some(self.bulk.len()) {
+            return Err(nusb::transfer::TransferError::Disconnected.into());
+        }
         self.bulk.push(b.to_vec());
+        Ok(())
+    }
+    fn bulk_out_batch(&mut self, packets: &[&[u8]]) -> Result<()> {
+        self.bulk_batches
+            .push(packets.iter().map(|p| p.len()).collect());
+        for packet in packets {
+            self.bulk_out(packet)?;
+        }
         Ok(())
     }
     fn reset(&mut self) -> Result<()> {

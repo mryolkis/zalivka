@@ -114,5 +114,6 @@ impl App {
         }
         self.notice = Some(notice);
         self.last_scan = Instant::now() - SCAN_INTERVAL;
+        self.usb_scan_pending = true;
     }
 }

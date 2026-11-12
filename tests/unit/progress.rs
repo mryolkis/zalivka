@@ -85,34 +85,35 @@ fn dropped_streams_emit_one_terminal_event_without_claiming_all_bytes_were_sent(
 #[test]
 fn transfer_identity_is_stable_and_unique_between_workers() {
     let progress = Progress::new("same component", Some(100), 0);
-    let first = progress.update(progress.started, false);
+    let first = progress.update(progress.started);
     let second = std::thread::spawn(|| {
         let progress = Progress::new("same component", Some(100), 0);
-        progress.update(progress.started, false)
+        progress.update(progress.started)
     })
     .join()
     .unwrap();
     assert_ne!(first.id, second.id);
-    assert_eq!(first.id, progress.update(progress.started, true).id);
+    assert_eq!(first.id, progress.update(progress.started).id);
 }
 
 #[test]
 fn samples_measure_new_bytes_and_keep_resumed_offsets_out_of_the_rate() {
     let mut progress = Progress::new("BaseSystem", Some(1000), 400);
     progress.completed = 600;
-    let update = progress.update(progress.started + Duration::from_secs(2), false);
+    let update = progress.update(progress.started + Duration::from_secs(2));
     assert_eq!(update.bytes_per_second, 100.0);
     assert_eq!(update.fraction(), Some(0.6));
     assert_eq!(update.completed, 600);
     assert!(!update.finished);
     progress.sampled_at += Duration::from_secs(2);
     progress.sampled_bytes = 600;
-    let idle = progress.update(progress.started + Duration::from_secs(4), false);
+    let idle = progress.update(progress.started + Duration::from_secs(4));
     assert_eq!(idle.bytes_per_second, 0.0);
-    let finished = progress.update(progress.started + Duration::from_secs(4), true);
+    progress.finished = true;
+    let finished = progress.update(progress.started + Duration::from_secs(4));
     assert_eq!(finished.bytes_per_second, 50.0);
     progress.total = None;
-    assert_eq!(progress.update(progress.started, true).fraction(), None);
+    assert_eq!(progress.update(progress.started).fraction(), None);
 }
 
 #[test]
@@ -129,16 +130,11 @@ fn completed_progress_is_terminal_and_finish_is_idempotent() {
 #[test]
 fn inaccurate_totals_do_not_hide_measured_progress() {
     let mut progress = Progress::new("x", Some(10), 11);
-    assert!(
-        progress
-            .update(Instant::now(), false)
-            .bytes_per_second
-            .is_finite()
-    );
+    assert!(progress.update(Instant::now()).bytes_per_second.is_finite());
     assert_eq!(progress.total, None);
     progress.total = Some(12);
     progress.advance(2);
-    let update = progress.update(Instant::now(), false);
+    let update = progress.update(Instant::now());
     assert_eq!((update.completed, update.total), (13, None));
     assert!(update.bytes_per_second.is_finite());
 }

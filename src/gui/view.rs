@@ -1,6 +1,6 @@
 //! Main window layout, journal and frame updates.
 use super::widgets::{caption, pill, tint};
-use super::{App, Level, Notice, SCAN_INTERVAL, Tone, UI_REFRESH_INTERVAL};
+use super::{App, Level, Notice, Tone, UI_REFRESH_INTERVAL};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::time::Instant;
 use zalivka::localization::{format as trf, text as tr};
@@ -59,30 +59,56 @@ impl App {
             return;
         }
         let ctx = ui.ctx().clone();
-        let margin: i8 = if ctx.content_rect().height() < 700.0 {
-            8
-        } else {
-            16
-        };
-        let header_id = ui.scope_id().with("journal_header_height");
-        let header_height = ctx
-            .data(|data| data.get_temp::<f32>(header_id))
-            .unwrap_or(24.0);
+        let margin = egui::Margin::symmetric(12, 4);
         let row_spacing = 2.0;
         let separator_spacing = 1.0;
         let log_font = egui::FontId::monospace(12.0);
-        // Allocate the same padded row height that show_rows uses for scrolling.
-        // One physical pixel on either side also covers text paint rounding.
         let pixels_per_point = ctx.pixels_per_point();
         let row_height = (ui.fonts_mut(|fonts| fonts.row_height(&log_font)) * pixels_per_point)
             .ceil()
             / pixels_per_point
             + 2.0 / pixels_per_point;
+        let toolbar_row_height = (ui.text_style_height(&egui::TextStyle::Body) + 8.0).max(28.0);
+        let minimum_scroll_height = row_height.max(ui.text_style_height(&egui::TextStyle::Body));
+        let toolbar_spacing = 4.0;
+        let button_padding = Vec2::new(10.0, 4.0);
+        let text_width = |text: egui::WidgetText| {
+            text.into_galley(
+                ui,
+                Some(egui::TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::TextStyle::Body,
+            )
+            .size()
+            .x
+        };
+        let left_width = text_width(RichText::new(tr("Journal")).strong().into())
+            + ui.spacing().item_spacing.x
+            + (text_width(tr("Technical details").into())
+                + ui.spacing().icon_width
+                + ui.spacing().icon_spacing)
+                .max(toolbar_row_height);
+        let actions_width = ["Open logs folder", "Copy", "Hide"]
+            .into_iter()
+            .map(|label| text_width(tr(label).into()) + 2.0 * button_padding.x)
+            .sum::<f32>()
+            + 2.0 * ui.spacing().item_spacing.x;
+        let wrapped = left_width + ui.spacing().item_spacing.x + actions_width + 2.0
+            > ui.available_width() - margin.sum().x;
+        // Compute the toolbar from this frame's width. Its previous measured
+        // height must not feed back into the panel's next size.
+        let toolbar_rows = if wrapped { 2 } else { 1 };
+        let header_height = toolbar_rows as f32 * toolbar_row_height
+            + (toolbar_rows - 1) as f32 * toolbar_spacing
+            + margin.sum().y;
+        // Reserve the horizontal scrollbar as well, so long messages cannot
+        // consume the last visible row or grow the panel on a later frame.
         let minimum_height = header_height
-            + row_height
-            + 2.0 * f32::from(margin)
-            + 2.0 * row_spacing
-            + separator_spacing;
+            + minimum_scroll_height
+            + margin.sum().y
+            + ui.spacing().scroll.allocated_width()
+            + separator_spacing
+            + 1.0;
         let max_height = (ctx.content_rect().height() * 0.35)
             .min(350.0)
             .min((ui.available_height() - if self.job.is_none() { 160.0 } else { 80.0 }).max(70.0))
@@ -92,101 +118,120 @@ impl App {
             .default_size(max_height.min(220.0))
             .min_size(max_height.min(110.0).max(minimum_height))
             .max_size(max_height)
-            .frame(
-                egui::Frame::new()
-                    .fill(ui.visuals().window_fill)
-                    .inner_margin(margin),
-            )
+            .frame(egui::Frame::new().fill(ui.visuals().window_fill))
             .show(ui, |ui| {
-                ui.spacing_mut().interact_size.y = 24.0;
-                ui.spacing_mut().item_spacing.y = row_spacing;
-                let actions_width = ["Open logs folder", "Copy", "Hide"]
-                    .into_iter()
-                    .map(|label| {
-                        ui.painter()
-                            .layout_no_wrap(
-                                tr(label),
-                                egui::TextStyle::Button.resolve(ui.style()),
-                                ui.visuals().text_color(),
-                            )
-                            .size()
-                            .x
-                            + 2.0 * ui.spacing().button_padding.x
-                    })
-                    .sum::<f32>()
-                    + 2.0 * ui.spacing().item_spacing.x;
-                let header = ui.horizontal_wrapped(|ui| {
-                    ui.strong(tr("Journal"));
-                    ui.checkbox(&mut self.log_details, tr("Technical details"));
-                    if ui.available_size_before_wrap().x < actions_width {
-                        ui.end_row();
+                ui.spacing_mut().item_spacing.y = 0.0;
+                egui::Frame::new().inner_margin(margin).show(ui, |ui| {
+                    ui.spacing_mut().interact_size.y = toolbar_row_height;
+                    ui.spacing_mut().button_padding = button_padding;
+                    ui.spacing_mut().item_spacing.y = toolbar_spacing;
+                    for row in 0..toolbar_rows {
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(ui.available_width(), toolbar_row_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_min_height(toolbar_row_height);
+                                if row == 0 {
+                                    ui.strong(tr("Journal"));
+                                    ui.checkbox(&mut self.log_details, tr("Technical details"));
+                                }
+                                if !wrapped || row == 1 {
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(ui.available_width(), toolbar_row_height),
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.button(tr("Hide")).clicked() {
+                                                self.journal_open = false;
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    !self.logs.is_empty(),
+                                                    egui::Button::new(tr("Copy")),
+                                                )
+                                                .clicked()
+                                            {
+                                                ctx.copy_text(self.journal_text(self.log_details));
+                                            }
+                                            if ui.button(tr("Open logs folder")).clicked()
+                                                && let Err(error) = zalivka::storage::log_directory(
+                                                )
+                                                .and_then(|directory| {
+                                                    zalivka::platform::open_directory(&directory)
+                                                })
+                                            {
+                                                self.error(
+                                                    "Could not open the logs folder",
+                                                    format!("{error:#}"),
+                                                );
+                                            }
+                                        },
+                                    );
+                                }
+                            },
+                        );
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button(tr("Hide")).clicked() {
-                            self.journal_open = false;
-                        }
-                        if ui
-                            .add_enabled(
-                                !self.logs.is_empty(),
-                                egui::Button::new(tr("Copy")).small(),
-                            )
-                            .clicked()
-                        {
-                            ctx.copy_text(self.journal_text(self.log_details));
-                        }
-                        if ui.small_button(tr("Open logs folder")).clicked()
-                            && let Err(error) = zalivka::storage::log_directory()
-                                .and_then(|directory| zalivka::platform::open_directory(&directory))
-                        {
-                            self.error("Could not open the logs folder", format!("{error:#}"));
-                        }
-                    });
                 });
-                // Measure wrapping instead of assuming a single toolbar row:
-                // translated controls can need more space after a window resize.
-                let measured_height = header.response.rect.height();
-                if (measured_height - header_height).abs() > 0.5 {
-                    ctx.data_mut(|data| data.insert_temp(header_id, measured_height));
-                    ctx.request_repaint();
-                }
                 ui.add(egui::Separator::default().spacing(separator_spacing));
-                let records: Vec<_> = self
-                    .logs
-                    .iter()
-                    .filter(|record| self.log_details || record.level >= Level::Info)
-                    .collect();
-                if records.is_empty() {
-                    ui.label(
-                        RichText::new(tr("Operation progress will appear here."))
-                            .color(ui.visuals().weak_text_color()),
-                    );
-                }
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    // Wrapped journal controls must leave at least one log row visible.
-                    .min_scrolled_height(row_height)
-                    .stick_to_bottom(true)
-                    .show_rows(ui, row_height, records.len(), |ui, rows| {
-                        for row in rows {
-                            let record = records[row];
-                            let color = match record.level {
-                                Level::Error => ui.visuals().error_fg_color,
-                                Level::Warning => ui.visuals().warn_fg_color,
-                                Level::Info => ui.visuals().text_color(),
-                                Level::Trace | Level::Debug => ui.visuals().weak_text_color(),
-                            };
-                            ui.add_sized(
-                                [ui.available_width(), row_height],
-                                egui::Label::new(
-                                    RichText::new(record.to_string())
-                                        .font(log_font.clone())
-                                        .color(color),
-                                )
-                                .halign(egui::Align::Min)
-                                .wrap_mode(egui::TextWrapMode::Extend),
+                egui::Frame::new().inner_margin(margin).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = row_spacing;
+                    let records: Vec<_> = self
+                        .logs
+                        .iter()
+                        .filter(|record| self.log_details || record.level >= Level::Info)
+                        .collect();
+                    let scroll = egui::ScrollArea::both()
+                        .id_salt("journal_rows")
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(minimum_scroll_height)
+                        .stick_to_bottom(true);
+                    let output = if records.is_empty() {
+                        scroll.show(ui, |ui| {
+                            ui.label(
+                                RichText::new(tr("Operation progress will appear here."))
+                                    .color(ui.visuals().weak_text_color()),
                             );
-                        }
+                        })
+                    } else {
+                        scroll.show_rows(ui, row_height, records.len(), |ui, rows| {
+                            for row in rows {
+                                let record = records[row];
+                                let color = match record.level {
+                                    Level::Error => ui.visuals().error_fg_color,
+                                    Level::Warning => ui.visuals().warn_fg_color,
+                                    Level::Info => ui.visuals().text_color(),
+                                    Level::Trace | Level::Debug => ui.visuals().weak_text_color(),
+                                };
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(ui.available_width(), row_height),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_min_height(row_height);
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(record.to_string())
+                                                    .font(log_font.clone())
+                                                    .color(color),
+                                            )
+                                            .wrap_mode(egui::TextWrapMode::Extend),
+                                        );
+                                    },
+                                );
+                            }
+                        })
+                    };
+                    // egui updates the sticky scroll offset after painting.
+                    // Resolve a changed viewport in this frame, before it is shown.
+                    let viewport_id = output.id.with("viewport_size");
+                    let viewport = output.inner_rect.size();
+                    let previous = ctx.data_mut(|data| {
+                        let previous = data.get_temp::<Vec2>(viewport_id);
+                        data.insert_temp(viewport_id, viewport);
+                        previous
                     });
+                    if previous != Some(viewport) {
+                        ctx.request_discard("journal viewport resized");
+                    }
+                });
             });
     }
 
@@ -335,11 +380,18 @@ impl App {
         }
         let mut notification_bounds = ctx.content_rect().shrink(14.0);
         notification_bounds.min.y = ui.available_rect_before_wrap().top() + 14.0;
+        // A wrapped journal toolbar can leave little room in a short window.
+        // Give the heading priority over decorative vertical padding.
+        let content_margin = egui::Margin::symmetric(
+            22,
+            ((ui.available_height() - ui.text_style_height(&egui::TextStyle::Heading)) * 0.5)
+                .clamp(0.0, 22.0) as i8,
+        );
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(ui.visuals().panel_fill)
-                    .inner_margin(22),
+                    .inner_margin(content_margin),
             )
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
@@ -398,13 +450,18 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
-        if self.job.is_none() && !self.picking && self.last_scan.elapsed() >= SCAN_INTERVAL {
+        self.poll_usb(ctx);
+        let scan_interval = self.scan_interval();
+        if self.job.is_none()
+            && !self.picking
+            && (self.usb_scan_pending || self.last_scan.elapsed() >= scan_interval)
+        {
             self.detect(ctx);
         }
         ctx.request_repaint_after(if self.job.is_some() {
             UI_REFRESH_INTERVAL
         } else {
-            SCAN_INTERVAL
+            scan_interval
         });
         if ctx.input(|i| i.viewport().close_requested())
             && let Some(job) = &mut self.job

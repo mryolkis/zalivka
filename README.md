@@ -279,6 +279,11 @@ storage paths and desktop services. Public `drivers`, `usb` and `storage` APIs
 keep callers independent of these implementations. Platform tests mirror this
 layout under `tests/unit/platform/`.
 
+USB discovery uses nusb hotplug notifications, with timed retries for interfaces
+that are still starting and a periodic scan as a fallback. Native Recovery and
+direct USB-mux writes queue up to eight transfers and reuse their buffers.
+The Apple Windows driver keeps writes sequential to preserve packet ordering.
+
 Requirements: Rust 1.99 or newer and native compiler/linker tools for the chosen
 target. Windows MSVC builds need the matching Visual C++ build tools. On Ubuntu,
 install the network and GUI development dependencies used by CI:
