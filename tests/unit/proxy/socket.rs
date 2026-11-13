@@ -319,32 +319,45 @@ fn every_successful_connect_status_starts_an_opaque_tunnel() {
 
 #[test]
 fn socks_handshake_reads_share_one_connection_deadline() {
-    let proxy_listener = listener();
-    let proxy = Proxy::new(&format!(
-        "socks5h://{}",
-        proxy_listener.local_addr().unwrap()
-    ))
-    .unwrap();
-    let server = thread::spawn(move || {
-        let mut socket = accept(&proxy_listener);
-        let mut greeting = [0; 3];
-        socket.read_exact(&mut greeting).unwrap();
-        assert_eq!(greeting, [5, 1, 0]);
-        thread::sleep(Duration::from_millis(150));
-        socket.write_all(&[5, 0]).unwrap();
-        let mut request = [0; 10];
-        socket.read_exact(&mut request).unwrap();
-        thread::sleep(Duration::from_millis(150));
-        let _ = socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]);
-    });
-    let error = open("127.0.0.1", 443, Some(proxy), Duration::from_millis(220))
-        .err()
-        .expect("handshake exceeded its total deadline");
-    assert!(matches!(
-        error.downcast_ref::<io::Error>().unwrap().kind(),
-        io::ErrorKind::TimedOut
-    ));
-    server.join().unwrap();
+    for greeting_delay in [150, 300] {
+        let proxy_listener = listener();
+        let proxy = Proxy::new(&format!(
+            "socks5h://{}",
+            proxy_listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || -> io::Result<()> {
+            let mut socket = accept(&proxy_listener);
+            let mut greeting = [0; 3];
+            socket.read_exact(&mut greeting)?;
+            assert_eq!(greeting, [5, 1, 0]);
+            thread::sleep(Duration::from_millis(greeting_delay));
+            socket.write_all(&[5, 0])?;
+            let mut request = [0; 10];
+            socket.read_exact(&mut request)?;
+            thread::sleep(Duration::from_millis(150));
+            socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+        });
+        let error = open("127.0.0.1", 443, Some(proxy), Duration::from_millis(220))
+            .err()
+            .expect("handshake exceeded its total deadline");
+        assert!(matches!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::TimedOut
+        ));
+        // The client may time out before the server's next read or write.
+        if let Err(error) = server.join().unwrap() {
+            assert!(
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                ),
+                "unexpected proxy server error: {error}"
+            );
+        }
+    }
 }
 
 #[test]
