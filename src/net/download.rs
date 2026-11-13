@@ -212,9 +212,17 @@ struct PartialDownload<'a> {
     length: Option<u64>,
 }
 
+impl Drop for PartialDownload<'_> {
+    fn drop(&mut self) {
+        // A subprocess can inherit the descriptor until exec. Closing our
+        // handle alone would leave the lock held by that inherited copy.
+        let _ = self.file.unlock();
+    }
+}
+
 impl<'a> PartialDownload<'a> {
     fn open(path: &Path, expected: &'a [u8]) -> Result<Self> {
-        let mut hash = download_hasher(expected)?;
+        let hash = download_hasher(expected)?;
         match std::fs::symlink_metadata(path) {
             Ok(metadata) => ensure!(
                 metadata.file_type().is_file(),
@@ -223,7 +231,7 @@ impl<'a> PartialDownload<'a> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error).context("checking .part file"),
         }
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
@@ -232,18 +240,19 @@ impl<'a> PartialDownload<'a> {
             .context("opening .part file")?;
         file.try_lock()
             .map_err(|error| anyhow::anyhow!("firmware download is locked: {error}"))?;
-        ensure!(
-            file.metadata()?.is_file(),
-            "partial download is not a regular file"
-        );
-        let total = hash_file(&mut file, hash.as_mut())?;
-        Ok(Self {
+        let mut download = Self {
             file,
             hash,
-            total,
+            total: 0,
             expected,
             length: None,
-        })
+        };
+        ensure!(
+            download.file.metadata()?.is_file(),
+            "partial download is not a regular file"
+        );
+        download.total = hash_file(&mut download.file, download.hash.as_mut())?;
+        Ok(download)
     }
 
     fn verified(&self) -> bool {
@@ -411,3 +420,7 @@ fn decimal(value: &str, field: &str) -> Result<u64> {
         .parse()
         .with_context(|| format!("invalid firmware {field}"))
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/net/partial_download.rs"]
+mod tests;

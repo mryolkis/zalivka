@@ -301,6 +301,7 @@ fn firmware_partial_is_locked_and_a_complete_partial_is_published_without_networ
             .to_string()
             .contains("locked")
     );
+    lock.unlock().unwrap();
     drop(lock);
     download_from(&destination, &hash, 0, |_| panic!("already complete")).unwrap();
     assert_eq!(std::fs::read(destination).unwrap(), b"abc");

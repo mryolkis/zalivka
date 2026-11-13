@@ -351,6 +351,7 @@ fn socks_handshake_reads_share_one_connection_deadline() {
                 matches!(
                     error.kind(),
                     io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::ConnectionAborted
                         | io::ErrorKind::ConnectionReset
                         | io::ErrorKind::BrokenPipe
                 ),
