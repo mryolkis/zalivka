@@ -61,7 +61,7 @@ fn a_valid_outer_digest_does_not_hide_a_corrupt_bundle_payload() {
         let requirements = EntryDigests {
             components: HashSet::from([ComponentDigest {
                 tag: None,
-                expected: expected.clone(),
+                expected,
             }]),
         };
         let result = requirements.verify(
