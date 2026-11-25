@@ -63,7 +63,8 @@ fn large_build_manifests_are_accepted_up_to_the_metadata_limit() {
         let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
         zip.start_file(
             "BuildManifest.plist",
-            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
         )
         .unwrap();
         zip.write_all(prefix).unwrap();

@@ -109,7 +109,10 @@ impl Ipsw {
         let entry = archive
             .by_name("BuildManifest.plist")
             .context("IPSW has no BuildManifest.plist")?;
-        ensure!(entry.size() <= MAX_BUILD_MANIFEST, "BuildManifest too large");
+        ensure!(
+            entry.size() <= MAX_BUILD_MANIFEST,
+            "BuildManifest too large"
+        );
         let manifest = wire::decode_plist(&crate::storage::read_limited(
             entry,
             MAX_BUILD_MANIFEST,

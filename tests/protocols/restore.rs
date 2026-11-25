@@ -1878,7 +1878,14 @@ fn async_completion_releases_ports_and_leaves_the_control_channel_available() {
 #[test]
 fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
     let bytes = im4p(b"test");
-    let names = ["LLB", "Auxiliary", "iBoot", "RestoreSEP", "SEP", "SepStage1"];
+    let names = [
+        "LLB",
+        "Auxiliary",
+        "iBoot",
+        "RestoreSEP",
+        "SEP",
+        "SepStage1",
+    ];
     let paths: Vec<_> = names
         .iter()
         .map(|name| format!("Firmware/{name}"))

@@ -4598,7 +4598,7 @@ dependencies = [
 
 [[package]]
 name = "zalivka"
-version = "0.2.6"
+version = "0.3.2"
 dependencies = [
  "aes",
  "anyhow",

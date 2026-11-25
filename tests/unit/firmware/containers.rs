@@ -50,7 +50,10 @@ fn large_plist_bundle_is_verified_and_oversized_bundle_is_rejected() {
     bundle.to_writer_binary(&mut binary).unwrap();
     drop(bundle);
     assert!(binary.len() > 64 * 1024 * 1024);
-    assert_eq!(verify_plist_bundle(&binary).unwrap(), HashSet::from([digest]));
+    assert_eq!(
+        verify_plist_bundle(&binary).unwrap(),
+        HashSet::from([digest])
+    );
     drop(binary);
     let mut binary = vec![0; 256 * 1024 * 1024 + 1];
     binary[..8].copy_from_slice(b"bplist00");
