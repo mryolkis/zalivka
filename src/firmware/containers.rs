@@ -8,7 +8,8 @@ use std::{
     ops::Range,
 };
 
-pub(crate) const MAX_PLIST_BUNDLE: u64 = 32 * 1024 * 1024;
+// Bound the uncompressed bundle before parsing or buffering it.
+pub(crate) const MAX_PLIST_BUNDLE: u64 = 256 * 1024 * 1024;
 
 pub(crate) fn plist_prefix(bytes: &[u8]) -> bool {
     let bytes = bytes

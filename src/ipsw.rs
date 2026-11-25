@@ -21,6 +21,9 @@ use zip::ZipArchive;
 
 pub const MAX_COMPONENT: u64 = 1024 * 1024 * 1024;
 
+// Universal macOS manifests can exceed 32 MiB. Keep decompressed metadata bounded.
+const MAX_BUILD_MANIFEST: u64 = 256 * 1024 * 1024;
+
 /// Signing-only entries may omit a path; present metadata must still be valid.
 pub(crate) fn component_path(entry: &Value) -> Result<Option<&str>> {
     let Some(path) = wire::optional(entry, &["Info", "Path"])? else {
@@ -106,10 +109,10 @@ impl Ipsw {
         let entry = archive
             .by_name("BuildManifest.plist")
             .context("IPSW has no BuildManifest.plist")?;
-        ensure!(entry.size() <= 32 * 1024 * 1024, "BuildManifest too large");
+        ensure!(entry.size() <= MAX_BUILD_MANIFEST, "BuildManifest too large");
         let manifest = wire::decode_plist(&crate::storage::read_limited(
             entry,
-            32 * 1024 * 1024,
+            MAX_BUILD_MANIFEST,
             "BuildManifest too large",
         )?)?;
         ensure!(

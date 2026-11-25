@@ -226,7 +226,12 @@ pub(super) fn nor_data(
         Value::Data(ipsw.personalized(id, llb, ticket)?),
     );
     d.insert("NorImageData".into(), images);
-    for (tag, key) in [(b"rsep", "RestoreSEPImageData"), (b"sepi", "SEPImageData")] {
+    // SepStage1 (stg1) is also requested as a dedicated SEP patch image.
+    for (tag, key) in [
+        (b"rsep", "RestoreSEPImageData"),
+        (b"sepi", "SEPImageData"),
+        (b"stg1", "SEPPatchImageData"),
+    ] {
         if let Some(name) = id.component_by_type(tag)? {
             d.insert(
                 key.into(),

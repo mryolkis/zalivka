@@ -129,15 +129,28 @@ fn optional_metadata_distinguishes_absence_from_malformed_present_values() {
 
 #[test]
 fn unframed_xml_size_limit_also_bounds_an_unterminated_comment() {
+    let limit = 64 * 1024;
     let prefix = b"<plist><!--";
     let input = prefix
         .as_slice()
-        .chain(std::io::repeat(b'x').take(MAX_PLIST as u64));
+        .chain(std::io::repeat(b'x').take(limit as u64));
     let mut input = std::io::BufReader::new(input);
-    assert!(receive_xml(&mut input).is_err());
+    assert!(receive_xml_limited(&mut input, limit).is_err());
     let mut remaining = Vec::new();
     input.read_to_end(&mut remaining).unwrap();
     assert_eq!(remaining, vec![b'x'; prefix.len()]);
+}
+
+#[test]
+fn oversized_plist_frames_are_rejected_before_reading_the_body() {
+    assert_eq!(MAX_PLIST, 512 * 1024 * 1024);
+    for length in [0, MAX_PLIST as u32 + 1, u32::MAX] {
+        let prefix = length.to_be_bytes();
+        let mut input = prefix.as_slice();
+        let error = receive(&mut input).unwrap_err();
+        assert!(error.to_string().contains("invalid plist frame length"));
+        assert!(input.is_empty());
+    }
 }
 
 #[test]

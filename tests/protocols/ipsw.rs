@@ -51,6 +51,46 @@ fn deeply_nested_manifest_is_an_error_instead_of_a_process_abort() {
 }
 
 #[test]
+fn large_build_manifests_are_accepted_up_to_the_metadata_limit() {
+    let prefix = b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+        <key>BuildIdentities</key><array><dict/></array>\
+        <key>SupportedProductTypes</key><array><string>Mac</string></array>";
+    let suffix = b"</dict></plist>";
+    let padding = vec![b' '; 1024 * 1024];
+    let limit = 256 * 1024 * 1024;
+    for size in [36_513_770usize, limit, limit + 1] {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
+        zip.start_file(
+            "BuildManifest.plist",
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(prefix).unwrap();
+        let mut remaining = size - prefix.len() - suffix.len();
+        while remaining > 0 {
+            let n = remaining.min(padding.len());
+            zip.write_all(&padding[..n]).unwrap();
+            remaining -= n;
+        }
+        zip.write_all(suffix).unwrap();
+        zip.finish().unwrap();
+        let result = Ipsw::open(file.path());
+        if size > limit {
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("BuildManifest too large")
+            );
+        } else {
+            assert!(result.is_ok(), "manifest of {size} bytes was rejected");
+        }
+    }
+}
+
+#[test]
 fn ipsw_stream_preserves_stored_and_deflated_entries_across_block_boundaries() {
     let image: Vec<_> = (0..3 * 256 * 1024 + 123).map(|i| (i % 251) as u8).collect();
     let files = [

@@ -5,7 +5,8 @@ use quick_xml::{Reader, Writer, events::Event};
 use serde::de::Error as _;
 use std::io::{BufRead, Read, Write};
 
-pub const MAX_PLIST: usize = 64 * 1024 * 1024;
+// Serialized plist body size, excluding the four-byte frame prefix.
+pub const MAX_PLIST: usize = 512 * 1024 * 1024;
 
 /// Decode XML, binary or ASCII once, checking depth before the Value builder
 /// receives each collection event.
@@ -293,7 +294,11 @@ fn read_frame_part(r: &mut impl Read, buffer: &mut [u8], part: &str) -> Result<(
 /// ASR uses unframed XML. Keep the caller's buffer across messages so read-ahead
 /// remains available for the next plist or raw payload.
 pub fn receive_xml(r: &mut impl BufRead) -> Result<Value> {
-    let mut reader = Reader::from_reader(r.take(MAX_PLIST as u64));
+    receive_xml_limited(r, MAX_PLIST)
+}
+
+fn receive_xml_limited(r: &mut impl BufRead, limit: usize) -> Result<Value> {
+    let mut reader = Reader::from_reader(r.take(limit as u64));
     let mut writer = Writer::new(Vec::new());
     let mut buffer = Vec::new();
     let mut depth = 0usize;
@@ -318,7 +323,7 @@ pub fn receive_xml(r: &mut impl BufRead) -> Result<Value> {
             Event::Empty(tag) if depth == 0 => {
                 ensure!(tag.name().as_ref() == "plist", "ASR XML root is not plist");
             }
-            Event::Eof => bail!("truncated ASR XML or message exceeds {MAX_PLIST} bytes"),
+            Event::Eof => bail!("truncated ASR XML or message exceeds {limit} bytes"),
             _ => {}
         }
         let finished = depth == 0 && matches!(event, Event::End(_) | Event::Empty(_));

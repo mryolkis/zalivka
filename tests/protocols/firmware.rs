@@ -1367,7 +1367,7 @@ fn namespace_bundle_limit_is_checked_before_reading_and_raw_manifest_hashes_are_
     assert!(ipsw.component(&id, "New,ArbitraryComponent").is_ok());
     assert!(ipsw.verify_all_with_options(&Default::default()).is_ok());
 
-    let mut oversized = vec![0; 32 * 1024 * 1024 + 1];
+    let mut oversized = vec![0; 256 * 1024 * 1024 + 1];
     oversized[..8].copy_from_slice(b"bplist00");
     let file = fixture_compression(
         Some(id.clone()),
@@ -1375,6 +1375,7 @@ fn namespace_bundle_limit_is_checked_before_reading_and_raw_manifest_hashes_are_
         &[("arbitrary/path.plist", &oversized)],
         zip::CompressionMethod::Deflated,
     );
+    drop(oversized);
     let mut ipsw = Ipsw::open(file.path()).unwrap();
     let error = ipsw
         .verify_all_with_options(&Default::default())

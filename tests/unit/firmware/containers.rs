@@ -41,6 +41,28 @@ fn bundle_records_are_verified_recursively_and_metadata_alone_is_insufficient() 
 }
 
 #[test]
+fn large_plist_bundle_is_verified_and_oversized_bundle_is_rejected() {
+    let payload = vec![0x5a; 65 * 1024 * 1024];
+    let digest = Sha256::digest(&payload).to_vec();
+    let bundle = record(&payload, &digest);
+    drop(payload);
+    let mut binary = Vec::new();
+    bundle.to_writer_binary(&mut binary).unwrap();
+    drop(bundle);
+    assert!(binary.len() > 64 * 1024 * 1024);
+    assert_eq!(verify_plist_bundle(&binary).unwrap(), HashSet::from([digest]));
+    drop(binary);
+    let mut binary = vec![0; 256 * 1024 * 1024 + 1];
+    binary[..8].copy_from_slice(b"bplist00");
+    assert!(
+        verify_plist_bundle(&binary)
+            .unwrap_err()
+            .to_string()
+            .contains("plist payload bundle exceeds memory limit")
+    );
+}
+
+#[test]
 fn repeated_bundle_digests_do_not_skip_verification_of_another_payload() {
     let digest = Sha256::digest(b"firmware").to_vec();
     for corrupt in [false, true] {

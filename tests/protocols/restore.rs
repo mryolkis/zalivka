@@ -1878,7 +1878,7 @@ fn async_completion_releases_ports_and_leaves_the_control_channel_available() {
 #[test]
 fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
     let bytes = im4p(b"test");
-    let names = ["LLB", "Auxiliary", "iBoot", "RestoreSEP", "SEP"];
+    let names = ["LLB", "Auxiliary", "iBoot", "RestoreSEP", "SEP", "SepStage1"];
     let paths: Vec<_> = names
         .iter()
         .map(|name| format!("Firmware/{name}"))
@@ -1906,6 +1906,7 @@ fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
                     "iBoot" => "ibot",
                     "RestoreSEP" => "rsep",
                     "SEP" => "sepi",
+                    "SepStage1" => "stg1",
                     _ => "test",
                 }
                 .into(),
@@ -1913,7 +1914,10 @@ fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
         entry.as_dictionary_mut().unwrap()["Info"]
             .as_dictionary_mut()
             .unwrap()
-            .insert("IsFirmwarePayload".into(), (name != "SEP").into());
+            .insert(
+                "IsFirmwarePayload".into(),
+                (!matches!(name, "SEP" | "SepStage1")).into(),
+            );
         manifest.insert(name.into(), entry);
     }
     let id = state.context.restore.identity.clone();
@@ -1953,6 +1957,7 @@ fn nor_formats_preserve_firmware_order_and_separate_llb_and_sep_images() {
             ("LlbImageData", "LLB"),
             ("RestoreSEPImageData", "RestoreSEP"),
             ("SEPImageData", "SEP"),
+            ("SEPPatchImageData", "SepStage1"),
         ] {
             assert_eq!(wire::get(&reply, &[key]).unwrap(), &expected[name]);
         }
@@ -2133,6 +2138,11 @@ fn large_nor_reply_crosses_mux_windows_and_allows_the_next_checkpoint() {
     ] {
         assert_eq!(wire::get(&reply, &[key]).unwrap(), &expected[name]);
     }
+    assert!(
+        wire::optional(&reply, &["SEPPatchImageData"])
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         wire::get(&reply, &["NorImageData", "iBoot"]).unwrap(),
         &expected["iBoot"]
